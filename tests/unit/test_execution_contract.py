@@ -5,6 +5,7 @@ from threading import Event
 
 import pytest
 
+from bg6022.agent import Agent
 from bg6022.config import load_config
 from bg6022.models import InputReference, Plan, Request, Run, Step
 from bg6022.orca.runner import ProcessFacts
@@ -16,6 +17,7 @@ from bg6022.session import (
     utc_now,
 )
 from bg6022.tools.orca import OptimizeParameters, SinglePointParameters, execute_orca_step
+from bg6022.tools.registry import build_registry
 
 
 def _config(tmp_path: Path, *, run_timeout: int = 3600):
@@ -185,3 +187,78 @@ def test_failed_opt_with_missing_xyz_can_publish_only_restart_candidate(
     assert len(candidates) == 1
     assert candidates[0].metadata["eligible_for"] == "optimization_restart_only"
     assert candidates[0].size_bytes > 0
+
+
+def test_residual_process_failure_has_no_public_values_and_stops_following_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    source = Path(config.config_path).parent / "water.xyz"
+    source.write_bytes(b"1\nhydrogen\nH 0 0 0\n")
+    request = Request(id="request_agent", description="test")
+    parameters = {"charge": -1, "multiplicity": 1}
+    plan = Plan(
+        id="plan_agent",
+        request_id=request.id,
+        steps=[
+            Step(
+                id="first",
+                tool="single_point",
+                parameters=parameters,
+                inputs={
+                    "geometry": InputReference(artifact_id="__input_geometry__"),
+                },
+            ),
+            Step(
+                id="second",
+                tool="single_point",
+                parameters=parameters,
+                inputs={
+                    "geometry": InputReference(artifact_id="__input_geometry__"),
+                },
+            ),
+        ],
+    )
+    monkeypatch.setattr("bg6022.agent.validate_execution_environment", lambda config: None)
+    monkeypatch.setattr("bg6022.tools.orca.validate_execution_environment", lambda config: None)
+    calls = 0
+    stdout = (
+        b"SCF CONVERGED AFTER 1 CYCLES\n"
+        b"FINAL SINGLE POINT ENERGY -76.000000000000\n"
+        b"****ORCA TERMINATED NORMALLY****\n"
+        b"TOTAL RUN TIME: 0 days 0 hours 0 minutes 0 seconds 0 msec\n"
+    )
+
+    def fake_runner(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise AssertionError("a failed step must not start its successor")
+        attempt_dir = Path(kwargs["attempt_dir"])
+        started = ProcessFacts(
+            status="failed",
+            exit_code=0,
+            stop_reason="residual_processes_terminated",
+            process_tree_empty=True,
+            stop_confirmed=True,
+            pid=1234,
+        )
+        kwargs["on_started"](started)
+        (attempt_dir / "stdout.out").write_bytes(stdout)
+        (attempt_dir / "stderr.txt").write_bytes(b"")
+        clear_execution_guard(kwargs["data_root"], kwargs["execution_id"])
+        return started
+
+    monkeypatch.setattr("bg6022.tools.orca.run_orca", fake_runner)
+    run, result = Agent(config, build_registry(config)).execute_plan(
+        request,
+        plan,
+        xyz_path=source,
+        execute=True,
+    )
+
+    assert calls == 1
+    assert result.status == "failed"
+    assert result.values == {}
+    assert result.output_ports == {}
+    assert run.step_status == {"first": "failed"}

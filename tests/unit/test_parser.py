@@ -164,3 +164,98 @@ def test_valid_d_exponent_and_input_hash_check_are_explicit() -> None:
     assert facts.final_energy is not None and facts.final_energy.value == -76.0
     assert not outcome.success
     assert outcome.failure_category == "input_integrity_error"
+
+
+def test_sp_does_not_reuse_energy_before_an_unbound_later_scf() -> None:
+    initial = parse_xyz_bytes(b"1\nhydrogen\nH 0 0 0\n")
+    stdout = (
+        b"SCF CONVERGED AFTER 1 CYCLES\n"
+        b"FINAL SINGLE POINT ENERGY -76.000000000000\n"
+        b"SCF CONVERGED AFTER 1 CYCLES\n"
+        b"****ORCA TERMINATED NORMALLY****\n"
+        b"TOTAL RUN TIME: 0 days 0 hours 0 minutes 0 seconds 0 msec\n"
+    )
+
+    facts = inspect_attempt(
+        operation="SP",
+        stdout=stdout,
+        stderr=b"",
+        exit_code=0,
+        runner_status="succeeded",
+        input_geometry=initial,
+        process_tree_empty=True,
+    )
+    outcome = evaluate_success(facts, operation="SP")
+
+    assert not outcome.success
+    assert facts.error_category == "invalid_output"
+    assert facts.final_energy is None
+    assert facts.final_energy_error == (
+        "later SCF convergence has no corresponding final energy record"
+    )
+    assert len(facts.energies) == 1
+    assert facts.source_locations["final_scf"] is None
+    assert facts.source_locations["unbound_scf"] == 3
+
+
+def test_opt_does_not_publish_geometry_when_a_later_scf_is_unbound() -> None:
+    initial = parse_xyz_bytes((FIXTURE / "geometry.xyz").read_bytes())
+    stdout = (FIXTURE / "stdout.out").read_bytes()
+    marker = b"****ORCA TERMINATED NORMALLY****"
+    damaged = stdout.replace(
+        marker,
+        b"SCF CONVERGED AFTER 1 CYCLES\n" + marker,
+        1,
+    )
+
+    facts = inspect_attempt(
+        operation="Opt",
+        stdout=damaged,
+        stderr=b"",
+        exit_code=0,
+        runner_status="succeeded",
+        input_geometry=initial,
+        process_tree_empty=True,
+        output_xyz=(FIXTURE / "input.xyz").read_bytes(),
+    )
+    outcome = evaluate_success(facts, operation="Opt")
+
+    assert not outcome.success
+    assert facts.error_category == "invalid_output"
+    assert facts.final_energy is None
+    assert facts.final_energy_error == (
+        "later SCF convergence has no corresponding final energy record"
+    )
+    assert facts.source_locations["final_scf"] is None
+    assert facts.source_locations["unbound_scf"] is not None
+    assert facts.output_geometry is not None
+    assert facts.stdout_geometry is not None
+
+
+def test_sp_selects_the_second_complete_energy_record() -> None:
+    initial = parse_xyz_bytes(b"1\nhydrogen\nH 0 0 0\n")
+    stdout = (
+        b"SCF CONVERGED AFTER 1 CYCLES\n"
+        b"FINAL SINGLE POINT ENERGY -76.000000000000\n"
+        b"SCF CONVERGED AFTER 1 CYCLES\n"
+        b"FINAL SINGLE POINT ENERGY -7.6D+01\n"
+        b"****ORCA TERMINATED NORMALLY****\n"
+        b"TOTAL RUN TIME: 0 days 0 hours 0 minutes 0 seconds 0 msec\n"
+    )
+
+    facts = inspect_attempt(
+        operation="SP",
+        stdout=stdout,
+        stderr=b"",
+        exit_code=0,
+        runner_status="succeeded",
+        input_geometry=initial,
+        process_tree_empty=True,
+    )
+    outcome = evaluate_success(facts, operation="SP")
+
+    assert outcome.success
+    assert facts.final_energy is not None
+    assert facts.final_energy.token == "-7.6D+01"
+    assert facts.final_energy.value == -76.0
+    assert facts.source_locations["final_scf"] == 3

@@ -27,6 +27,8 @@ from .windows_job import (
     process_start_marker,
 )
 
+_PROBE_OUTPUT_LIMIT_BYTES = 1024 * 1024
+
 
 @dataclass(frozen=True)
 class RunnerResources:
@@ -322,6 +324,9 @@ def _teardown_process(
                     time.sleep(0.02)
                     active = job.active_process_count()
             if active:
+                if not needs_stop and facts.status == "succeeded":
+                    facts.status = "failed"
+                    facts.stop_reason = "residual_processes_terminated"
                 try:
                     job.terminate(1)
                     facts.stop_request_sent = True
@@ -481,6 +486,7 @@ def _probe_once(exe: Path, timeout_seconds: float, data_root: Path | None) -> di
         stderr_handle = None
         assigned = False
         resumed = False
+        control_reason: str | None = None
         try:
             stdout_handle = stdout_path.open("wb")
             stderr_handle = stderr_path.open("wb")
@@ -504,14 +510,16 @@ def _probe_once(exe: Path, timeout_seconds: float, data_root: Path | None) -> di
             resumed = True
             end = time.monotonic() + timeout_seconds
             while process.poll() is None and time.monotonic() < end:
-                if _file_size(stdout_path) + _file_size(stderr_path) > 1024 * 1024:
+                if _file_size(stdout_path) + _file_size(stderr_path) >= _PROBE_OUTPUT_LIMIT_BYTES:
+                    control_reason = "probe_output_limit_exceeded"
                     facts.status = "failed"
-                    facts.stop_reason = "probe_output_limit_exceeded"
+                    facts.stop_reason = control_reason
                     break
                 time.sleep(0.02)
             if process.poll() is None:
-                facts.status = "timed_out"
-                facts.stop_reason = "probe_timeout"
+                if control_reason is None:
+                    facts.status = "timed_out"
+                    facts.stop_reason = "probe_timeout"
                 _teardown_process(
                     process,
                     job,
@@ -522,8 +530,12 @@ def _probe_once(exe: Path, timeout_seconds: float, data_root: Path | None) -> di
                 )
             else:
                 facts.exit_code = process.returncode
-                facts.status = "succeeded" if process.returncode == 0 else "failed"
-                facts.stop_reason = facts.stop_reason or "normal_exit"
+                if control_reason is None:
+                    facts.status = "succeeded" if process.returncode == 0 else "failed"
+                    facts.stop_reason = "normal_exit" if process.returncode == 0 else "nonzero_exit"
+                else:
+                    facts.status = "failed"
+                    facts.stop_reason = control_reason
                 _teardown_process(
                     process,
                     job,
@@ -567,6 +579,12 @@ def _probe_once(exe: Path, timeout_seconds: float, data_root: Path | None) -> di
             if data_root is not None:
                 _finalize_execution_guard(data_root, execution_id, facts)
 
+        if _file_size(stdout_path) + _file_size(
+            stderr_path
+        ) >= _PROBE_OUTPUT_LIMIT_BYTES and facts.stop_reason in {"normal_exit", "nonzero_exit"}:
+            facts.status = "failed"
+            facts.stop_reason = "probe_output_limit_exceeded"
+
         stdout = _read_limited(stdout_path, 64 * 1024).decode("utf-8", errors="replace")
         stderr = _read_limited(stderr_path, 64 * 1024).decode("utf-8", errors="replace")
         text = f"{stdout}\n{stderr}"
@@ -577,13 +595,36 @@ def _probe_once(exe: Path, timeout_seconds: float, data_root: Path | None) -> di
         )
         if match is None:
             match = re.search(r"ORCA\s+([0-9]+\.[0-9]+(?:\.[0-9]+)?)", text, re.I)
+        natural_exit = facts.stop_reason in {"normal_exit", "nonzero_exit"}
+        if not natural_exit:
+            reason = facts.stop_reason or "probe_failed"
+        elif facts.cleanup_error:
+            reason = "probe_cleanup_error"
+        elif facts.exception:
+            reason = "probe_exception"
+        elif facts.stop_request_sent:
+            reason = "probe_stop_requested"
+        elif not facts.stop_confirmed or facts.process_tree_empty is not True:
+            reason = "probe_cleanup_unconfirmed"
+        elif match is None:
+            reason = "version_not_found"
+        else:
+            reason = None
         return {
-            "ok": match is not None and facts.stop_confirmed,
+            "ok": (
+                match is not None
+                and natural_exit
+                and not facts.stop_request_sent
+                and facts.exception is None
+                and facts.cleanup_error is None
+                and facts.stop_confirmed
+                and facts.process_tree_empty is True
+            ),
             "version": None if match is None else match.group(1),
             "exit_code": facts.exit_code,
             "stdout_preview": stdout[-2000:],
             "stderr_preview": stderr[-2000:],
-            "reason": None if match is not None else "version_not_found",
+            "reason": reason,
             "process": facts.to_dict(),
         }
 

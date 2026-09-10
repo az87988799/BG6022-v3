@@ -150,6 +150,13 @@ def inspect_attempt(
     final_energy, final_energy_error, final_section = _select_final_energy(
         stdout_text, operation, energies
     )
+    unbound_scf = None
+    if final_energy is not None and final_energy_error is None:
+        later_scfs = [match for match in scf_matches if match.start() > final_energy.offset]
+        if later_scfs:
+            unbound_scf = later_scfs[-1]
+            final_energy_error = "later SCF convergence has no corresponding final energy record"
+            final_energy = None
     normal_termination = _normal_termination_is_clean(stdout_text, normal_matches)
     scf_converged = _scf_is_bound(final_energy, energies, scf_matches, scf_failure)
 
@@ -242,6 +249,9 @@ def inspect_attempt(
         "final_scf": None
         if final_scf is None
         else _line_for_offset(stdout_text, final_scf.start()),
+        "unbound_scf": None
+        if unbound_scf is None
+        else _line_for_offset(stdout_text, unbound_scf.start()),
         "optimization_converged": _line_for_offset(stdout_text, optimization_match.start())
         if optimization_match
         else None,
