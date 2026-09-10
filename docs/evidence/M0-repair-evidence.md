@@ -41,8 +41,8 @@ it omits GBW files, the virtual environment, and the ORCA installation.
 
 Validation result: `46 passed, 1 deselected`; both Windows process-tree
 integration tests passed; `ruff check`, format check, `compileall`, `uv build`,
-and whitespace checks passed. The M0 acceptance record remains awaiting the
-user's review and acceptance.
+and whitespace checks passed. The user accepted M0 on 2026-09-11 after reviewing
+the pushed implementation and this evidence package.
 
 Validation commands and the observed acceptance record are in
 [`docs/acceptance.md`](../acceptance.md).

@@ -1,10 +1,12 @@
 # M0 acceptance record
 
-This file records facts only. M0 is not marked complete until the user has
-accepted the implementation after reviewing the pushed commit.
+This file records facts only. The user accepted M0 on 2026-09-11 after reviewing
+the pushed implementation and the readable evidence package. The acceptance
+record and the requested VS Code settings are included in the acceptance commit.
 
 | Item | Evidence | Status |
 |---|---|---|
+| User acceptance | User reviewed the pushed implementation and explicitly requested M0 acceptance on 2026-09-11 | accepted |
 | Independent install | Python 3.11.4 package build and package-outside-source help | passed |
 | Implementation commit | `b1ba4e50dbaf1e14e8484db3e4aa521af80c0ac8` closes the parser, residual-process, and probe defects | passed |
 | Offline regression | `46 passed, 1 deselected` with live ORCA disabled, including the new M0 minimal-fix regressions | passed |
