@@ -34,6 +34,95 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def execution_guard_path(data_root: str | Path) -> Path:
+    return Path(data_root).resolve() / "execution_guard.json"
+
+
+def read_execution_guard(data_root: str | Path) -> dict[str, Any] | None:
+    path = execution_guard_path(data_root)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"execution guard exists but cannot be read: {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"execution guard is not a JSON object: {path}")
+    return payload
+
+
+def write_execution_guard(data_root: str | Path, payload: dict[str, Any]) -> None:
+    """Atomically persist the marker that means execution is not confirmed ended."""
+
+    atomic_write_json(execution_guard_path(data_root), payload)
+
+
+def clear_execution_guard(data_root: str | Path, execution_id: str) -> bool:
+    """Remove only a guard owned by ``execution_id``; return whether it was removed."""
+
+    path = execution_guard_path(data_root)
+    if not path.exists():
+        return True
+    payload = read_execution_guard(data_root)
+    if payload is None:
+        return True
+    owner = payload.get("execution_id")
+    if owner != execution_id:
+        raise RuntimeError(f"execution guard at {path} belongs to {owner!r}, not {execution_id!r}")
+    path.unlink()
+    return True
+
+
+def execution_fingerprint(
+    plan: Any,
+    resources: dict[str, Any],
+    initial_artifacts: list[Artifact],
+) -> str:
+    """Hash stable execution content, excluding mutable run state and clocks."""
+
+    referenced_ids = {
+        reference.artifact_id
+        for step in plan.steps
+        for reference in step.inputs.values()
+        if reference.artifact_id is not None
+    }
+    direct = [
+        {
+            "id": artifact.id,
+            "artifact_type": artifact.artifact_type,
+            "sha256": artifact.sha256,
+        }
+        for artifact in initial_artifacts
+        if artifact.id in referenced_ids
+    ]
+    payload = {
+        "plan": plan.model_dump(mode="json"),
+        "resources": {key: resources[key] for key in sorted(resources)},
+        "initial_artifacts": sorted(direct, key=lambda item: item["id"]),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return sha256_bytes(encoded)
+
+
+def _guard_message(path: Path) -> str:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return f"execution guard exists at {path}; process cleanup must be explicitly verified"
+    if isinstance(payload, dict):
+        run_id = payload.get("run_id", "unknown")
+        phase = payload.get("phase", "unknown")
+        reason = payload.get("reason")
+        suffix = f", reason={reason}" if reason else ""
+        return (
+            f"execution guard exists at {path} (run_id={run_id}, phase={phase}{suffix}); "
+            "process cleanup must be explicitly verified"
+        )
+    return f"execution guard exists at {path}; process cleanup must be explicitly verified"
+
+
 class RuntimeLock:
     """One-byte cross-process lock for a data root."""
 
@@ -44,11 +133,6 @@ class RuntimeLock:
 
     def __enter__(self) -> RuntimeLock:
         self.data_root.mkdir(parents=True, exist_ok=True)
-        guard = self.data_root / "execution_guard.json"
-        if guard.exists():
-            raise RuntimeError(
-                f"execution guard exists at {guard}; process cleanup must be explicitly verified"
-            )
         self._handle = self.path.open("a+b")
         self._handle.seek(0)
         self._handle.write(b"0")
@@ -69,6 +153,11 @@ class RuntimeLock:
             raise RuntimeError(
                 f"another real calculation is active for {self.data_root}"
             ) from error
+        guard = execution_guard_path(self.data_root)
+        if guard.exists():
+            message = _guard_message(guard)
+            self.__exit__(None, None, None)
+            raise RuntimeError(message)
         return self
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
@@ -258,10 +347,14 @@ __all__ = [
     "attempt_directory",
     "atomic_write_bytes",
     "atomic_write_json",
+    "clear_execution_guard",
     "create_run",
+    "execution_fingerprint",
+    "execution_guard_path",
     "find_artifact",
     "load_run",
     "new_id",
+    "read_execution_guard",
     "register_bytes_artifact",
     "register_file_artifact",
     "run_directory",
@@ -270,4 +363,5 @@ __all__ = [
     "sha256_bytes",
     "sha256_file",
     "utc_now",
+    "write_execution_guard",
 ]

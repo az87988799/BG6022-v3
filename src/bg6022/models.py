@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 RunStatus = Literal["planned", "running", "succeeded", "failed", "cancelled", "interrupted"]
 ResultStatus = Literal["succeeded", "failed", "cancelled", "interrupted"]
@@ -103,7 +104,8 @@ class Run(StrictModel):
     request: Request
     plan: Plan
     resources: dict[str, Any]
-    execution_permission: bool
+    execution_permission: bool = False
+    accepted_execution_sha256: str | None = None
     status: RunStatus = "planned"
     step_status: dict[str, str] = Field(default_factory=dict)
     attempts: list[dict[str, Any]] = Field(default_factory=list)
@@ -112,6 +114,45 @@ class Run(StrictModel):
     active_seconds: float = 0.0
     created_at: str
     updated_at: str
+
+    _active_interval_started_at: float | None = PrivateAttr(default=None)
+
+    def start_active_interval(self, *, now: float | None = None) -> None:
+        """Start the one active execution interval, without changing its total."""
+
+        if self._active_interval_started_at is None:
+            self._active_interval_started_at = time.monotonic() if now is None else now
+
+    @property
+    def active_interval_open(self) -> bool:
+        return self._active_interval_started_at is not None
+
+    def current_active_seconds(self, *, now: float | None = None) -> float:
+        """Return persisted active time plus the currently open interval."""
+
+        elapsed = max(0.0, float(self.active_seconds))
+        if self._active_interval_started_at is not None:
+            current = time.monotonic() if now is None else now
+            elapsed += max(0.0, current - self._active_interval_started_at)
+        return elapsed
+
+    def checkpoint_active(self, *, now: float | None = None) -> float:
+        """Accumulate the open interval exactly once and leave it open."""
+
+        if self._active_interval_started_at is not None:
+            current = time.monotonic() if now is None else now
+            self.active_seconds += max(0.0, current - self._active_interval_started_at)
+            self._active_interval_started_at = current
+        return self.active_seconds
+
+    def finish_active_interval(self, *, now: float | None = None) -> float:
+        """Accumulate and close the current active interval."""
+
+        if self._active_interval_started_at is not None:
+            current = time.monotonic() if now is None else now
+            self.active_seconds += max(0.0, current - self._active_interval_started_at)
+            self._active_interval_started_at = None
+        return self.active_seconds
 
 
 ExecuteFunction = Callable[[Step, Run, Any], Result]
@@ -122,6 +163,7 @@ class Tool(StrictModel):
     description: str
     parameter_model: str
     parameter_schema: dict[str, Any]
+    parameter_type: type[BaseModel] | None = Field(default=None, exclude=True, repr=False)
     input_ports: dict[str, str] = Field(default_factory=dict)
     output_ports: dict[str, str] = Field(default_factory=dict)
     results: dict[str, str] = Field(default_factory=dict)
@@ -137,6 +179,13 @@ class Tool(StrictModel):
         if self.execute_function is None:
             raise RuntimeError(f"tool {self.name!r} has no executable implementation")
         return self.execute_function(step, run, cancel)
+
+    def validate_parameters(self, parameters: dict[str, Any]) -> dict[str, Any]:
+        if self.parameter_type is None:
+            raise ValueError(f"tool {self.name!r} has no parameter model")
+        return self.parameter_type.model_validate(parameters, strict=True).model_dump(
+            mode="python", exclude_none=True
+        )
 
     def description_json(self) -> dict[str, Any]:
         return self.model_dump(mode="json", exclude={"execute_function"})

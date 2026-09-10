@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from threading import Event
 
-from .config import AppConfig
+from .config import AppConfig, validate_execution_environment
 from .models import InputReference, Plan, Request, Result, Run, Step
 from .session import (
+    execution_fingerprint,
     register_file_artifact,
     run_directory,
     save_result,
@@ -35,6 +35,7 @@ class Agent:
         *,
         xyz_path: str | Path,
         cancel: Event | None = None,
+        execute: bool = False,
     ) -> tuple[Run, Result]:
         if not request.id or plan.request_id != request.id:
             raise ValueError("Plan.request_id must match Request.id")
@@ -42,7 +43,10 @@ class Agent:
             raise ValueError("Plan must contain at least one Step")
         if not any(step.inputs.get("geometry") is not None for step in plan.steps):
             raise ValueError("M0 ORCA execution requires a geometry input")
+        if not execute:
+            raise PermissionError("execution permission was not explicitly granted")
         self.registry.validate_plan(plan)
+        validate_execution_environment(self.config)
         geometry_path = Path(xyz_path).resolve()
         geometry = parse_xyz_bytes(geometry_path.read_bytes())
         del geometry
@@ -52,7 +56,7 @@ class Agent:
             request=request,
             plan=plan,
             resources=self.config.resources,
-            execution_permission=True,
+            execution_permission=execute,
             status="planned",
             created_at=utc_now(),
             updated_at=utc_now(),
@@ -69,9 +73,12 @@ class Agent:
             metadata={"imported_as_raw_bytes": True},
         )
         run.plan = _bind_input_geometry(plan, initial_artifact.id)
+        run.accepted_execution_sha256 = execution_fingerprint(
+            run.plan, run.resources, [initial_artifact]
+        )
         save_run(self.config.data_root_path, run)
         run.status = "running"
-        started = time.monotonic()
+        run.start_active_interval()
         save_run(self.config.data_root_path, run)
         last_result: Result | None = None
         try:
@@ -81,8 +88,6 @@ class Agent:
                 save_run(self.config.data_root_path, run)
                 result = tool.execute(step, run, cancel=cancel_event)
                 last_result = result
-                run.active_seconds += time.monotonic() - started
-                started = time.monotonic()
                 save_result(self.config.data_root_path, run, result)
                 run.result_index.append(result.attempt_relative_path + "/result.json")
                 run.step_status[step.id] = result.status
@@ -98,15 +103,16 @@ class Agent:
             return run, last_result
         except KeyboardInterrupt:
             cancel_event.set()
-            run.active_seconds += time.monotonic() - started
             run.status = "cancelled"
             save_run(self.config.data_root_path, run)
             raise
         except Exception:
-            run.active_seconds += time.monotonic() - started
             run.status = "failed"
             save_run(self.config.data_root_path, run)
             raise
+        finally:
+            run.finish_active_interval()
+            save_run(self.config.data_root_path, run)
 
 
 def _bind_input_geometry(plan: Plan, artifact_id: str) -> Plan:

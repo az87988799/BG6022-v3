@@ -23,8 +23,15 @@ def evaluate_success(facts: AttemptFacts, *, operation: str) -> CheckOutcome:
         "exit_code_zero": facts.exit_code == 0,
         "process_tree_empty": facts.process_tree_empty is True,
         "normal_termination": facts.normal_termination is True,
+        "stdout_valid_utf8": facts.stdout_valid_utf8,
         "scf_converged": facts.scf_converged is True,
-        "finite_final_energy": final_energy is not None and math.isfinite(final_energy.value),
+        "final_energy_selected": final_energy is not None and facts.final_energy_error is None,
+        "finite_final_energy": (
+            final_energy is not None
+            and final_energy.value is not None
+            and math.isfinite(final_energy.value)
+        ),
+        "input_hashes_match": facts.input_hashes_match,
     }
     if operation == "Opt":
         checks.update(
@@ -44,8 +51,12 @@ def evaluate_success(facts: AttemptFacts, *, operation: str) -> CheckOutcome:
 def _failure_category(facts: AttemptFacts, operation: str, checks: dict[str, Any]) -> str:
     if facts.error_category:
         return facts.error_category
+    if not checks["input_hashes_match"]:
+        return "input_integrity_error"
     if not checks["process_tree_empty"]:
         return "cleanup_unconfirmed"
+    if facts.final_energy_error is not None or not checks["stdout_valid_utf8"]:
+        return "invalid_output"
     if not checks["scf_converged"]:
         return "scf_not_converged"
     if operation == "Opt" and not checks.get("optimization_converged"):

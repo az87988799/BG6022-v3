@@ -6,13 +6,28 @@ accepted the implementation after reviewing the pushed commit.
 | Item | Evidence | Status |
 |---|---|---|
 | Independent install | Python 3.11.4 package build and package-outside-source help | passed |
-| Offline regression | `18 passed, 1 deselected` with live ORCA disabled | passed |
+| Offline regression | `32 passed, 1 deselected` with live ORCA disabled, including M0 repair regressions | passed |
 | Original fixture | Three expected SHA-256 values and byte-preserving fixture copy | passed |
 | Windows controls | Windows parent/child cancellation integration test passed | passed |
-| Real SP | Run `run_a50fa185c4ca4870baa96aecfff46cb9`, ORCA 6.1.1, 4-core input/output evidence | passed |
-| Real Opt | Run `run_9d169f9d6bb540c8a67c603b6ac8898a`, converged energy/final geometry, unchanged initial hash | passed |
-| Failure facts | Run `run_7ea3b32a1b7e4f27a0e62a88367f0c8f` retained `opt_not_converged` and `restart_candidate` | passed |
+| Real SP | Repair-version run `run_0d66e2666d4c44f680c888a2ded130bf`, ORCA 6.1.1, 4-core input/output evidence, active time persisted | passed |
+| Real Opt | Repair-version run `run_5a42ae6d30ef47499e3c794d15112f46`, converged energy/final geometry, unchanged initial hash, active time persisted | passed |
+| Failure facts | Existing run `run_7ea3b32a1b7e4f27a0e62a88367f0c8f` replayed with repaired parser; retained `opt_not_converged` and `restart_candidate` | passed |
 | Architecture boundary | No v2 runtime dependency, no fixed three-step protocol, two public tools | passed |
+
+## M0 minimal repair evidence
+
+The repair pass keeps the same seven durable objects and two Tool implementations.
+It adds explicit execution permission and an accepted execution fingerprint, a
+single lock-scoped execution guard, bounded runner teardown, a real active-time
+clock, final-input hash checks, single-source Tool metadata, and pure preview/query
+configuration loading. The repaired parser selects the final energy from the
+appropriate ORCA section and retains malformed final records as diagnostics.
+
+The repaired real runs used Python 3.11.4, ORCA 6.1.1 at `E:\orca\orca.exe`,
+`r2SCAN-3c`, gas phase, charge `0`, multiplicity `1`, `%pal nprocs 4`,
+`%maxcore 384`, a 2048 MB Job Object limit, and concurrency `1`. Both runs
+reported `process_tree_empty=true`, `stop_confirmed=true`, and no remaining
+`execution_guard.json`.
 
 The historical fixture has these expected hashes:
 
@@ -40,8 +55,12 @@ The local configuration used ORCA `E:\orca\orca.exe`, Program Version 6.1.1,
 `%maxcore 384`, and a 2048 MB Job Object limit.
 
 - SP: `run_a50fa185c4ca4870baa96aecfff46cb9`; parsed
-  `sp_electronic_energy = -76.417246084177 Eh`.
+  `sp_electronic_energy = -76.417246084177 Eh` (pre-repair baseline).
+- Repair SP: `run_0d66e2666d4c44f680c888a2ded130bf`; parsed
+  `sp_electronic_energy = -76.417246084177 Eh` and active time was persisted.
 - Opt: `run_9d169f9d6bb540c8a67c603b6ac8898a`; parsed
+  `opt_final_electronic_energy = -76.418938721015 Eh` (pre-repair baseline).
+- Repair Opt: `run_5a42ae6d30ef47499e3c794d15112f46`; parsed
   `opt_final_electronic_energy = -76.418938721015 Eh`; the final `input.xyz`
   was bound as `optimized_geometry`, and stdout geometry comparison passed.
 - Controlled failure: `run_7ea3b32a1b7e4f27a0e62a88367f0c8f` with

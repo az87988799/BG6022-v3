@@ -6,6 +6,7 @@ import ctypes
 import os
 import sys
 import tomllib
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -97,19 +98,27 @@ def _available_physical_memory_bytes() -> int | None:
     return None
 
 
-def validate_runtime_capacity(config: AppConfig) -> None:
+def validate_runtime_capacity(config: AppConfig, *, check_available_memory: bool = False) -> None:
     runtime = config.runtime
     if runtime.cores * runtime.maxcore_mb > (runtime.memory_mb * 75) // 100:
         raise ValueError("cores * maxcore_mb must not exceed 75% of memory_mb")
-    available = _available_physical_memory_bytes()
-    if available is not None and available < runtime.memory_mb * 1024 * 1024:
-        raise ValueError(
-            f"available physical memory ({available} bytes) is below the configured "
-            f"budget ({runtime.memory_mb * 1024 * 1024} bytes)"
-        )
+    if check_available_memory:
+        available = _available_physical_memory_bytes()
+        if available is not None and available < runtime.memory_mb * 1024 * 1024:
+            raise ValueError(
+                f"available physical memory ({available} bytes) is below the configured "
+                f"budget ({runtime.memory_mb * 1024 * 1024} bytes)"
+            )
 
 
-def load_config(path: str | Path, *, create_data_root: bool = True) -> AppConfig:
+def load_config(path: str | Path, *, create_data_root: bool = False) -> AppConfig:
+    """Read and validate static TOML configuration only.
+
+    This function deliberately does not inspect ORCA, available memory, or the
+    data directory.  Those checks belong to ``validate_execution_environment``
+    at the real execution boundary so previews and historical queries remain
+    usable when the current machine is not ready to calculate.
+    """
     config_path = Path(path).expanduser().resolve()
     if not config_path.is_file():
         raise FileNotFoundError(f"configuration file does not exist: {config_path}")
@@ -144,26 +153,31 @@ def load_config(path: str | Path, *, create_data_root: bool = True) -> AppConfig
         raise ValueError(f"configuration is missing {error.args[0]!r}") from error
     except Exception as error:
         raise ValueError(f"invalid configuration: {error}") from error
-    executable = Path(model.executable_path)
-    if executable.suffix.casefold() != ".exe" or not executable.is_file():
-        raise ValueError(f"ORCA executable is not an existing .exe file: {executable}")
-    data_root = Path(model.data_root_path)
-    if create_data_root:
-        data_root.mkdir(parents=True, exist_ok=True)
-    if not data_root.is_dir():
-        raise ValueError(f"data_root is not a directory: {data_root}")
-    try:
-        probe = data_root / ".bg6022-write-probe"
-        probe.write_bytes(b"probe")
-        probe.unlink()
-    except OSError as error:
-        raise ValueError(f"data_root is not writable: {data_root}: {error}") from error
     if model.defaults.method_profile != "r2scan3c":
         raise ValueError(f"unsupported default method profile: {model.defaults.method_profile}")
     if model.defaults.environment != "gas":
         raise ValueError(f"unsupported default environment: {model.defaults.environment}")
     validate_runtime_capacity(model)
     return model
+
+
+def validate_execution_environment(config: AppConfig) -> None:
+    """Validate machine state immediately before a real process may start."""
+
+    executable = Path(config.executable_path)
+    if os.name != "nt":
+        raise ValueError("real ORCA execution is supported only on Windows")
+    if executable.suffix.casefold() != ".exe" or not executable.is_file():
+        raise ValueError(f"ORCA executable is not an existing .exe file: {executable}")
+    data_root = Path(config.data_root_path)
+    try:
+        data_root.mkdir(parents=True, exist_ok=True)
+        probe = data_root / f".bg6022-write-probe-{uuid.uuid4().hex}.tmp"
+        probe.write_bytes(b"probe")
+        probe.unlink()
+    except OSError as error:
+        raise ValueError(f"data_root is not writable: {data_root}: {error}") from error
+    validate_runtime_capacity(config, check_available_memory=True)
 
 
 def environment_for_child() -> dict[str, str]:
@@ -196,5 +210,6 @@ __all__ = [
     "environment_for_child",
     "load_config",
     "runtime_summary",
+    "validate_execution_environment",
     "validate_runtime_capacity",
 ]

@@ -9,11 +9,11 @@ import sys
 from pathlib import Path
 
 from .agent import INPUT_GEOMETRY_PLACEHOLDER, Agent
-from .config import load_config, runtime_summary
-from .models import InputReference, Plan, Request, Step
+from .config import AppConfig, load_config, runtime_summary, validate_execution_environment
+from .models import InputReference, Plan, Request, Result, Step
 from .orca.input import OrcaInputSpec, render_input
 from .orca.runner import probe_orca_version
-from .session import load_run, new_id
+from .session import load_run, new_id, read_execution_guard, run_directory
 from .tools.molecule import parse_xyz_file, validate_electronic_state
 from .tools.registry import build_registry, describe_tools
 
@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("tools", help="list registered executable tools")
 
     run_tool = commands.add_parser("run-tool", help="preview or execute one registered tool")
-    run_tool.add_argument("tool", choices=("single_point", "optimize_geometry"))
+    run_tool.add_argument("tool", choices=tuple(item["name"] for item in describe_tools()))
     run_tool.add_argument("--xyz", required=True, help="input XYZ file")
     run_tool.add_argument("--charge", required=True, type=_strict_int)
     run_tool.add_argument("--multiplicity", required=True, type=_strict_int)
@@ -62,29 +62,66 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("cancelled by user", file=sys.stderr)
         return 130
-    except (FileNotFoundError, ValueError, OSError) as error:
+    except (FileNotFoundError, ValueError, PermissionError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
+        if (
+            args.command == "run-tool"
+            and args.execute
+            and isinstance(error, OSError)
+            and not isinstance(error, FileNotFoundError)
+        ):
+            return 1
         return 2
     return 2
 
 
 def _doctor(args: argparse.Namespace) -> int:
     config = _require_config(args)
-    print(json.dumps(runtime_summary(config), ensure_ascii=True, indent=2))
-    print(f"python_311_supported: {sys.version_info[:2] == (3, 11)}")
-    print(f"platform: {platform.platform()}")
+    payload = runtime_summary(config)
+    payload["python_311_supported"] = sys.version_info[:2] == (3, 11)
+    payload["platform"] = platform.platform()
+    try:
+        validate_execution_environment(config)
+        payload["execution_environment"] = {"ok": True}
+    except (ValueError, OSError) as error:
+        payload["execution_environment"] = {"ok": False, "reason": str(error)}
+    try:
+        guard = read_execution_guard(config.data_root_path)
+        payload["execution_guard"] = guard
+    except RuntimeError as error:
+        payload["execution_guard"] = {"ok": False, "reason": str(error)}
+    print(json.dumps(payload, ensure_ascii=True, indent=2))
     if args.probe_orca:
-        result = probe_orca_version(config.executable_path)
+        result = probe_orca_version(
+            config.executable_path,
+            data_root=config.data_root_path,
+        )
         print(json.dumps({"orca_probe": result}, ensure_ascii=True, indent=2))
         if not result.get("ok"):
             return 1
-    return 0
+    return 0 if payload["execution_environment"]["ok"] else 1
 
 
 def _show_run(args: argparse.Namespace) -> int:
     config = _require_config(args)
     run = load_run(config.data_root_path, args.run_id)
-    print(json.dumps(run.model_dump(mode="json"), ensure_ascii=True, indent=2))
+    payload = run.model_dump(mode="json")
+    results: list[dict[str, object]] = []
+    root = run_directory(config.data_root_path, run.id).resolve()
+    for relative in run.result_index:
+        candidate = (root / relative).resolve()
+        if root not in candidate.parents or candidate.name != "result.json":
+            results.append({"path": relative, "error": "result path escapes the Run directory"})
+            continue
+        try:
+            result = Result.model_validate(
+                json.loads(candidate.read_text(encoding="utf-8")), strict=True
+            )
+            results.append({"path": relative, "result": result.model_dump(mode="json")})
+        except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError) as error:
+            results.append({"path": relative, "error": str(error)})
+    payload["results"] = results
+    print(json.dumps(payload, ensure_ascii=True, indent=2))
     return 0
 
 
@@ -94,7 +131,7 @@ def _run_tool(args: argparse.Namespace) -> int:
     method = args.method_profile or config.defaults.method_profile
     environment = args.environment or config.defaults.environment
     validate_electronic_state(geometry, charge=args.charge, multiplicity=args.multiplicity)
-    parameters = {
+    parameters: dict[str, object] = {
         "method_profile": method,
         "environment": environment,
         "charge": args.charge,
@@ -106,9 +143,10 @@ def _run_tool(args: argparse.Namespace) -> int:
         parameters["geom_maxiter"] = args.geom_maxiter
     if args.tool == "single_point" and args.geom_maxiter is not None:
         raise ValueError("--geom-maxiter is only valid for optimize_geometry")
+
     registry = build_registry(config)
     tool = registry.get(args.tool)
-    validated = _validate_parameters(tool.parameter_model, parameters)
+    validated = tool.validate_parameters(parameters)
     spec = OrcaInputSpec(
         operation="SP" if args.tool == "single_point" else "Opt",
         method_profile=validated["method_profile"],
@@ -137,6 +175,7 @@ def _run_tool(args: argparse.Namespace) -> int:
         print("input.inp:")
         print(rendered, end="")
         return 0
+
     request = Request(
         id=new_id("request"),
         description=f"explicit CLI execution of {args.tool}",
@@ -157,12 +196,22 @@ def _run_tool(args: argparse.Namespace) -> int:
         requested_results=list(tool.results),
     )
     agent = Agent(config, registry)
-    run, result = agent.execute_plan(request, plan, xyz_path=args.xyz)
+    run, result = agent.execute_plan(
+        request,
+        plan,
+        xyz_path=args.xyz,
+        execute=True,
+    )
     payload = {
         "run_id": run.id,
         "status": result.status,
         "values": result.values,
         "checks": result.checks,
+        "diagnostics": {
+            "category": result.diagnostics.get("category"),
+            "reason": result.diagnostics.get("reason"),
+            "raw_paths": result.diagnostics.get("raw_paths", {}),
+        },
         "result_path": str(
             Path(config.data_root_path)
             / "runs"
@@ -174,27 +223,19 @@ def _run_tool(args: argparse.Namespace) -> int:
         "artifact_ids": result.artifact_ids,
     }
     print(json.dumps(payload, ensure_ascii=True, indent=2))
-    if result.status == "cancelled":
+    return _result_exit_code(result)
+
+
+def _result_exit_code(result: Result) -> int:
+    category = result.diagnostics.get("category")
+    if result.status == "cancelled" or category == "cancelled":
         return 130
+    if category == "timeout":
+        return 124
     return 0 if result.status == "succeeded" else 1
 
 
-def _validate_parameters(model_name: str, parameters: dict[str, object]) -> dict[str, object]:
-    from .tools.orca import OptimizeParameters, SinglePointParameters
-
-    models = {
-        OptimizeParameters.__name__: OptimizeParameters,
-        SinglePointParameters.__name__: SinglePointParameters,
-    }
-    model = models.get(model_name)
-    if model is None:
-        raise ValueError(f"unknown parameter model: {model_name}")
-    return model.model_validate(parameters, strict=True).model_dump(
-        mode="python", exclude_none=True
-    )
-
-
-def _require_config(args: argparse.Namespace):
+def _require_config(args: argparse.Namespace) -> AppConfig:
     if not args.config:
         raise ValueError("--config is required for this command")
     return load_config(args.config)
