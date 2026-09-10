@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bg6022"
+version = "0.1.0"
+description = "Deterministic ORCA tools and execution foundation for the BG6022 agent"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = ["pydantic>=2,<3"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-socket>=0.7", "ruff>=0.8"]
+
+[project.scripts]
+bg6022 = "bg6022.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-socket>=0.7", "ruff>=0.8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-config", "--strict-markers", "--disable-socket"]
+markers = [
+  "windows_process: Windows process-tree integration tests",
+  "live_orca: explicitly enabled real ORCA execution",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

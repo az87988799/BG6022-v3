@@ -1,0 +1,18 @@
+[orca]
+executable = 'E:\orca\orca.exe'
+
+[runtime]
+data_root = 'E:\BG6022-v3-data'
+cores = 4
+memory_mb = 2048
+maxcore_mb = 384
+max_concurrent_jobs = 1
+confirm_before_compute = true
+attempt_timeout_seconds = 1200
+run_active_timeout_seconds = 3600
+output_limit_mb = 64
+workdir_limit_mb = 512
+
+[defaults]
+method_profile = "r2scan3c"
+environment = "gas"

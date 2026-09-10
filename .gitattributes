@@ -1,0 +1,2 @@
+* text=auto eol=lf
+tests/fixtures/orca_6_1_1_water_opt/* -text
