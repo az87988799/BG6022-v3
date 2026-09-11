@@ -9,6 +9,7 @@ dist/
 build/
 *.egg-info/
 config.toml
+.env
 E:\BG6022-v3-data/
 *.log
 .mypy_cache/
