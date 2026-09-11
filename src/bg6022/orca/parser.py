@@ -76,6 +76,11 @@ class AttemptFacts:
     source_locations: dict[str, Any]
     diagnostics: list[str]
     error_category: str | None
+    opt_iteration_limit_reached: bool | None = None
+    last_opt_cycle: int | None = None
+    effective_geom_maxiter: int | None = None
+    scf_iteration_limit_reached: bool | None = None
+    effective_scf_maxiter: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         values = asdict(self)
@@ -102,6 +107,8 @@ def inspect_attempt(
     input_hashes_match: bool = True,
     input_hash_error: str | None = None,
     max_output_bytes: int = 64 * 1024 * 1024,
+    effective_geom_maxiter: int | None = None,
+    effective_scf_maxiter: int | None = None,
 ) -> AttemptFacts:
     """Collect facts without discarding a nonzero or truncated attempt."""
 
@@ -137,6 +144,18 @@ def inspect_attempt(
             stdout_text,
             re.I,
         )
+    )
+    opt_limit_match = re.search(
+        r"MAX(?:IMUM)?\s+NUMBER\s+OF\s+(?:OPTIMIZATION\s+STEPS|GEOMETRY\s+OPTIMIZATION\s+STEPS)"
+        r"|(?:GEOM|OPTIMIZATION).*?(?:MAXITER|ITERATION\s+LIMIT).*?(?:REACHED|EXCEEDED|LIMIT)",
+        stdout_text,
+        re.I,
+    )
+    scf_limit_match = re.search(
+        r"(?:SCF\s+)?(?:MAX(?:IMUM)?\s+NUMBER\s+OF\s+(?:SCF\s+)?ITERATIONS?|"
+        r"SCF\s+ITERATIONS?\s+(?:EXCEEDED|REACHED)|SCF\s+MAXITER)",
+        stdout_text,
+        re.I,
     )
     version_match = re.search(
         r"(?:Program Version|ORCA Version|Version)\s*[:=]?\s*([0-9]+\.[0-9]+(?:\.[0-9]+)?)",
@@ -201,6 +220,10 @@ def inspect_attempt(
         diagnostics.append("normal termination marker has contradictory trailing output")
     if final_energy_error:
         diagnostics.append(f"final energy is invalid: {final_energy_error}")
+    if opt_limit_match:
+        diagnostics.append("optimization iteration limit was reported by ORCA output")
+    if scf_limit_match:
+        diagnostics.append("SCF iteration limit was reported by ORCA output")
     if output_geometry_error:
         diagnostics.append(f"input.xyz is invalid: {output_geometry_error}")
     if stdout_geometry_error:
@@ -255,6 +278,12 @@ def inspect_attempt(
         "optimization_converged": _line_for_offset(stdout_text, optimization_match.start())
         if optimization_match
         else None,
+        "opt_iteration_limit": _line_for_offset(stdout_text, opt_limit_match.start())
+        if opt_limit_match
+        else None,
+        "scf_iteration_limit": _line_for_offset(stdout_text, scf_limit_match.start())
+        if scf_limit_match
+        else None,
     }
     if input_hash_error:
         source_locations["input_hash_error"] = input_hash_error
@@ -292,6 +321,17 @@ def inspect_attempt(
         source_locations=source_locations,
         diagnostics=diagnostics,
         error_category=category,
+        opt_iteration_limit_reached=(
+            True
+            if opt_limit_match
+            else (False if operation == "Opt" and optimization_match is not None else None)
+        ),
+        last_opt_cycle=(len(list(_CYCLE_RE.finditer(stdout_text))) if operation == "Opt" else None),
+        effective_geom_maxiter=effective_geom_maxiter,
+        scf_iteration_limit_reached=(
+            True if scf_limit_match else (False if not scf_failure else None)
+        ),
+        effective_scf_maxiter=effective_scf_maxiter,
     )
 
 

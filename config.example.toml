@@ -16,3 +16,23 @@ workdir_limit_mb = 512
 [defaults]
 method_profile = "r2scan3c"
 environment = "gas"
+
+[llm]
+base_url = "https://api.deepseek.com"
+model = "deepseek-flash"
+api_key_env = "DEEPSEEK_API_KEY"
+request_timeout_seconds = 60
+max_tokens = 4096
+structured_output_corrections = 1
+
+[repair]
+enabled = true
+max_attempts_per_science_step = 3
+max_extra_orca_executions = 3
+max_plan_revisions = 2
+
+[molecule]
+pubchem_timeout_seconds = 20
+pubchem_max_attempts = 3
+embedding_timeout_seconds = 60
+embedding_seeds = [61453, 61454]

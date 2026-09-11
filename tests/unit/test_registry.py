@@ -6,9 +6,14 @@ from bg6022.models import InputReference, Plan, Request, Step
 from bg6022.tools.registry import build_registry, describe_tools
 
 
-def test_only_two_m0_tools_are_public() -> None:
+def test_m1_tools_are_public() -> None:
     names = {item["name"] for item in describe_tools()}
-    assert names == {"single_point", "optimize_geometry"}
+    assert names == {
+        "resolve_molecule",
+        "generate_geometry",
+        "single_point",
+        "optimize_geometry",
+    }
 
 
 def test_input_reference_rejects_arbitrary_path_shape() -> None:

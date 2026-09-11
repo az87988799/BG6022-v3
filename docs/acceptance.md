@@ -54,6 +54,15 @@ uv run python -m bg6022 --config config.toml run-tool optimize_geometry --xyz ex
 The historical one-core fixture, fake processes, and offline parser tests never
 count as the two required four-core real calculations.
 
+## M1 implementation status
+
+M1 code is present on the M1 implementation branch and has offline regression
+coverage, but it is not marked accepted. The user must review the pushed commit
+and run the live DeepSeek/PubChem/ORCA sequence described in
+[`docs/milestones/M1.md`](milestones/M1.md) and
+[`docs/evidence/M1-agent-evidence.md`](evidence/M1-agent-evidence.md) before
+M1 is recorded as complete.
+
 ## Recorded real runs
 
 The local configuration used ORCA `E:\orca\orca.exe`, Program Version 6.1.1,

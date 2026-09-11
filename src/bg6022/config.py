@@ -39,10 +39,38 @@ class DefaultSettings(StrictConfig):
     environment: StrictStr = "gas"
 
 
+class LlmSettings(StrictConfig):
+    base_url: StrictStr = "https://api.deepseek.com"
+    model: StrictStr = "deepseek-flash"
+    api_key_env: StrictStr = "DEEPSEEK_API_KEY"
+    request_timeout_seconds: StrictInt = Field(default=60, gt=0)
+    max_tokens: StrictInt = Field(default=4096, gt=0, le=32768)
+    structured_output_corrections: StrictInt = Field(default=1, ge=0, le=1)
+
+
+class RepairSettings(StrictConfig):
+    enabled: StrictBool = True
+    max_attempts_per_science_step: StrictInt = Field(default=3, ge=1, le=3)
+    max_extra_orca_executions: StrictInt = Field(default=3, ge=0, le=3)
+    max_plan_revisions: StrictInt = Field(default=2, ge=0, le=2)
+
+
+class MoleculeSettings(StrictConfig):
+    pubchem_timeout_seconds: StrictInt = Field(default=20, gt=0)
+    pubchem_max_attempts: StrictInt = Field(default=3, ge=1, le=3)
+    embedding_timeout_seconds: StrictInt = Field(default=60, gt=0)
+    embedding_seeds: list[StrictInt] = Field(
+        default_factory=lambda: [61453, 61454], min_length=1, max_length=2
+    )
+
+
 class AppConfig(StrictConfig):
     orca: OrcaSettings
     runtime: RuntimeSettings
     defaults: DefaultSettings
+    llm: LlmSettings = Field(default_factory=LlmSettings)
+    repair: RepairSettings = Field(default_factory=RepairSettings)
+    molecule: MoleculeSettings = Field(default_factory=MoleculeSettings)
     config_path: str = Field(exclude=True)
     executable_path: str = Field(exclude=True)
     data_root_path: str = Field(exclude=True)
@@ -129,7 +157,7 @@ def load_config(path: str | Path, *, create_data_root: bool = False) -> AppConfi
         raise ValueError(f"invalid TOML in {config_path}: {error}") from error
     if not isinstance(raw, dict):
         raise ValueError("configuration root must be a TOML table")
-    unknown_sections = set(raw) - {"orca", "runtime", "defaults"}
+    unknown_sections = set(raw) - {"orca", "runtime", "defaults", "llm", "repair", "molecule"}
     if unknown_sections:
         raise ValueError(f"unknown configuration section(s): {sorted(unknown_sections)}")
     base = config_path.parent
@@ -143,6 +171,9 @@ def load_config(path: str | Path, *, create_data_root: bool = False) -> AppConfi
                 "orca": orca_raw,
                 "runtime": runtime_raw,
                 "defaults": raw.get("defaults", {}),
+                "llm": raw.get("llm", {}),
+                "repair": raw.get("repair", {}),
+                "molecule": raw.get("molecule", {}),
                 "config_path": str(config_path),
                 "executable_path": orca_raw["executable"],
                 "data_root_path": runtime_raw["data_root"],
@@ -205,7 +236,10 @@ def runtime_summary(config: AppConfig) -> dict[str, Any]:
 __all__ = [
     "AppConfig",
     "DefaultSettings",
+    "LlmSettings",
+    "MoleculeSettings",
     "OrcaSettings",
+    "RepairSettings",
     "RuntimeSettings",
     "environment_for_child",
     "load_config",

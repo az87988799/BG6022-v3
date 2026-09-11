@@ -1,4 +1,4 @@
-"""Closed, deterministic ORCA input rendering for M0."""
+"""Closed, deterministic ORCA input rendering."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class OrcaInputSpec:
 def render_input(spec: OrcaInputSpec) -> bytes:
     profile = get_profile(spec.method_profile)
     if spec.operation not in {"SP", "Opt"}:
-        raise ValueError(f"unsupported M0 ORCA operation: {spec.operation}")
+        raise ValueError(f"unsupported ORCA operation: {spec.operation}")
     if spec.environment not in profile.supported_environments:
         raise ValueError(
             f"environment {spec.environment!r} is not supported by profile {profile.name!r}"

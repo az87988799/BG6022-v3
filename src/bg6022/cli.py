@@ -5,21 +5,23 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import queue
 import sys
+import threading
 from pathlib import Path
 
-from .agent import INPUT_GEOMETRY_PLACEHOLDER, Agent
+from .agent import INPUT_GEOMETRY_PLACEHOLDER, Agent, AgentResponse
 from .config import AppConfig, load_config, runtime_summary, validate_execution_environment
-from .models import InputReference, Plan, Request, Result, Step
+from .models import InputReference, Plan, Request, Result, ResultTarget, Step
 from .orca.input import OrcaInputSpec, render_input
 from .orca.runner import probe_orca_version
-from .session import load_run, new_id, read_execution_guard, run_directory
+from .session import ChatSessionLock, load_run, new_id, read_execution_guard, run_directory
 from .tools.molecule import parse_xyz_file, validate_electronic_state
 from .tools.registry import build_registry, describe_tools
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="bg6022", description="BG6022-v3 ORCA tool foundation")
+    parser = argparse.ArgumentParser(prog="bg6022", description="BG6022-v3 ORCA agent")
     parser.add_argument("--config", help="path to the TOML configuration")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -27,8 +29,17 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--probe-orca", action="store_true", help="probe the ORCA banner")
     commands.add_parser("tools", help="list registered executable tools")
 
+    commands.add_parser("chat", help="start the local natural-language agent")
+
     run_tool = commands.add_parser("run-tool", help="preview or execute one registered tool")
-    run_tool.add_argument("tool", choices=tuple(item["name"] for item in describe_tools()))
+    run_tool.add_argument(
+        "tool",
+        choices=tuple(
+            item["name"]
+            for item in describe_tools()
+            if item.get("requires_compute_permission") is True
+        ),
+    )
     run_tool.add_argument("--xyz", required=True, help="input XYZ file")
     run_tool.add_argument("--charge", required=True, type=_strict_int)
     run_tool.add_argument("--multiplicity", required=True, type=_strict_int)
@@ -52,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "tools":
             print(json.dumps(describe_tools(), ensure_ascii=True, indent=2))
             return 0
+        if args.command == "chat":
+            return _chat(args)
         if args.command == "doctor":
             return _doctor(args)
         if args.command == "show-run":
@@ -179,7 +192,7 @@ def _run_tool(args: argparse.Namespace) -> int:
     request = Request(
         id=new_id("request"),
         description=f"explicit CLI execution of {args.tool}",
-        requested_results=list(tool.results),
+        requested_results=_result_targets(tool),
         explicit_parameters=validated,
     )
     plan = Plan(
@@ -193,7 +206,7 @@ def _run_tool(args: argparse.Namespace) -> int:
                 inputs={"geometry": InputReference(artifact_id=INPUT_GEOMETRY_PLACEHOLDER)},
             )
         ],
-        requested_results=list(tool.results),
+        requested_results=_result_targets(tool),
     )
     agent = Agent(config, registry)
     run, result = agent.execute_plan(
@@ -233,6 +246,104 @@ def _result_exit_code(result: Result) -> int:
     if category == "timeout":
         return 124
     return 0 if result.status == "succeeded" else 1
+
+
+def _result_targets(tool) -> list[ResultTarget]:
+    return [
+        ResultTarget(port=name) if name in tool.output_ports else ResultTarget(field=name)
+        for name in tool.results
+    ]
+
+
+def _chat(args: argparse.Namespace) -> int:
+    config = _require_config(args)
+    from .tools.registry import build_registry
+
+    try:
+        with ChatSessionLock(config.data_root_path):
+            agent = Agent(config, build_registry(config))
+            return _chat_loop(agent)
+    except RuntimeError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+
+def _chat_loop(agent: Agent) -> int:
+    """Keep input, display, and the one Agent worker separate."""
+
+    incoming: queue.Queue[str | None] = queue.Queue()
+    outgoing: queue.Queue[AgentResponse] = queue.Queue()
+    stop_input = threading.Event()
+
+    def read_input() -> None:
+        while not stop_input.is_set():
+            try:
+                message = input("> ")
+                normalized = message.casefold()
+                # Signal the Event from the input side immediately.  The
+                # worker still owns durable Run mutation and will process the
+                # queued command after its current call returns.
+                if normalized in {
+                    "/cancel",
+                    "cancel",
+                    "取消",
+                    "/exit",
+                    "exit",
+                    "退出",
+                    "/new",
+                    "new",
+                    "新任务",
+                }:
+                    agent.request_cancel()
+                incoming.put(message)
+            except EOFError:
+                agent.request_cancel()
+                incoming.put(None)
+                return
+            except KeyboardInterrupt:
+                agent.request_cancel()
+                incoming.put("/exit")
+                return
+
+    def work() -> None:
+        while True:
+            message = incoming.get()
+            if message is None:
+                agent.request_cancel()
+                return
+            if message.casefold() in {"/exit", "exit", "退出"}:
+                agent.request_cancel()
+                outgoing.put(AgentResponse("Exiting after active work is cleaned up."))
+                return
+            if message.casefold() in {"/cancel", "cancel", "取消"}:
+                outgoing.put(agent.cancel())
+                continue
+            outgoing.put(agent.handle_message(message))
+
+    reader = threading.Thread(target=read_input, name="bg6022-chat-input", daemon=True)
+    worker = threading.Thread(target=work, name="bg6022-agent-worker", daemon=True)
+    reader.start()
+    worker.start()
+    print("BG6022-v3 chat. Use /confirm, /status, /cancel, /new, or /exit.")
+    exiting = False
+    try:
+        while worker.is_alive() or reader.is_alive() or not outgoing.empty():
+            try:
+                response = outgoing.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            print(response.text)
+            if response.text.startswith("Exiting after"):
+                exiting = True
+                stop_input.set()
+                break
+    finally:
+        if exiting or not worker.is_alive():
+            stop_input.set()
+        if worker.is_alive():
+            agent.cancel()
+            worker.join(timeout=5)
+    return 0
 
 
 def _require_config(args: argparse.Namespace) -> AppConfig:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from threading import Event
@@ -10,7 +11,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator
 
 from bg6022.config import AppConfig, validate_execution_environment
-from bg6022.models import Result, Run, Step, Tool
+from bg6022.models import Plan, Result, Run, Step, Tool
 from bg6022.orca.checks import evaluate_success
 from bg6022.orca.input import OrcaInputSpec, render_input
 from bg6022.orca.parser import inspect_attempt
@@ -25,6 +26,7 @@ from bg6022.session import (
     new_id,
     register_bytes_artifact,
     register_file_artifact,
+    run_directory,
     save_run,
     sha256_bytes,
     sha256_file,
@@ -127,7 +129,13 @@ def _make_tool(
             "unchanged execution inputs",
         ]
         + (["optimization convergence", "final geometry binding"] if operation == "Opt" else []),
-        repair_capabilities=["failed optimization may provide a restart-only candidate"],
+        repair_capabilities=(
+            ["failed optimization may provide a restart-only candidate"]
+            if operation == "Opt"
+            else []
+        ),
+        requires_compute_permission=True,
+        deferred_parameters=["charge", "multiplicity"],
         execute_function=execute if config is not None else None,
     )
 
@@ -151,7 +159,12 @@ def execute_orca_step(
     reference = step.inputs.get("geometry")
     if reference is None:
         raise ValueError("ORCA Tool requires a geometry input reference")
-    geometry_artifact = _resolve_geometry_reference(config, run, reference)
+    geometry_artifact = _resolve_geometry_reference(
+        config,
+        run,
+        reference,
+        allow_restart_candidate=_authorized_restart_candidate(run, step, reference),
+    )
     geometry_source = artifact_path(config.data_root_path, run, geometry_artifact)
     geometry_bytes = geometry_source.read_bytes()
     geometry = parse_xyz_bytes(geometry_bytes, supported_elements=profile.supported_elements)
@@ -318,6 +331,8 @@ def _execute_prepared_attempt(
         input_hashes_match=input_hashes_match,
         input_hash_error=input_hash_error,
         max_output_bytes=int(run.resources["output_limit_bytes"]),
+        effective_geom_maxiter=getattr(parameters, "geom_maxiter", None),
+        effective_scf_maxiter=parameters.scf_maxiter,
     )
     outcome = evaluate_success(facts, operation=operation)
     artifact_ids: list[str] = []
@@ -470,14 +485,48 @@ def _check_execution_contract(run: Run, step: Step) -> None:
         raise PermissionError("Run does not have explicit execution permission")
     if run.accepted_execution_sha256 is None:
         raise PermissionError("Run has no accepted execution fingerprint")
-    expected = execution_fingerprint(run.plan, run.resources, run.artifact_index)
-    if expected != run.accepted_execution_sha256:
-        raise ValueError("Run execution fingerprint does not match the current Plan or inputs")
+    if run.accepted_snapshot:
+        try:
+            accepted_plan = Plan.model_validate(run.accepted_snapshot["plan"], strict=True)
+            accepted_resources = dict(run.accepted_snapshot["resources"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("Run accepted snapshot is invalid") from error
+        expected = execution_fingerprint(
+            accepted_plan,
+            accepted_resources,
+            run.artifact_index,
+            snapshot=run.accepted_snapshot,
+        )
+        current_allowed = _plan_fingerprint(run.plan)
+        base_allowed = _plan_fingerprint(accepted_plan)
+        derived_allowed = {
+            record.get("derived_plan_sha256")
+            for record in run.repair_records
+            if record.get("validated") is True
+        }
+        if expected != run.accepted_execution_sha256 or (
+            current_allowed != base_allowed and current_allowed not in derived_allowed
+        ):
+            raise ValueError(
+                "Run execution fingerprint does not match the accepted Plan or repair chain"
+            )
+    else:
+        expected = execution_fingerprint(run.plan, run.resources, run.artifact_index)
+        if expected != run.accepted_execution_sha256:
+            raise ValueError("Run execution fingerprint does not match the current Plan or inputs")
     planned = next((item for item in run.plan.steps if item.id == step.id), None)
     if planned is None:
         raise ValueError(f"step is not part of the current Plan: {step.id}")
     if planned.model_dump(mode="json") != step.model_dump(mode="json"):
         raise ValueError(f"step {step.id} differs from the accepted Plan")
+
+
+def _plan_fingerprint(plan: Plan) -> str:
+    import hashlib
+    import json
+
+    encoded = json.dumps(plan.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _allowed_seconds(run: Run) -> float:
@@ -512,27 +561,75 @@ def _safe_sha256(path: Path) -> str | None:
         return None
 
 
-def _resolve_geometry_reference(config: AppConfig, run: Run, reference: Any):
+def _resolve_geometry_reference(
+    config: AppConfig,
+    run: Run,
+    reference: Any,
+    *,
+    allow_restart_candidate: bool = False,
+):
     if reference.artifact_id is not None:
         artifact = find_artifact(run, reference.artifact_id)
     else:
-        artifact = None
-        for item in reversed(run.attempts):
-            if item.get("step_id") == reference.step_id:
-                artifact_id = item.get("output_ports", {}).get(reference.port)
-                if artifact_id:
-                    artifact = find_artifact(run, artifact_id)
-                    break
-        if artifact is None:
+        result_relative = run.current_results.get(reference.step_id)
+        if result_relative is None:
             raise ValueError(
                 "upstream port "
                 f"{reference.step_id}.{reference.port} has not produced a successful artifact"
             )
+        root = run_directory(config.data_root_path, run.id).resolve()
+        result_path = (root / result_relative).resolve()
+        if root not in result_path.parents or result_path.name != "result.json":
+            raise ValueError("current result path is outside the Run directory")
+        try:
+            result_payload = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"current result for {reference.step_id} cannot be read") from error
+        if result_payload.get("status") != "succeeded":
+            raise ValueError(f"current result for {reference.step_id} is not successful")
+        upstream = next((item for item in run.plan.steps if item.id == reference.step_id), None)
+        if upstream is None or result_payload.get("step_fingerprint") != _step_fingerprint(
+            upstream
+        ):
+            raise ValueError(f"current result for {reference.step_id} is stale")
+        artifact_id = result_payload.get("output_ports", {}).get(reference.port)
+        if not artifact_id or artifact_id not in result_payload.get("artifact_ids", []):
+            raise ValueError(
+                "upstream port "
+                f"{reference.step_id}.{reference.port} has not produced a successful artifact"
+            )
+        artifact = find_artifact(run, artifact_id)
+        if artifact.step_id != reference.step_id or artifact.attempt != result_payload.get(
+            "attempt"
+        ):
+            raise ValueError("current result port is not bound to its successful producing attempt")
     if artifact.artifact_type != "molecular_geometry":
         raise ValueError(f"artifact {artifact.id} is not a molecular geometry")
-    if artifact.role == "restart_candidate":
+    if artifact.role == "restart_candidate" and not allow_restart_candidate:
         raise ValueError("restart_candidate is not a successful geometry input")
     return artifact
+
+
+def _authorized_restart_candidate(run: Run, step: Step, reference: Any) -> bool:
+    if reference.artifact_id is None:
+        return False
+    return any(
+        record.get("validated") is True
+        and record.get("action") == "restart_optimization"
+        and record.get("failed_step_id") == step.id
+        and record.get("candidate_artifact_id") == reference.artifact_id
+        for record in run.repair_records
+    )
+
+
+def _step_fingerprint(step: Step) -> str:
+    import hashlib
+    import json
+
+    encoded = json.dumps(
+        step.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _result_status(process_status: str) -> str:

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from bg6022.tools.molecule import SUPPORTED_ELEMENTS
 
@@ -13,6 +15,13 @@ class MethodProfile:
     orca_keyword: str
     supported_environments: frozenset[str]
     supported_elements: frozenset[str]
+
+
+@dataclass(frozen=True)
+class ParameterResolution:
+    effective_parameters: dict[str, Any]
+    parameter_sources: dict[str, str]
+    missing_fields: tuple[str, ...]
 
 
 R2SCAN3C = MethodProfile(
@@ -36,4 +45,133 @@ def list_profiles() -> tuple[MethodProfile, ...]:
     return tuple(PROFILES.values())
 
 
-__all__ = ["MethodProfile", "PROFILES", "R2SCAN3C", "get_profile", "list_profiles"]
+def resolve_parameters(
+    request_parameters: Mapping[str, Any] | None = None,
+    structure_facts: Mapping[str, Any] | None = None,
+    tool_parameters: Mapping[str, Any] | None = None,
+    defaults: Mapping[str, Any] | Any | None = None,
+    *,
+    user_modifications: Mapping[str, Any] | None = None,
+) -> ParameterResolution:
+    """Merge one effective scientific parameter set without inventing q/M.
+
+    ``user_modifications`` has the highest priority, followed by parameters
+    explicitly recorded on the Request, model/tool parameters, structure facts,
+    and the configured method/environment policy.  ``None`` means "not known";
+    it never erases a value from a lower-priority source.
+    """
+
+    request_parameters = request_parameters or {}
+    structure_facts = structure_facts or {}
+    tool_parameters = tool_parameters or {}
+    user_modifications = user_modifications or {}
+    if defaults is None:
+        defaults_map: Mapping[str, Any] = {"method_profile": "r2scan3c", "environment": "gas"}
+    elif isinstance(defaults, Mapping):
+        defaults_map = defaults
+    else:
+        defaults_map = {
+            "method_profile": getattr(defaults, "method_profile", "r2scan3c"),
+            "environment": getattr(defaults, "environment", "gas"),
+        }
+
+    values: dict[str, Any] = {}
+    sources: dict[str, str] = {}
+
+    def choose(name: str, candidates: list[tuple[str, Mapping[str, Any]]]) -> None:
+        for source, mapping in candidates:
+            if name in mapping and mapping[name] is not None:
+                value = mapping[name]
+                if name == "method_profile":
+                    value = _normalize_method_profile(value)
+                values[name] = value
+                sources[name] = source
+                return
+
+    choose(
+        "method_profile",
+        [
+            ("user_modification", user_modifications),
+            ("request_explicit", request_parameters),
+            ("tool_request", tool_parameters),
+            ("default_policy", defaults_map),
+        ],
+    )
+    choose(
+        "environment",
+        [
+            ("user_modification", user_modifications),
+            ("request_explicit", request_parameters),
+            ("tool_request", tool_parameters),
+            ("default_policy", defaults_map),
+        ],
+    )
+    choose(
+        "charge",
+        [
+            ("user_modification", user_modifications),
+            ("request_explicit", request_parameters),
+            ("structure_facts", _structure_aliases(structure_facts, "charge", "formal_charge")),
+            ("tool_request", tool_parameters),
+        ],
+    )
+    choose(
+        "multiplicity",
+        [
+            ("user_modification", user_modifications),
+            ("request_explicit", request_parameters),
+            ("structure_facts", _multiplicity_facts(structure_facts)),
+            ("tool_request", tool_parameters),
+        ],
+    )
+    for name in ("scf_maxiter", "geom_maxiter"):
+        choose(
+            name,
+            [
+                ("user_modification", user_modifications),
+                ("request_explicit", request_parameters),
+                ("tool_request", tool_parameters),
+            ],
+        )
+
+    missing = tuple(name for name in ("charge", "multiplicity") if name not in values)
+    return ParameterResolution(values, sources, missing)
+
+
+def _normalize_method_profile(value: Any) -> Any:
+    aliases = {
+        "r2scan-3c": "r2scan3c",
+        "r2scan_3c": "r2scan3c",
+        "r2scan3c": "r2scan3c",
+    }
+    return aliases.get(str(value).casefold(), value)
+
+
+def _structure_aliases(facts: Mapping[str, Any], wanted: str, *aliases: str) -> Mapping[str, Any]:
+    for name in (wanted, *aliases):
+        if name in facts and facts[name] is not None:
+            return {wanted: facts[name]}
+    return {}
+
+
+def _multiplicity_facts(facts: Mapping[str, Any]) -> Mapping[str, Any]:
+    if facts.get("multiplicity") is not None:
+        return {"multiplicity": facts["multiplicity"]}
+    # A singlet suggestion is only made for structures explicitly known to have
+    # no radical electrons and no unsupported/metal elements.  Unknown facts
+    # remain missing rather than silently becoming a closed-shell calculation.
+    symbols = set(facts.get("atom_symbols", ()))
+    if facts.get("radical_electrons") == 0 and symbols and symbols <= SUPPORTED_ELEMENTS:
+        return {"multiplicity": 1}
+    return {}
+
+
+__all__ = [
+    "MethodProfile",
+    "PROFILES",
+    "ParameterResolution",
+    "R2SCAN3C",
+    "get_profile",
+    "list_profiles",
+    "resolve_parameters",
+]

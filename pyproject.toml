@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Deterministic ORCA tools and execution foundation for the BG6022 agent"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
-dependencies = ["pydantic>=2,<3"]
+dependencies = ["httpx>=0.27,<1", "pydantic>=2,<3", "rdkit>=2024.3,<2027"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-socket>=0.7", "ruff>=0.8"]
@@ -28,7 +28,12 @@ addopts = ["--strict-config", "--strict-markers", "--disable-socket"]
 markers = [
   "windows_process: Windows process-tree integration tests",
   "live_orca: explicitly enabled real ORCA execution",
+  "live_llm: explicitly enabled real DeepSeek execution",
+  "live_pubchem: explicitly enabled real PubChem execution",
 ]
+
+[tool.setuptools.package-data]
+bg6022 = ["prompts/*.md"]
 
 [tool.ruff]
 target-version = "py311"

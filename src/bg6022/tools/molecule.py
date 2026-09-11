@@ -1,10 +1,30 @@
-"""Pure XYZ and electronic-state validation for explicitly supplied geometries."""
+"""XYZ validation plus the real RDKit geometry-preparation Tool."""
 
 from __future__ import annotations
 
+import json
 import math
+import os
+import queue
+import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event, Thread
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, StrictInt
+
+from bg6022.config import AppConfig
+from bg6022.models import InputReference, Result, Run, Step, Tool
+from bg6022.session import (
+    artifact_path,
+    find_artifact,
+    register_bytes_artifact,
+    run_directory,
+    save_run,
+)
 
 SUPPORTED_ELEMENTS = frozenset({"H", "C", "N", "O", "F", "P", "S", "Cl", "Br", "I"})
 ATOMIC_NUMBERS = {
@@ -31,6 +51,398 @@ class ParsedGeometry:
     @property
     def atom_count(self) -> int:
         return len(self.symbols)
+
+
+class GenerateGeometryParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    seed: StrictInt | None = None
+
+
+class GeometryEmbeddingError(ValueError):
+    def __init__(self, message: str, *, category: str) -> None:
+        super().__init__(message)
+        self.category = category
+
+
+_MAX_EMBED_HELPER_OUTPUT_BYTES = 1024 * 1024
+_EMBED_HELPER = r"""
+import json
+import sys
+
+
+def main():
+    request = json.load(sys.stdin)
+    from rdkit import Chem, rdBase
+    from rdkit.Chem import AllChem
+
+    mol = Chem.MolFromSmiles(request["smiles"])
+    if mol is None:
+        raise ValueError("SMILES cannot be rebuilt by RDKit")
+    mol = Chem.AddHs(mol)
+    for seed in request["seeds"][:2]:
+        embedding = AllChem.ETKDGv3()
+        embedding.randomSeed = int(seed)
+        embedding.numThreads = 1
+        conformer_id = AllChem.EmbedMolecule(mol, embedding)
+        if conformer_id < 0:
+            continue
+        conformer = mol.GetConformer()
+        coordinates = [
+            [
+                float(conformer.GetAtomPosition(index).x),
+                float(conformer.GetAtomPosition(index).y),
+                float(conformer.GetAtomPosition(index).z),
+            ]
+            for index in range(mol.GetNumAtoms())
+        ]
+        print(json.dumps({
+            "ok": True,
+            "seed": int(seed),
+            "symbols": [atom.GetSymbol() for atom in mol.GetAtoms()],
+            "coordinates": coordinates,
+            "rdkit_version": getattr(rdBase, "rdkitVersion", "unknown"),
+        }, separators=(",", ":")))
+        return
+    print(json.dumps({"ok": False, "error": "all embedding seeds failed"}))
+    raise SystemExit(2)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def make_generate_geometry_tool(config: AppConfig | None = None) -> Tool:
+    def execute(step: Step, run: Run, cancel: Event) -> Result:
+        if config is None:
+            raise RuntimeError("tool 'generate_geometry' is a description-only Tool")
+        return execute_generate_geometry(config, step=step, run=run, cancel=cancel)
+
+    return Tool(
+        name="generate_geometry",
+        description="Generate a bounded RDKit ETKDGv3 initial geometry from a molecule artifact.",
+        parameter_model=GenerateGeometryParameters.__name__,
+        parameter_schema=GenerateGeometryParameters.model_json_schema(),
+        parameter_type=GenerateGeometryParameters,
+        input_ports={"molecule": "molecule"},
+        output_ports={"geometry": "molecular_geometry"},
+        results={"geometry_atom_count": "integer"},
+        success_conditions=["RDKit structure rebuilt", "XYZ parsed and atom order preserved"],
+        repair_capabilities=[],
+        requires_compute_permission=False,
+        execute_function=execute if config is not None else None,
+    )
+
+
+def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel: Event) -> Result:
+    parameters = GenerateGeometryParameters.model_validate(step.parameters, strict=True)
+    attempt = _next_attempt(run, step.id)
+    relative = f"{step.id}/attempt-{attempt:02d}"
+    (run_directory(config.data_root_path, run.id) / relative).mkdir(parents=True, exist_ok=True)
+    try:
+        reference = step.inputs.get("molecule")
+        if reference is None:
+            raise ValueError("generate_geometry requires a molecule input reference")
+        molecule_artifact = _resolve_artifact_reference(
+            config, run, reference, expected_type="molecule"
+        )
+        molecule_path = artifact_path(config.data_root_path, run, molecule_artifact)
+        payload = json.loads(molecule_path.read_text(encoding="utf-8"))
+        facts = payload.get("facts", {})
+        smiles = facts.get("isomeric_smiles") or facts.get("canonical_smiles")
+        if not isinstance(smiles, str) or not smiles:
+            raise ValueError("molecule artifact has no canonical SMILES")
+        requested_seed = parameters.seed
+        seeds = (
+            [requested_seed]
+            if requested_seed is not None
+            else list(config.molecule.embedding_seeds)
+        )
+        seeds = seeds[:2]
+        if not seeds:
+            raise GeometryEmbeddingError(
+                "no RDKit embedding seeds are configured", category="invalid_configuration"
+            )
+        embedded = _run_embedding_helper(
+            smiles,
+            [int(seed) for seed in seeds],
+            timeout_seconds=min(
+                float(config.molecule.embedding_timeout_seconds),
+                _remaining_active_seconds(run, config),
+            ),
+            cancel=cancel,
+        )
+        try:
+            used_seed = int(embedded["seed"])
+            symbols = tuple(str(symbol) for symbol in embedded["symbols"])
+            coordinates = tuple(
+                tuple(float(value) for value in point) for point in embedded["coordinates"]
+            )
+            rdkit_version = str(embedded["rdkit_version"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise GeometryEmbeddingError(
+                "RDKit helper returned malformed geometry", category="invalid_response"
+            ) from error
+        geometry_bytes = format_xyz(
+            symbols,
+            coordinates,
+            comment=f"BG6022 v3 RDKit ETKDGv3 seed {used_seed}",
+        )
+        geometry = parse_xyz_bytes(geometry_bytes)
+        geometry_artifact = register_bytes_artifact(
+            config.data_root_path,
+            run,
+            geometry_bytes,
+            artifact_type="molecular_geometry",
+            role="initial_geometry",
+            source=f"rdkit:ETKDGv3:{used_seed}",
+            extension=".xyz",
+            step_id=step.id,
+            attempt=attempt,
+            metadata={
+                "molecule_artifact_id": molecule_artifact.id,
+                "structure_source": payload.get("source"),
+                "rdkit_version": rdkit_version,
+                "embedding": "ETKDGv3",
+                "seed": used_seed,
+                "atom_mapping": list(range(len(symbols))),
+                "initial_guess_only": True,
+            },
+        )
+        run.attempts.append(
+            {
+                "step_id": step.id,
+                "attempt": attempt,
+                "phase": "finished",
+                "status": "succeeded",
+                "artifact_ids": [geometry_artifact.id],
+                "output_ports": {"geometry": geometry_artifact.id},
+            }
+        )
+        save_run(config.data_root_path, run)
+        return _molecule_result(
+            run,
+            step,
+            attempt,
+            "succeeded",
+            values={"geometry_atom_count": geometry.atom_count},
+            artifact_ids=[geometry_artifact.id],
+            output_ports={"geometry": geometry_artifact.id},
+            parameter_sources={"geometry": f"rdkit:ETKDGv3:{used_seed}"},
+            relative=relative,
+        )
+    except GeometryEmbeddingError as error:
+        return _molecule_result(
+            run,
+            step,
+            attempt,
+            "cancelled" if error.category == "cancelled" else "failed",
+            diagnostics={"category": error.category, "reason": str(error)},
+            relative=relative,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        return _molecule_result(
+            run,
+            step,
+            attempt,
+            "failed",
+            diagnostics={"category": "geometry_generation_failed", "reason": str(error)},
+            relative=relative,
+        )
+
+
+def _run_embedding_helper(
+    smiles: str,
+    seeds: list[int],
+    *,
+    timeout_seconds: float,
+    cancel: Event,
+) -> dict[str, Any]:
+    """Run the bounded native RDKit call outside the Agent process."""
+
+    if timeout_seconds <= 0:
+        raise GeometryEmbeddingError("RDKit time budget is exhausted", category="timeout")
+    payload = json.dumps({"smiles": smiles, "seeds": seeds}, separators=(",", ":")).encode("utf-8")
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-c", _EMBED_HELPER],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            env=_embedding_environment(),
+        )
+    except OSError as error:
+        raise GeometryEmbeddingError(
+            f"cannot start the RDKit helper: {error}", category="helper_start_failed"
+        ) from error
+
+    completed: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+    def communicate() -> None:
+        try:
+            completed.put(("ok", process.communicate(input=payload)))
+        except BaseException as error:  # pragma: no cover - defensive worker boundary
+            completed.put(("error", error))
+
+    reader = Thread(target=communicate, name="bg6022-rdkit-helper-reader", daemon=True)
+    reader.start()
+    deadline = time.monotonic() + float(timeout_seconds)
+    while reader.is_alive():
+        if cancel.is_set():
+            _stop_embedding_helper(process)
+            reader.join(timeout=2)
+            raise GeometryEmbeddingError("RDKit embedding cancelled", category="cancelled")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _stop_embedding_helper(process)
+            reader.join(timeout=2)
+            raise GeometryEmbeddingError(
+                "RDKit embedding exceeded its wall-time bound", category="timeout"
+            )
+        reader.join(timeout=min(0.1, remaining))
+
+    kind, value = completed.get()
+    if kind == "error":
+        raise GeometryEmbeddingError(
+            f"RDKit helper communication failed: {value}", category="helper_failed"
+        ) from value
+    stdout, stderr = value
+    if len(stdout) > _MAX_EMBED_HELPER_OUTPUT_BYTES or len(stderr) > _MAX_EMBED_HELPER_OUTPUT_BYTES:
+        raise GeometryEmbeddingError(
+            "RDKit helper output exceeded its size bound", category="output_too_large"
+        )
+    if process.returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace")[:2000]
+        try:
+            error_payload = json.loads(stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            error_payload = {}
+        reason = error_payload.get("error") if isinstance(error_payload, dict) else None
+        raise GeometryEmbeddingError(
+            reason or detail or "RDKit embedding failed", category="embedding_failed"
+        )
+    try:
+        result = json.loads(stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise GeometryEmbeddingError(
+            "RDKit helper returned invalid JSON", category="invalid_response"
+        ) from error
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise GeometryEmbeddingError(
+            "RDKit helper returned no successful conformer", category="embedding_failed"
+        )
+    return result
+
+
+def _stop_embedding_helper(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=1)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            process.kill()
+            process.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def _embedding_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    for name in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        environment[name] = "1"
+    return environment
+
+
+def _remaining_active_seconds(run: Run, config: AppConfig) -> float:
+    limit = float(
+        run.resources.get("run_active_timeout_seconds", config.runtime.run_active_timeout_seconds)
+    )
+    return limit - run.current_active_seconds()
+
+
+def _resolve_artifact_reference(
+    config: AppConfig, run: Run, reference: InputReference, *, expected_type: str
+):
+    if reference.artifact_id is not None:
+        artifact = find_artifact(run, reference.artifact_id)
+    else:
+        if reference.step_id not in run.current_results:
+            raise ValueError(
+                f"upstream result {reference.step_id} is not the current successful result"
+            )
+        root = run_directory(config.data_root_path, run.id).resolve()
+        result_path = (root / run.current_results[reference.step_id]).resolve()
+        if root not in result_path.parents or result_path.name != "result.json":
+            raise ValueError("upstream result path is outside the Run directory")
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        if payload.get("status") != "succeeded":
+            raise ValueError(f"upstream step {reference.step_id} did not succeed")
+        upstream = next((item for item in run.plan.steps if item.id == reference.step_id), None)
+        if upstream is None or payload.get("step_fingerprint") != _step_fingerprint(upstream):
+            raise ValueError(f"upstream step {reference.step_id} result is stale")
+        artifact_id = payload.get("output_ports", {}).get(reference.port)
+        if not artifact_id or artifact_id not in payload.get("artifact_ids", []):
+            raise ValueError(f"upstream port {reference.step_id}.{reference.port} has no artifact")
+        artifact = find_artifact(run, artifact_id)
+        if artifact.step_id != reference.step_id or artifact.attempt != payload.get("attempt"):
+            raise ValueError("upstream output is not bound to its successful producing attempt")
+    if artifact.artifact_type != expected_type:
+        raise ValueError(f"artifact {artifact.id} is not a {expected_type} artifact")
+    if artifact.role == "restart_candidate":
+        raise ValueError("restart_candidate is not a normal molecule/geometry input")
+    return artifact
+
+
+def _molecule_result(
+    run: Run,
+    step: Step,
+    attempt: int,
+    status: str,
+    *,
+    values: dict[str, Any] | None = None,
+    diagnostics: dict[str, Any] | None = None,
+    artifact_ids: list[str] | None = None,
+    output_ports: dict[str, str] | None = None,
+    parameter_sources: dict[str, str] | None = None,
+    relative: str,
+) -> Result:
+    return Result(
+        run_id=run.id,
+        step_id=step.id,
+        attempt=attempt,
+        status=status,  # type: ignore[arg-type]
+        values=values or {},
+        diagnostics=diagnostics or {},
+        artifact_ids=artifact_ids or [],
+        output_ports=output_ports or {},
+        parameter_sources=parameter_sources or {},
+        attempt_relative_path=relative,
+    )
+
+
+def _next_attempt(run: Run, step_id: str) -> int:
+    attempts = [
+        int(item.get("attempt", 0)) for item in run.attempts if item.get("step_id") == step_id
+    ]
+    return max(attempts, default=0) + 1
+
+
+def _step_fingerprint(step: Step) -> str:
+    import hashlib
+
+    payload = json.dumps(
+        step.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def parse_xyz_bytes(
@@ -153,10 +565,13 @@ def _canonical_symbol(value: str) -> str:
 
 __all__ = [
     "ATOMIC_NUMBERS",
+    "GenerateGeometryParameters",
     "ParsedGeometry",
     "SUPPORTED_ELEMENTS",
     "compare_coordinates",
+    "execute_generate_geometry",
     "format_xyz",
+    "make_generate_geometry_tool",
     "parse_xyz_bytes",
     "parse_xyz_file",
     "validate_electronic_state",

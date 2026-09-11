@@ -4,24 +4,70 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    create_model,
+    field_validator,
+    model_validator,
+)
 
-RunStatus = Literal["planned", "running", "succeeded", "failed", "cancelled", "interrupted"]
-ResultStatus = Literal["succeeded", "failed", "cancelled", "interrupted"]
+RunStatus = Literal[
+    "planned",
+    "running",
+    "waiting",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "interrupted",
+]
+ResultStatus = Literal["succeeded", "failed", "cancelled", "interrupted", "needs_input"]
 
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+class ResultTarget(StrictModel):
+    """A value or output port requested from one logical step.
+
+    This is a nested value contract, not another persisted runtime object.  The
+    optional ``step_id`` keeps old M0 plans readable while M1 plans identify the
+    producer explicitly.
+    """
+
+    step_id: str | None = None
+    field: str | None = None
+    port: str | None = None
+
+    @model_validator(mode="after")
+    def _one_target_kind(self) -> ResultTarget:
+        if (self.field is None) == (self.port is None):
+            raise ValueError("result target must contain exactly one field or port")
+        return self
+
+
 class Request(StrictModel):
     id: str
     description: str
-    requested_results: list[str] = Field(default_factory=list)
+    requested_results: list[ResultTarget] = Field(default_factory=list)
     explicit_parameters: dict[str, Any] = Field(default_factory=dict)
-    source: Literal["cli"] = "cli"
+    source: Literal["cli", "chat"] = "cli"
+    original_text: str | None = None
+    user_modifications: dict[str, Any] = Field(default_factory=dict)
+    structure_input: dict[str, Any] = Field(default_factory=dict)
+    missing_fields: list[str] = Field(default_factory=list)
+
+    @field_validator("requested_results", mode="before")
+    @classmethod
+    def _load_legacy_result_targets(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        return [{"field": item} if isinstance(item, str) else item for item in value]
 
 
 class InputReference(StrictModel):
@@ -47,6 +93,8 @@ class Step(StrictModel):
     tool: str
     parameters: dict[str, Any] = Field(default_factory=dict)
     inputs: dict[str, InputReference] = Field(default_factory=dict)
+    goal_checks: list[str] = Field(default_factory=list)
+    origin_step_id: str | None = None
 
 
 class Plan(StrictModel):
@@ -54,7 +102,14 @@ class Plan(StrictModel):
     revision: int = 1
     request_id: str
     steps: list[Step]
-    requested_results: list[str] = Field(default_factory=list)
+    requested_results: list[ResultTarget] = Field(default_factory=list)
+
+    @field_validator("requested_results", mode="before")
+    @classmethod
+    def _load_legacy_result_targets(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        return [{"field": item} if isinstance(item, str) else item for item in value]
 
     @field_validator("revision")
     @classmethod
@@ -96,7 +151,11 @@ class Result(StrictModel):
     artifact_ids: list[str] = Field(default_factory=list)
     output_ports: dict[str, str] = Field(default_factory=dict)
     input_artifact_ids: list[str] = Field(default_factory=list)
-    attempt_relative_path: str
+    attempt_relative_path: str = ""
+    clarification: dict[str, Any] = Field(default_factory=dict)
+    parameter_sources: dict[str, str] = Field(default_factory=dict)
+    step_fingerprint: str | None = None
+    input_bindings: dict[str, str] = Field(default_factory=dict)
 
 
 class Run(StrictModel):
@@ -111,6 +170,17 @@ class Run(StrictModel):
     attempts: list[dict[str, Any]] = Field(default_factory=list)
     artifact_index: list[Artifact] = Field(default_factory=list)
     result_index: list[str] = Field(default_factory=list)
+    current_results: dict[str, str] = Field(default_factory=dict)
+    waiting_for: Literal["confirmation", "clarification", "repair", None] = None
+    pending_data: dict[str, Any] = Field(default_factory=dict)
+    accepted_snapshot: dict[str, Any] = Field(default_factory=dict)
+    repair_records: list[dict[str, Any]] = Field(default_factory=list)
+    budget: dict[str, Any] = Field(default_factory=dict)
+    attempt_counts: dict[str, int] = Field(default_factory=dict)
+    extra_orca_executions: int = 0
+    plan_revisions: int = 0
+    origin_step_map: dict[str, str] = Field(default_factory=dict)
+    session_id: str | None = None
     active_seconds: float = 0.0
     created_at: str
     updated_at: str
@@ -161,14 +231,17 @@ ExecuteFunction = Callable[[Step, Run, Any], Result]
 class Tool(StrictModel):
     name: str
     description: str
-    parameter_model: str
-    parameter_schema: dict[str, Any]
+    parameter_model: str = "none"
+    parameter_schema: dict[str, Any] = Field(default_factory=dict)
     parameter_type: type[BaseModel] | None = Field(default=None, exclude=True, repr=False)
     input_ports: dict[str, str] = Field(default_factory=dict)
     output_ports: dict[str, str] = Field(default_factory=dict)
     results: dict[str, str] = Field(default_factory=dict)
     success_conditions: list[str] = Field(default_factory=list)
     repair_capabilities: list[str] = Field(default_factory=list)
+    requires_compute_permission: bool = True
+    deferred_parameters: list[str] = Field(default_factory=list)
+    available: bool = True
     execute_function: ExecuteFunction | None = Field(default=None, exclude=True, repr=False)
 
     model_config = ConfigDict(
@@ -180,9 +253,26 @@ class Tool(StrictModel):
             raise RuntimeError(f"tool {self.name!r} has no executable implementation")
         return self.execute_function(step, run, cancel)
 
-    def validate_parameters(self, parameters: dict[str, Any]) -> dict[str, Any]:
+    def validate_parameters(
+        self, parameters: dict[str, Any], *, allow_deferred: bool = False
+    ) -> dict[str, Any]:
         if self.parameter_type is None:
-            raise ValueError(f"tool {self.name!r} has no parameter model")
+            if self.parameter_schema:
+                raise ValueError(f"tool {self.name!r} has no parameter model")
+            if parameters:
+                raise ValueError(f"tool {self.name!r} does not accept parameters")
+            return {}
+        if allow_deferred:
+            missing = {
+                name
+                for name, field in self.parameter_type.model_fields.items()
+                if field.is_required() and name not in parameters
+            }
+            undeclared = missing - set(self.deferred_parameters)
+            if undeclared:
+                raise ValueError(f"missing required parameters: {sorted(undeclared)}")
+            if missing:
+                return _validate_partial_model(self.parameter_type, parameters)
         return self.parameter_type.model_validate(parameters, strict=True).model_dump(
             mode="python", exclude_none=True
         )
@@ -197,8 +287,49 @@ __all__ = [
     "Plan",
     "Request",
     "Result",
+    "ResultTarget",
     "Run",
     "RunStatus",
     "Step",
     "Tool",
 ]
+
+
+def _validate_partial_model(
+    model_type: type[BaseModel], parameters: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate supplied fields without inventing missing scientific values."""
+
+    known = set(model_type.model_fields)
+    extra = set(parameters) - known
+    if extra:
+        raise ValueError(f"extra inputs are not permitted: {sorted(extra)}")
+
+    # ``FieldInfo.annotation`` does not include constraints kept in
+    # ``FieldInfo.metadata`` (for example ge/le on iteration limits), and a
+    # TypeAdapter would also skip model field validators.  Build a temporary
+    # all-optional view that preserves both so deferred q/m values remain
+    # absent while every supplied value is validated exactly as it would be in
+    # the complete model.
+    partial_fields: dict[str, tuple[Any, None]] = {}
+    for name, field in model_type.model_fields.items():
+        field_data = field.asdict()
+        attributes = dict(field_data["attributes"])
+        attributes.pop("default", None)
+        attributes.pop("default_factory", None)
+        annotation = Annotated[
+            field_data["annotation"],
+            *field_data["metadata"],
+            Field(**attributes),
+        ]
+        partial_fields[name] = (annotation, None)
+    partial_model = create_model(
+        f"{model_type.__name__}PartialValidation",
+        __base__=model_type,
+        **partial_fields,
+    )
+    try:
+        validated = partial_model.model_validate(parameters, strict=True)
+    except Exception as error:
+        raise ValueError(str(error)) from error
+    return validated.model_dump(mode="python", exclude_none=True)

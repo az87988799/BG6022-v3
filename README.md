@@ -1,10 +1,11 @@
 # BG6022-v3
 
-BG6022-v3 is being rebuilt as a Windows-local ORCA agent. M0 contains the
-deterministic execution foundation only: typed requests and plans, two registered
-ORCA tools, controlled process execution, source-backed results, and durable run
-artifacts. Natural-language planning, PubChem/RDKit, and bounded repair are M1
-work and are intentionally not part of this package yet.
+BG6022-v3 is being rebuilt as a Windows-local ORCA agent. M1 adds the first
+natural-language path on the accepted M0 foundation: a bounded DeepSeek client,
+real PubChem/RDKit molecule preparation, one confirmation point, the existing
+ORCA Tools, and evidence-driven bounded Opt repair. The four production Tools
+are `resolve_molecule`, `generate_geometry`, `single_point`, and
+`optimize_geometry`; frequency analysis is not part of M1.
 
 ## Development
 
@@ -15,13 +16,13 @@ uv venv --python 3.11
 uv sync --group dev
 Copy-Item config.example.toml config.toml
 uv run python -m bg6022 --help
-uv run pytest -m "not live_orca"
+uv run pytest -m "not live_orca and not live_llm and not live_pubchem"
 ```
 
 Edit the ignored `config.toml` only on the local machine. It must point to an
 installed ORCA executable and a data directory outside the source tree.
 
-## M0 commands
+## Deterministic commands
 
 ```powershell
 uv run python -m bg6022 --config config.toml doctor --probe-orca
@@ -35,10 +36,24 @@ The preview command never starts ORCA. Real SP and Opt runs are separate runs;
 they share the public `Request -> Plan -> Step -> Tool.execute` path but are not
 combined into a fixed workflow.
 
+## Chat
+
+```powershell
+uv run python -m bg6022 --config config.toml chat
+```
+
+Set the environment variable named by `[llm].api_key_env` (by default
+`DEEPSEEK_API_KEY`) before sending a message that requires the model. Chat can
+prepare explicit SMILES without network access; names/CAS/CID use the real
+PubChem endpoint. `/confirm`, `/status`, `/cancel`, `/new`, and `/exit` are
+available. The model cannot grant execution permission, edit source code, or
+declare scientific success.
+
 ## Evidence and limitations
 
 Every attempt keeps its input, initial geometry, stdout, stderr, result, and
 registered artifacts. A failed Opt may publish a `restart_candidate`, but never
-as the successful `optimized_geometry` port. M0 does not claim frequency
-stability, global-minimum status, automatic repair, or natural-language
-planning. See `docs/acceptance.md` for the local acceptance record.
+as the successful `optimized_geometry` port. M1 Opt results are local optimized
+electronic energies only; they do not claim frequency stability or a global
+minimum. Live M1 acceptance is still pending and is tracked in
+`docs/milestones/M1.md`; see `docs/acceptance.md` for the accepted M0 record.

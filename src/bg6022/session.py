@@ -77,6 +77,8 @@ def execution_fingerprint(
     plan: Any,
     resources: dict[str, Any],
     initial_artifacts: list[Artifact],
+    *,
+    snapshot: dict[str, Any] | None = None,
 ) -> str:
     """Hash stable execution content, excluding mutable run state and clocks."""
 
@@ -95,11 +97,26 @@ def execution_fingerprint(
         for artifact in initial_artifacts
         if artifact.id in referenced_ids
     ]
+    if snapshot is not None:
+        bound_ids = {
+            item.get("id") for item in snapshot.get("bound_inputs", []) if isinstance(item, dict)
+        }
+        direct.extend(
+            {
+                "id": artifact.id,
+                "artifact_type": artifact.artifact_type,
+                "sha256": artifact.sha256,
+            }
+            for artifact in initial_artifacts
+            if artifact.id in bound_ids and artifact.id not in {item["id"] for item in direct}
+        )
     payload = {
         "plan": plan.model_dump(mode="json"),
         "resources": {key: resources[key] for key in sorted(resources)},
         "initial_artifacts": sorted(direct, key=lambda item: item["id"]),
     }
+    if snapshot is not None:
+        payload["accepted_snapshot"] = snapshot
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
         "utf-8"
     )
@@ -178,8 +195,100 @@ class RuntimeLock:
             self._handle = None
 
 
+class ChatSessionLock:
+    """Separate entry lock for the single local chat instance."""
+
+    def __init__(self, data_root: str | Path) -> None:
+        self.data_root = Path(data_root).resolve()
+        self.path = self.data_root / ".chat.lock"
+        self._handle = None
+
+    def __enter__(self) -> ChatSessionLock:
+        self.data_root.mkdir(parents=True, exist_ok=True)
+        self._handle = self.path.open("a+b")
+        self._handle.seek(0)
+        self._handle.write(b"0")
+        self._handle.flush()
+        self._handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(self._handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            self._handle.close()
+            self._handle = None
+            raise RuntimeError(f"another chat instance is active for {self.data_root}") from error
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        if self._handle is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                self._handle.seek(0)
+                msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._handle.close()
+            self._handle = None
+
+
 def run_directory(data_root: str | Path, run_id: str) -> Path:
     return Path(data_root).resolve() / "runs" / run_id
+
+
+def session_directory(data_root: str | Path) -> Path:
+    return Path(data_root).resolve() / "sessions"
+
+
+def session_path(data_root: str | Path, session_id: str) -> Path:
+    if not session_id or "/" in session_id or "\\" in session_id or session_id in {".", ".."}:
+        raise ValueError("invalid session id")
+    return session_directory(data_root) / f"{session_id}.json"
+
+
+def save_session(data_root: str | Path, session_id: str, payload: dict[str, Any]) -> Path:
+    """Persist only bounded conversational context, never full ORCA output."""
+
+    bounded = dict(payload)
+    messages = bounded.get("recent_messages")
+    if isinstance(messages, list):
+        bounded["recent_messages"] = messages[-12:]
+    results = bounded.get("recent_results")
+    if isinstance(results, list):
+        bounded["recent_results"] = results[-3:]
+    path = session_path(data_root, session_id)
+    atomic_write_json(path, bounded)
+    return path
+
+
+def load_session(data_root: str | Path, session_id: str) -> dict[str, Any]:
+    path = session_path(data_root, session_id)
+    if not path.exists():
+        return {
+            "session_id": session_id,
+            "recent_messages": [],
+            "recent_results": [],
+            "active_run_id": None,
+            "pending_prompt": None,
+        }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"session file is invalid: {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError(f"session file is not a JSON object: {path}")
+    return payload
 
 
 def attempt_directory(data_root: str | Path, run_id: str, step_id: str, attempt: int) -> Path:
@@ -198,6 +307,10 @@ def create_run(data_root: str | Path, run: Run) -> Path:
 def save_run(data_root: str | Path, run: Run) -> None:
     directory = run_directory(data_root, run.id)
     directory.mkdir(parents=True, exist_ok=True)
+    # Every durable checkpoint carries the elapsed active interval.  This
+    # matters when a Tool saves a prepared/started/finished attempt before the
+    # Agent reaches its next explicit checkpoint.
+    run.checkpoint_active()
     run.updated_at = utc_now()
     atomic_write_json(directory / "run.json", run.model_dump(mode="json"))
 
@@ -342,6 +455,7 @@ def atomic_write_bytes(path: str | Path, content: bytes) -> None:
 
 
 __all__ = [
+    "ChatSessionLock",
     "RuntimeLock",
     "artifact_path",
     "attempt_directory",
@@ -358,6 +472,10 @@ __all__ = [
     "register_bytes_artifact",
     "register_file_artifact",
     "run_directory",
+    "load_session",
+    "save_session",
+    "session_directory",
+    "session_path",
     "save_result",
     "save_run",
     "sha256_bytes",
