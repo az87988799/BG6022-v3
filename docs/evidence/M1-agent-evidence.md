@@ -5,6 +5,16 @@ acceptance and does not claim a new live DeepSeek, PubChem, or ORCA run.
 
 ## Offline evidence
 
+- The minimal-repair regression suite contains 65 passing tests and 3 skipped
+  opt-in live/integration tests. It covers Request/Plan target preservation,
+  old `optimized_geometry` field-to-port conversion, parser evidence for the
+  geometry-settings `MaxIter` (line 239 in the preserved ORCA fixture), input
+  versus output iteration-limit conflicts, q/M authority and O2 clarification,
+  complete waiting previews, atomic rejection of an unsupported method update,
+  and an explicit no-iteration-increase repair scope.
+- Static checks pass with Ruff lint and format verification. The new default
+  resource snapshot is 4 cores / 1024 MB / MaxCore 192 / concurrency 1; the
+  ignored local `config.toml` was synchronized without adding it to Git.
 - `tests/unit/test_m1_tools.py` covers old-config compatibility, explicit
   SMILES resolution, RDKit ETKDGv3 artifact metadata, bounded PubChem retry and
   URL encoding, one JSON-format correction, parameter-source precedence, and

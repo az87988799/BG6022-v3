@@ -13,6 +13,14 @@ from bg6022.planner import load_prompt
 def render_result(run: Run, result: Result) -> str:
     """Render only values that passed the Tool's success contract."""
 
+    if run.status == "waiting":
+        if run.waiting_for == "confirmation":
+            return "The prepared calculation is waiting for confirmation.\n" + json.dumps(
+                run.pending_data, ensure_ascii=False, indent=2, sort_keys=True, default=str
+            )
+        return "The calculation is waiting for additional information: " + json.dumps(
+            run.pending_data, ensure_ascii=False, sort_keys=True, default=str
+        )
     if result.status != "succeeded":
         category = result.diagnostics.get("category", "unknown_failure")
         reason = result.diagnostics.get("reason") or "no verified scientific result"
@@ -53,6 +61,14 @@ def render_result(run: Run, result: Result) -> str:
 
 
 def render_run(run: Run, result: Result | None = None) -> str:
+    if run.status == "waiting":
+        if run.waiting_for == "confirmation":
+            return "The prepared calculation is waiting for confirmation.\n" + json.dumps(
+                run.pending_data, ensure_ascii=False, indent=2, sort_keys=True, default=str
+            )
+        return "The run is waiting for additional information: " + json.dumps(
+            run.pending_data, ensure_ascii=False, sort_keys=True, default=str
+        )
     if run.status == "succeeded" and result is not None:
         return render_result(run, result)
     if run.status == "failed":
@@ -64,12 +80,13 @@ def render_run(run: Run, result: Result | None = None) -> str:
                 f"The last valid step was {result.step_id}; it is not the requested Run success."
             )
         return f"Run {run.id} failed{suffix}"
+    if run.status in {"cancelled", "interrupted"}:
+        last_step = f" Last valid step was {result.step_id}." if result is not None else ""
+        return (
+            f"Run {run.id} was {run.status}.{last_step} No overall scientific success is claimed."
+        )
     if result is not None:
         return render_result(run, result)
-    if run.status == "waiting":
-        if run.waiting_for == "confirmation":
-            return "The prepared calculation is waiting for confirmation."
-        return "The run is waiting for additional information."
     return f"Run {run.id} is {run.status}."
 
 

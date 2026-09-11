@@ -81,6 +81,9 @@ class AttemptFacts:
     effective_geom_maxiter: int | None = None
     scf_iteration_limit_reached: bool | None = None
     effective_scf_maxiter: int | None = None
+    effective_geom_maxiter_source: str | None = None
+    effective_geom_maxiter_error: str | None = None
+    scf_near_converged: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         values = asdict(self)
@@ -121,6 +124,31 @@ def inspect_attempt(
         stdout_text = stdout_bytes.decode("utf-8", errors="replace")
         valid_utf8 = False
     stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+
+    (
+        observed_geom_maxiter,
+        geom_maxiter_line,
+        geom_maxiter_error,
+    ) = _extract_effective_geom_maxiter(stdout_text)
+    if observed_geom_maxiter is not None:
+        if effective_geom_maxiter is not None and effective_geom_maxiter != observed_geom_maxiter:
+            geom_maxiter_error = (
+                "input geom_maxiter "
+                f"{effective_geom_maxiter} conflicts with ORCA geometry-settings value "
+                f"{observed_geom_maxiter}"
+            )
+            effective_geom_maxiter = None
+            geom_maxiter_source = None
+        else:
+            effective_geom_maxiter = observed_geom_maxiter
+            geom_maxiter_source = "orca_output"
+    elif effective_geom_maxiter is not None:
+        # Explicit settings remain usable for older/synthetic output formats,
+        # but are marked as input-derived.  A missing output setting can never
+        # invent a default value for a None input.
+        geom_maxiter_source = "input_parameter"
+    else:
+        geom_maxiter_source = None
 
     normal_matches = list(re.finditer(r"\*+ORCA TERMINATED NORMALLY\*+", stdout_text, re.I))
     scf_matches = list(re.finditer(r"\bSCF\s+CONVERGED\b", stdout_text, re.I))
@@ -224,6 +252,8 @@ def inspect_attempt(
         diagnostics.append("optimization iteration limit was reported by ORCA output")
     if scf_limit_match:
         diagnostics.append("SCF iteration limit was reported by ORCA output")
+    if geom_maxiter_error:
+        diagnostics.append(f"effective geometry iteration limit is unusable: {geom_maxiter_error}")
     if output_geometry_error:
         diagnostics.append(f"input.xyz is invalid: {output_geometry_error}")
     if stdout_geometry_error:
@@ -284,7 +314,11 @@ def inspect_attempt(
         "scf_iteration_limit": _line_for_offset(stdout_text, scf_limit_match.start())
         if scf_limit_match
         else None,
+        "effective_geom_maxiter": geom_maxiter_line,
+        "effective_geom_maxiter_source": geom_maxiter_source,
     }
+    if geom_maxiter_error:
+        source_locations["effective_geom_maxiter_error"] = geom_maxiter_error
     if input_hash_error:
         source_locations["input_hash_error"] = input_hash_error
 
@@ -332,7 +366,60 @@ def inspect_attempt(
             True if scf_limit_match else (False if not scf_failure else None)
         ),
         effective_scf_maxiter=effective_scf_maxiter,
+        effective_geom_maxiter_source=geom_maxiter_source,
+        effective_geom_maxiter_error=geom_maxiter_error,
+        scf_near_converged=None,
     )
+
+
+def _extract_effective_geom_maxiter(text: str) -> tuple[int | None, int | None, str | None]:
+    """Read MaxIter only from ORCA's geometry-optimization settings block.
+
+    ORCA prints another ``MaxIter`` in its SCF section.  Searching the whole
+    output would therefore associate an electronic iteration limit with a
+    geometry repair.  Unknown or conflicting geometry blocks return no value
+    so the repair admission rule stops conservatively.
+    """
+
+    lines = text.splitlines()
+    header = re.compile(r"^\s*Geometry\s+optimization\s+settings\s*:\s*$", re.I)
+    row = re.compile(
+        r"^\s*Max\.?\s+no\.?\s+of\s+cycles\s+MaxIter\s+\.\.\.\.\s*(\d+)\s*$",
+        re.I,
+    )
+    values: list[tuple[int, int]] = []
+    malformed_sections = 0
+    for index, line in enumerate(lines):
+        if not header.match(line):
+            continue
+        found: tuple[int, int] | None = None
+        for offset in range(index + 1, min(len(lines), index + 80)):
+            candidate = lines[offset]
+            stripped = candidate.strip()
+            if not stripped:
+                break
+            if re.match(r"^\s*(?:Convergence\s+Tolerances|SCF\s+Procedure)\s*:", candidate, re.I):
+                break
+            match = row.match(candidate)
+            if match:
+                found = (int(match.group(1)), offset + 1)
+                break
+        if found is None:
+            malformed_sections += 1
+        else:
+            values.append(found)
+
+    distinct = {value for value, _line in values}
+    if len(distinct) > 1:
+        return None, None, "conflicting geometry optimization MaxIter values in ORCA output"
+    if malformed_sections and not values:
+        return None, None, "geometry optimization settings block has no parseable MaxIter"
+    if malformed_sections and values:
+        return None, None, "one geometry optimization settings block has no parseable MaxIter"
+    if not values:
+        return None, None, None
+    value, line = values[-1]
+    return value, line, None
 
 
 def _extract_energies(text: str) -> list[EnergyObservation]:

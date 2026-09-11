@@ -232,8 +232,7 @@ def proposal_to_plan(
             )
         )
     targets = [
-        ResultTarget(step_id=step_ids[target.step_key], field=target.field, port=target.port)
-        for target in proposal.requested_results
+        _proposal_target_to_result_target(target, step_ids) for target in proposal.requested_results
     ]
     plan = Plan(
         id=plan_id,
@@ -241,7 +240,46 @@ def proposal_to_plan(
         steps=steps,
         requested_results=targets,
     )
-    return registry.validate_plan(plan)
+    return validate_request_plan(request, plan, registry)
+
+
+def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) -> Plan:
+    """Validate a model Plan against the user's original semantic request.
+
+    ``ToolRegistry`` can prove that a Plan is internally well-formed, but it
+    cannot know whether the model silently dropped the requested scientific
+    operation or changed the meaning of a result such as ``energy``.  Keep
+    that check at the boundary where both Request and Plan are available.
+    """
+
+    plan = registry.validate_plan(plan)
+    science_tools = {
+        step.tool for step in plan.steps if step.tool in {"single_point", "optimize_geometry"}
+    }
+    if request.operation is not None:
+        expected_tool = {"SP": "single_point", "Opt": "optimize_geometry"}[request.operation]
+        if expected_tool not in science_tools:
+            raise ValueError(f"Plan does not cover the requested {request.operation} calculation")
+        unexpected = sorted(science_tools - {expected_tool})
+        if unexpected:
+            raise ValueError(
+                f"Plan adds unrequested scientific operation(s): {', '.join(unexpected)}"
+            )
+
+    plan_targets = plan.requested_results
+    for request_target in request.requested_results:
+        matches = [
+            target
+            for target in plan_targets
+            if _request_target_matches(request_target, target, request)
+        ]
+        if not matches:
+            name = request_target.port or request_target.field or "<unknown>"
+            raise ValueError(f"Plan does not cover the requested result: {name}")
+        if len(matches) > 1:
+            name = request_target.port or request_target.field or "<unknown>"
+            raise ValueError(f"Requested result is ambiguous in the Plan: {name}")
+    return plan
 
 
 def request_from_intake(message: str, intake: IntakeOutput, *, request_id: str) -> Request:
@@ -252,11 +290,100 @@ def request_from_intake(message: str, intake: IntakeOutput, *, request_id: str) 
         description=message,
         original_text=message,
         requested_results=[ResultTarget(field=value) for value in intake.requested_results],
-        explicit_parameters=dict(intake.explicit_parameters),
+        explicit_parameters=filter_user_explicit_parameters(message, intake.explicit_parameters),
         structure_input=dict(intake.structure_input),
         source="chat",
+        operation=intake.operation,
         missing_fields=list(intake.missing_fields),
     )
+
+
+def filter_user_explicit_parameters(message: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep model-extracted q/M only when the user actually stated them.
+
+    Method and iteration options are ordinary planner hints and remain
+    available for later deterministic validation.  Charge and multiplicity
+    are different: a model's guessed values must never become scientific
+    evidence merely because they appeared in an intake JSON object.
+    """
+
+    filtered = dict(parameters)
+    for name in ("charge", "multiplicity"):
+        if name in filtered and not _message_declares_parameter(message, name, filtered[name]):
+            filtered.pop(name)
+    return filtered
+
+
+def _request_target_matches(
+    request_target: ResultTarget, plan_target: ResultTarget, request: Request
+) -> bool:
+    if request_target.step_id is not None and request_target.step_id != plan_target.step_id:
+        return False
+
+    request_kind, request_name = _semantic_target(request_target, request)
+    plan_kind = "port" if plan_target.port is not None else "field"
+    plan_name = plan_target.port or plan_target.field
+    if request_target.field == "energy" and request.operation is None:
+        return plan_kind == "field" and plan_name in {
+            "sp_electronic_energy",
+            "opt_final_electronic_energy",
+        }
+    return request_kind == plan_kind and request_name == plan_name
+
+
+def _proposal_target_to_result_target(
+    target: PlanTargetProposal, step_ids: Mapping[str, str]
+) -> ResultTarget:
+    try:
+        step_id = step_ids[target.step_key]
+    except KeyError as error:
+        raise ValueError(
+            f"planner requested result references unknown step key {target.step_key!r}"
+        ) from error
+    return ResultTarget(step_id=step_id, field=target.field, port=target.port)
+
+
+def _semantic_target(target: ResultTarget, request: Request) -> tuple[str, str | None]:
+    if target.port is not None:
+        return "port", target.port
+    name = target.field
+    aliases = {
+        "optimized_geometry": ("port", "optimized_geometry"),
+        "geometry": ("port", "geometry"),
+        "sp_energy": ("field", "sp_electronic_energy"),
+        "opt_energy": ("field", "opt_final_electronic_energy"),
+    }
+    if name in aliases:
+        return aliases[name]
+    if name == "energy":
+        if request.operation == "SP":
+            return "field", "sp_electronic_energy"
+        if request.operation == "Opt":
+            return "field", "opt_final_electronic_energy"
+    return "field", name
+
+
+def _message_declares_parameter(message: str, name: str, value: Any) -> bool:
+    if type(value) is not int:
+        return False
+    integer = rf"\+?{value}" if value >= 0 else rf"{value}"
+    if name == "charge":
+        patterns = [
+            rf"(?:\bcharge\b|\bq\b|电荷)\s*(?:is\s*|=\s*|:\s*|为\s*)?{integer}\b",
+            rf"{integer}\s*(?:\bcharge\b|\bq\b|电荷)",
+        ]
+        if value == 0:
+            patterns.append(r"\b(?:neutral|中性)\b")
+    else:
+        patterns = [
+            rf"(?:\bmultiplicity\b|\bspin\s*multiplicity\b|\bmult\b|\bM\b|多重度|自旋多重度|自旋)\s*(?:is\s*|=\s*|:\s*|为\s*)?{integer}\b",
+            rf"{integer}\s*(?:\bmultiplicity\b|\bmult\b|\bM\b|多重度|自旋多重度)",
+        ]
+        if value == 1:
+            patterns.append(r"\b(?:singlet|单重态)\b")
+        if value == 3:
+            patterns.append(r"\b(?:triplet|三重态)\b")
+    return any(re.search(pattern, message, flags=re.IGNORECASE) for pattern in patterns)
 
 
 def _step_id(index: int, key: str) -> str:
@@ -288,9 +415,11 @@ __all__ = [
     "PlanProposal",
     "PlanStepProposal",
     "PlanTargetProposal",
+    "filter_user_explicit_parameters",
     "intake_message",
     "load_prompt",
     "plan_message",
     "proposal_to_plan",
     "request_from_intake",
+    "validate_request_plan",
 ]

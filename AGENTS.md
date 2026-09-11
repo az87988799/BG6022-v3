@@ -11,7 +11,7 @@
    scientific checks.
 6. Do not migrate the v2 database, Kernel/Reducer, outbox, launch ticket, or P7
    turn schema into v3.
-7. The default real-compute budget is 4 cores, 2048 MB total, `%maxcore 384`,
+7. The current default real-compute budget is 4 cores, 1024 MB total, `%maxcore 192`,
    and one concurrent job. Configured and actual values must agree.
 8. The initial geometry is never overwritten. A successful output port cannot
    expose an unconverged geometry or an unverified number.

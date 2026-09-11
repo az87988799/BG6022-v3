@@ -311,14 +311,17 @@ def _chat_loop(agent: Agent) -> int:
             if message is None:
                 agent.request_cancel()
                 return
-            if message.casefold() in {"/exit", "exit", "退出"}:
-                agent.request_cancel()
-                outgoing.put(AgentResponse("Exiting after active work is cleaned up."))
-                return
-            if message.casefold() in {"/cancel", "cancel", "取消"}:
-                outgoing.put(agent.cancel())
-                continue
-            outgoing.put(agent.handle_message(message))
+            try:
+                if message.casefold() in {"/exit", "exit", "退出"}:
+                    agent.request_cancel()
+                    outgoing.put(AgentResponse("Exiting after active work is cleaned up."))
+                    return
+                if message.casefold() in {"/cancel", "cancel", "取消"}:
+                    outgoing.put(agent.cancel())
+                    continue
+                outgoing.put(agent.handle_message(message))
+            except Exception as error:  # noqa: BLE001 - keep the chat worker alive per request
+                outgoing.put(AgentResponse(f"This request failed safely: {error}"))
 
     reader = threading.Thread(target=read_input, name="bg6022-chat-input", daemon=True)
     worker = threading.Thread(target=work, name="bg6022-agent-worker", daemon=True)

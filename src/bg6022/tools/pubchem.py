@@ -105,6 +105,18 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                 cancel=cancel,
                 remaining_timeout_seconds=_remaining_active_seconds(run, config),
             )
+            if cancel.is_set():
+                return _result(
+                    run,
+                    step,
+                    attempt,
+                    "cancelled",
+                    diagnostics={
+                        "category": "cancelled",
+                        "reason": "cancelled after molecule lookup",
+                    },
+                    relative=relative,
+                )
             if len(lookup.candidates) != 1:
                 raw_artifact = register_bytes_artifact(
                     config.data_root_path,
@@ -152,6 +164,15 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
             source_url = lookup.url
             lookup_attempts = lookup.attempts
 
+        if cancel.is_set():
+            return _result(
+                run,
+                step,
+                attempt,
+                "cancelled",
+                diagnostics={"category": "cancelled", "reason": "cancelled before artifact write"},
+                relative=relative,
+            )
         molecule_bytes = json.dumps(
             {
                 "schema_version": 1,
@@ -275,6 +296,8 @@ def fetch_pubchem(
                 raise PubChemError("PubChem lookup timed out", category="timeout", retryable=True)
             try:
                 response = client.get(url, timeout=max(0.001, remaining))
+                if cancel is not None and cancel.is_set():
+                    raise PubChemError("PubChem lookup cancelled", category="cancelled")
                 raw = response.content
                 if len(raw) > MAX_RESPONSE_BYTES:
                     raise PubChemError(
@@ -313,6 +336,8 @@ def fetch_pubchem(
                     raise PubChemError(
                         "PubChem response contains no usable structure", category="not_found"
                     )
+                if cancel is not None and cancel.is_set():
+                    raise PubChemError("PubChem lookup cancelled", category="cancelled")
                 return PubChemLookup(
                     query=str(query),
                     input_kind=input_kind,

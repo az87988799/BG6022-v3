@@ -46,12 +46,18 @@ def applicable_repairs(run: Run, step: Step, result: Result) -> list[RepairOptio
         return []
     if facts.get("effective_geom_maxiter") is None:
         return []
+    if facts.get("effective_geom_maxiter_error") is not None:
+        return []
     candidate = _candidate_for_result(run, result)
     if candidate is None or not _candidate_is_eligible(candidate, step, result):
         return []
     old = int(facts["effective_geom_maxiter"])
     new = min(MAX_ITERATION, max(old + 1, old * 2, DEFAULT_RESTART_GEOM_MAXITER))
     if new <= old:
+        return []
+    if not _scope_allows_patch(
+        run, step, action="restart_optimization", patch={"geom_maxiter": new}
+    ):
         return []
     evidence = (
         "opt_iteration_limit_reached",
@@ -90,6 +96,10 @@ def applicable_scf_repair(run: Run, step: Step, result: Result) -> list[RepairOp
     old = int(facts["effective_scf_maxiter"])
     new = min(MAX_ITERATION, max(old + 1, old * 2))
     if new <= old:
+        return []
+    if not _scope_allows_patch(
+        run, step, action="increase_scf_maxiter", patch={"scf_maxiter": new}
+    ):
         return []
     return [
         RepairOption(
@@ -130,8 +140,12 @@ def validate_repair_option(
     normalized_patch = {str(key): value for key, value in requested_patch.items()}
     if normalized_patch != option.parameter_patch:
         raise ValueError("repair parameter patch differs from the deterministic allowed patch")
+    if any(type(value) is not int for value in normalized_patch.values()):
+        raise ValueError("repair iteration limits must be integers")
     if set(normalized_patch) - {"geom_maxiter", "scf_maxiter"}:
         raise ValueError("repair may change only a bounded iteration parameter")
+    if not _scope_allows_patch(run, step, action=option.action, patch=normalized_patch):
+        raise ValueError("repair patch exceeds the accepted repair scope")
     old_parameters = dict(step.parameters)
     new_parameters = dict(old_parameters)
     new_parameters.update(normalized_patch)
@@ -164,6 +178,7 @@ def validate_repair_option(
     record = {
         "action": option.action,
         "failed_step_id": step.id,
+        "failed_attempt": result.attempt,
         "failed_result_path": result.attempt_relative_path + "/result.json",
         "candidate_artifact_id": requested_candidate_id,
         "candidate_sha256": _artifact_sha(run, requested_candidate_id),
@@ -215,6 +230,40 @@ def _cleanly_stopped(process: Any) -> bool:
 def _input_integrity_ok(diagnostics: Mapping[str, Any]) -> bool:
     hashes = diagnostics.get("input_hashes")
     return isinstance(hashes, dict) and hashes.get("match") is True
+
+
+def _scope_allows_patch(run: Run, step: Step, *, action: str, patch: Mapping[str, Any]) -> bool:
+    """Check the accepted per-Run repair scope when one is available.
+
+    A few M0 unit callers construct an in-memory Run without an acceptance
+    snapshot; those compatibility tests retain the old local rule.  Any real
+    Agent Run has a snapshot before a repair can be proposed and therefore
+    must pass this narrower check.
+    """
+
+    snapshot = run.accepted_snapshot
+    if not snapshot:
+        return True
+    repair_scope = snapshot.get("repair_scope")
+    if not isinstance(repair_scope, dict):
+        return False
+    scopes = repair_scope.get("steps")
+    if not isinstance(scopes, dict):
+        return False
+    scope = scopes.get(step.id)
+    if not isinstance(scope, dict):
+        return False
+    actions = scope.get("actions")
+    action_scope = actions.get(action) if isinstance(actions, dict) else None
+    if not isinstance(action_scope, dict):
+        return False
+    fields = action_scope.get("fields")
+    maximum = action_scope.get("maximum")
+    if not isinstance(fields, list) or set(patch) != set(fields):
+        return False
+    if type(maximum) is not int:
+        return False
+    return all(type(value) is int and 1 <= value <= maximum for value in patch.values())
 
 
 __all__ = [

@@ -173,6 +173,8 @@ def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel
             ),
             cancel=cancel,
         )
+        if cancel.is_set():
+            raise GeometryEmbeddingError("RDKit embedding cancelled", category="cancelled")
         try:
             used_seed = int(embedded["seed"])
             symbols = tuple(str(symbol) for symbol in embedded["symbols"])

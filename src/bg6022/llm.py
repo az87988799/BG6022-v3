@@ -134,6 +134,8 @@ class LlmClient:
                 cancel=cancel,
                 remaining_timeout_seconds=remaining,
             )
+            if cancel is not None and cancel.is_set():
+                raise LlmError("model call cancelled", category="cancelled")
             if finish_reason == "length":
                 error = LlmError(
                     "model JSON response was truncated by the token limit",
@@ -221,6 +223,8 @@ class LlmClient:
                         json=payload,
                         timeout=max(0.001, remaining),
                     )
+                    if cancel is not None and cancel.is_set():
+                        raise LlmError("model call cancelled", category="cancelled")
                 except httpx.TimeoutException as error:
                     if attempt == 0:
                         continue
@@ -239,7 +243,7 @@ class LlmClient:
                     raise LlmError("language-model authentication was rejected", category="auth")
                 if response.status_code == 429:
                     if attempt == 0:
-                        _bounded_retry_after(response, deadline=deadline)
+                        _bounded_retry_after(response, deadline=deadline, cancel=cancel)
                         continue
                     raise LlmError(
                         "language-model rate limit reached", category="rate_limited", retryable=True
@@ -365,7 +369,9 @@ def _validate_schema(schema: Any, payload: Any) -> Any:
     return payload
 
 
-def _bounded_retry_after(response: httpx.Response, *, deadline: float | None = None) -> None:
+def _bounded_retry_after(
+    response: httpx.Response, *, deadline: float | None = None, cancel: Event | None = None
+) -> None:
     value = response.headers.get("Retry-After")
     if not value:
         return
@@ -377,7 +383,11 @@ def _bounded_retry_after(response: httpx.Response, *, deadline: float | None = N
         if deadline is not None:
             delay = min(delay, max(0.0, deadline - time.monotonic()))
         if delay:
-            time.sleep(delay)
+            if cancel is not None:
+                if cancel.wait(delay):
+                    raise LlmError("model call cancelled", category="cancelled")
+            else:
+                time.sleep(delay)
 
 
 __all__ = [

@@ -57,6 +57,7 @@ class Request(StrictModel):
     requested_results: list[ResultTarget] = Field(default_factory=list)
     explicit_parameters: dict[str, Any] = Field(default_factory=dict)
     source: Literal["cli", "chat"] = "cli"
+    operation: Literal["SP", "Opt"] | None = None
     original_text: str | None = None
     user_modifications: dict[str, Any] = Field(default_factory=dict)
     structure_input: dict[str, Any] = Field(default_factory=dict)

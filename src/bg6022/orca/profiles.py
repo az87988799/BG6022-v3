@@ -112,7 +112,6 @@ def resolve_parameters(
             ("user_modification", user_modifications),
             ("request_explicit", request_parameters),
             ("structure_facts", _structure_aliases(structure_facts, "charge", "formal_charge")),
-            ("tool_request", tool_parameters),
         ],
     )
     choose(
@@ -121,7 +120,6 @@ def resolve_parameters(
             ("user_modification", user_modifications),
             ("request_explicit", request_parameters),
             ("structure_facts", _multiplicity_facts(structure_facts)),
-            ("tool_request", tool_parameters),
         ],
     )
     for name in ("scf_maxiter", "geom_maxiter"):
@@ -160,8 +158,19 @@ def _multiplicity_facts(facts: Mapping[str, Any]) -> Mapping[str, Any]:
     # A singlet suggestion is only made for structures explicitly known to have
     # no radical electrons and no unsupported/metal elements.  Unknown facts
     # remain missing rather than silently becoming a closed-shell calculation.
-    symbols = set(facts.get("atom_symbols", ()))
-    if facts.get("radical_electrons") == 0 and symbols and symbols <= SUPPORTED_ELEMENTS:
+    atom_symbols = tuple(str(item) for item in facts.get("atom_symbols", ()))
+    symbols = set(atom_symbols)
+    # RDKit's neutral O=O representation has no atom-level radical flag, but
+    # the ground electronic state is not safely inferable from that fact alone.
+    # Keep this common open-shell case in clarification rather than silently
+    # turning it into a singlet calculation.
+    oxygen_dimer = len(atom_symbols) == 2 and atom_symbols.count("O") == 2
+    if (
+        not oxygen_dimer
+        and facts.get("radical_electrons") == 0
+        and symbols
+        and symbols <= SUPPORTED_ELEMENTS
+    ):
         return {"multiplicity": 1}
     return {}
 

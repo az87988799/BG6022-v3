@@ -11,11 +11,12 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator
 
 from bg6022.config import AppConfig, validate_execution_environment
-from bg6022.models import Plan, Result, Run, Step, Tool
+from bg6022.models import InputReference, Plan, Result, Run, Step, Tool
 from bg6022.orca.checks import evaluate_success
 from bg6022.orca.input import OrcaInputSpec, render_input
 from bg6022.orca.parser import inspect_attempt
 from bg6022.orca.profiles import get_profile
+from bg6022.orca.repair_rules import applicable_repairs, applicable_scf_repair
 from bg6022.orca.runner import ProcessFacts, RunnerResources, run_orca
 from bg6022.session import (
     RuntimeLock,
@@ -149,7 +150,7 @@ def execute_orca_step(
     operation: str,
     parameter_model: type[OrcaParameters],
 ) -> Result:
-    _check_execution_contract(run, step)
+    _check_execution_contract(config, run, step)
     parameters = parameter_model.model_validate(step.parameters, strict=True)
     profile = get_profile(parameters.method_profile)
     if parameters.environment not in profile.supported_environments:
@@ -480,7 +481,7 @@ def _execute_prepared_attempt(
     )
 
 
-def _check_execution_contract(run: Run, step: Step) -> None:
+def _check_execution_contract(config: AppConfig, run: Run, step: Step) -> None:
     if not run.execution_permission:
         raise PermissionError("Run does not have explicit execution permission")
     if run.accepted_execution_sha256 is None:
@@ -491,6 +492,14 @@ def _check_execution_contract(run: Run, step: Step) -> None:
             accepted_resources = dict(run.accepted_snapshot["resources"])
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("Run accepted snapshot is invalid") from error
+        if run.resources != accepted_resources:
+            raise ValueError("Run resources differ from the accepted execution budget")
+        accepted_request = run.accepted_snapshot.get("request")
+        if accepted_request is not None and accepted_request != run.request.model_dump(mode="json"):
+            raise ValueError("Run Request differs from the accepted scientific request")
+        accepted_budgets = run.accepted_snapshot.get("budgets")
+        if isinstance(accepted_budgets, dict) and dict(run.budget) != accepted_budgets:
+            raise ValueError("Run repair budget differs from the accepted budget")
         expected = execution_fingerprint(
             accepted_plan,
             accepted_resources,
@@ -499,17 +508,12 @@ def _check_execution_contract(run: Run, step: Step) -> None:
         )
         current_allowed = _plan_fingerprint(run.plan)
         base_allowed = _plan_fingerprint(accepted_plan)
-        derived_allowed = {
-            record.get("derived_plan_sha256")
-            for record in run.repair_records
-            if record.get("validated") is True
-        }
-        if expected != run.accepted_execution_sha256 or (
-            current_allowed != base_allowed and current_allowed not in derived_allowed
-        ):
-            raise ValueError(
-                "Run execution fingerprint does not match the accepted Plan or repair chain"
-            )
+        if expected != run.accepted_execution_sha256:
+            raise ValueError("Run execution fingerprint does not match the accepted Plan or inputs")
+        if current_allowed != base_allowed:
+            derived_plan = _reconstruct_repair_plan(config, run, accepted_plan)
+            if current_allowed != _plan_fingerprint(derived_plan):
+                raise ValueError("Run Plan is not derived from the accepted repair chain")
     else:
         expected = execution_fingerprint(run.plan, run.resources, run.artifact_index)
         if expected != run.accepted_execution_sha256:
@@ -519,6 +523,144 @@ def _check_execution_contract(run: Run, step: Step) -> None:
         raise ValueError(f"step is not part of the current Plan: {step.id}")
     if planned.model_dump(mode="json") != step.model_dump(mode="json"):
         raise ValueError(f"step {step.id} differs from the accepted Plan")
+
+
+def _reconstruct_repair_plan(config: AppConfig, run: Run, accepted_plan: Plan) -> Plan:
+    """Derive the current Plan from recorded repair facts, not trusted hashes."""
+
+    snapshot = run.accepted_snapshot
+    try:
+        start = int(snapshot.get("repair_record_start", 0))
+    except (TypeError, ValueError) as error:
+        raise ValueError("accepted repair record start is invalid") from error
+    if start < 0 or start > len(run.repair_records):
+        raise ValueError("accepted repair record start is outside the Run history")
+    plan = accepted_plan
+    for record in run.repair_records[start:]:
+        if record.get("validated") is not True:
+            raise ValueError("repair chain contains an unvalidated record")
+        step_id = record.get("failed_step_id")
+        step = next((item for item in plan.steps if item.id == step_id), None)
+        if step is None:
+            raise ValueError("repair chain targets a step outside the accepted Plan")
+        if record.get("old_parameters") != step.parameters:
+            raise ValueError("repair chain old parameters do not match the preceding Step")
+        patch = record.get("parameter_patch")
+        new_parameters = record.get("new_parameters")
+        action = record.get("action")
+        if not isinstance(patch, dict) or not isinstance(new_parameters, dict):
+            raise ValueError("repair chain parameters are malformed")
+        if any(type(value) is not int for value in patch.values()):
+            raise ValueError("repair chain iteration patches must be integers")
+        expected_parameters = {**step.parameters, **patch}
+        if new_parameters != expected_parameters:
+            raise ValueError("repair chain new parameters do not match its patch")
+        failed_result = _load_repair_result(config, run, record)
+        if failed_result.status != "failed":
+            raise ValueError("repair chain refers to a non-failed Result")
+        if failed_result.step_fingerprint != _step_fingerprint(step):
+            raise ValueError("repair chain failed Result is stale for the preceding Step")
+        if (
+            record.get("failed_attempt") is not None
+            and record.get("failed_attempt") != failed_result.attempt
+        ):
+            raise ValueError("repair chain failed attempt does not match its Result")
+        _validate_record_scope(run, step, action, patch)
+        applicable = applicable_repairs(run, step, failed_result) + applicable_scf_repair(
+            run, step, failed_result
+        )
+        matching = next((item for item in applicable if item.action == action), None)
+        if (
+            matching is None
+            or matching.parameter_patch != patch
+            or matching.candidate_artifact_id != record.get("candidate_artifact_id")
+            or set(matching.evidence_refs) != set(record.get("evidence_refs", []))
+        ):
+            raise ValueError("repair chain is not reproducible from the failed Result facts")
+
+        new_inputs = dict(step.inputs)
+        candidate_id = record.get("candidate_artifact_id")
+        if action == "restart_optimization":
+            if not isinstance(candidate_id, str):
+                raise ValueError("optimization restart record has no candidate artifact")
+            candidate = find_artifact(run, candidate_id)
+            if (
+                candidate.role != "restart_candidate"
+                or candidate.step_id != step.id
+                or candidate.id != candidate_id
+                or candidate.sha256 != record.get("candidate_sha256")
+            ):
+                raise ValueError("repair candidate is not bound to the recorded failed attempt")
+            if (
+                failed_result.status != "failed"
+                or candidate.id not in failed_result.artifact_ids
+                or candidate.attempt != failed_result.attempt
+            ):
+                raise ValueError("repair candidate is not present in the recorded failed Result")
+            new_inputs["geometry"] = InputReference(artifact_id=candidate.id)
+        elif action == "increase_scf_maxiter":
+            if candidate_id is not None:
+                raise ValueError("SCF repair record cannot contain a geometry candidate")
+        else:
+            raise ValueError(f"unsupported repair action in chain: {action}")
+
+        replacement = Step.model_validate(
+            {
+                **step.model_dump(mode="python"),
+                "parameters": new_parameters,
+                "inputs": new_inputs,
+            },
+            strict=True,
+        )
+        plan = Plan.model_validate(
+            {
+                **plan.model_dump(mode="python"),
+                "revision": plan.revision + 1,
+                "steps": [replacement if item.id == step.id else item for item in plan.steps],
+            },
+            strict=True,
+        )
+        if record.get("derived_plan_sha256") != _plan_fingerprint(plan):
+            raise ValueError("repair chain derived Plan hash is not reproducible")
+    return plan
+
+
+def _validate_record_scope(run: Run, step: Step, action: Any, patch: dict[str, Any]) -> None:
+    snapshot = run.accepted_snapshot
+    scope = snapshot.get("repair_scope") if isinstance(snapshot, dict) else None
+    if not isinstance(scope, dict):
+        raise ValueError("accepted repair scope is missing")
+    steps = scope.get("steps")
+    step_scope = steps.get(step.id) if isinstance(steps, dict) else None
+    actions = step_scope.get("actions") if isinstance(step_scope, dict) else None
+    action_scope = actions.get(action) if isinstance(actions, dict) else None
+    if not isinstance(action_scope, dict):
+        raise ValueError("repair action is outside the accepted scope")
+    fields = action_scope.get("fields")
+    maximum = action_scope.get("maximum")
+    if not isinstance(fields, list) or set(patch) != set(fields) or type(maximum) is not int:
+        raise ValueError("repair fields are outside the accepted scope")
+    if any(type(value) is not int or value < 1 or value > maximum for value in patch.values()):
+        raise ValueError("repair value is outside the accepted numeric scope")
+
+
+def _load_repair_result(config: AppConfig, run: Run, record: dict[str, Any]) -> Result:
+    relative = record.get("failed_result_path")
+    if not isinstance(relative, str):
+        raise ValueError("repair record has no failed Result path")
+    root = run_directory(config.data_root_path, run.id).resolve()
+    path = (root / relative).resolve()
+    if root not in path.parents or path.name != "result.json":
+        raise ValueError("repair Result path escapes the Run directory")
+    try:
+        result = Result.model_validate(json.loads(path.read_text(encoding="utf-8")), strict=True)
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError("recorded repair Result cannot be read") from error
+    if result.run_id != run.id or result.step_id != record.get("failed_step_id"):
+        raise ValueError("recorded repair Result belongs to a different Run or Step")
+    if result.attempt_relative_path + "/result.json" != relative:
+        raise ValueError("repair Result path does not match its recorded attempt")
+    return result
 
 
 def _plan_fingerprint(plan: Plan) -> str:

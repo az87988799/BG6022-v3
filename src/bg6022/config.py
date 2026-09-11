@@ -24,8 +24,8 @@ class OrcaSettings(StrictConfig):
 class RuntimeSettings(StrictConfig):
     data_root: StrictStr
     cores: StrictInt = Field(default=4, gt=0)
-    memory_mb: StrictInt = Field(default=2048, gt=0)
-    maxcore_mb: StrictInt = Field(default=384, gt=0)
+    memory_mb: StrictInt = Field(default=1024, gt=0)
+    maxcore_mb: StrictInt = Field(default=192, gt=0)
     max_concurrent_jobs: StrictInt = Field(default=1, ge=1, le=1)
     confirm_before_compute: StrictBool = True
     attempt_timeout_seconds: StrictInt = Field(default=1200, gt=0)

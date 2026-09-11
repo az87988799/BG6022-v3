@@ -94,6 +94,7 @@ class ToolRegistry:
                     dependencies[step.id].add(reference.step_id)
 
         ordered = _topological_order(plan.steps, dependencies)
+        plan = _normalize_legacy_targets(plan, ordered, self)
         _validate_requested_results(plan.requested_results, ordered, self)
         if [step.id for step in ordered] == [step.id for step in plan.steps]:
             return plan
@@ -162,3 +163,18 @@ def _validate_requested_results(
             )
         if target.step_id is None and len(matches) > 1:
             raise ValueError(f"requested result is ambiguous without step_id: {kind}:{name}")
+
+
+def _normalize_legacy_targets(plan: Plan, ordered: list[Any], registry: ToolRegistry) -> Plan:
+    """Convert old string-style output-port targets using Tool metadata only."""
+
+    output_port_names = {port for step in ordered for port in registry.get(step.tool).output_ports}
+    targets = []
+    changed = False
+    for target in plan.requested_results:
+        if target.field in output_port_names:
+            targets.append(target.model_copy(update={"field": None, "port": target.field}))
+            changed = True
+        else:
+            targets.append(target)
+    return plan.model_copy(update={"requested_results": targets}) if changed else plan

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
@@ -14,7 +15,14 @@ from .llm import LlmClient, LlmError
 from .models import InputReference, Plan, Request, Result, Run, Step
 from .orca.profiles import get_profile, resolve_parameters
 from .orca.repair_rules import applicable_repairs, applicable_scf_repair
-from .planner import intake_message, plan_message, proposal_to_plan, request_from_intake
+from .planner import (
+    filter_user_explicit_parameters,
+    intake_message,
+    plan_message,
+    proposal_to_plan,
+    request_from_intake,
+    validate_request_plan,
+)
 from .repair import apply_repair_proposal, propose_repair
 from .session import (
     artifact_path,
@@ -32,7 +40,7 @@ from .session import (
     save_session,
     utc_now,
 )
-from .tools.molecule import parse_xyz_bytes
+from .tools.molecule import parse_xyz_bytes, validate_electronic_state
 from .tools.registry import ToolRegistry
 
 INPUT_GEOMETRY_PLACEHOLDER = "__input_geometry__"
@@ -61,6 +69,8 @@ class Agent:
         self.llm = llm if llm is not None else LlmClient(config)
         self.session_id = session_id or new_id("session")
         self._cancel_events: dict[str, Event] = {}
+        self._request_sequence = 0
+        self._active_request: tuple[int, Event] | None = None
         try:
             self._session = load_session(config.data_root_path, self.session_id)
         except ValueError:
@@ -92,7 +102,7 @@ class Agent:
             raise ValueError("explicit ORCA execution requires a geometry input")
         if not execute:
             raise PermissionError("execution permission was not explicitly granted")
-        plan = self.registry.validate_plan(plan)
+        plan = validate_request_plan(request, plan, self.registry)
         # The explicit command has always checked the machine before creating a
         # Run. Chat intentionally defers this check until an ORCA Tool starts.
         validate_execution_environment(self.config)
@@ -119,7 +129,8 @@ class Agent:
             source=str(geometry_path),
             metadata={"imported_as_raw_bytes": True},
         )
-        run.plan = _bind_input_geometry(plan, initial_artifact.id)
+        bound_plan = _bind_input_geometry(plan, initial_artifact.id)
+        run.plan = _normalize_explicit_plan(self.registry, bound_plan)
         run.origin_step_map = {step.id: step.origin_step_id or step.id for step in run.plan.steps}
         run.accepted_snapshot = self._acceptance_snapshot(run)
         run.accepted_execution_sha256 = execution_fingerprint(
@@ -149,8 +160,10 @@ class Agent:
         if text.casefold() in {"/new", "new", "新任务"}:
             return self.new_session()
 
+        request_token, request_cancel = self._begin_request()
         self._append_message("user", text)
         try:
+            self._ensure_request_active(request_token, request_cancel)
             intake = intake_message(
                 self.llm,
                 text,
@@ -158,41 +171,62 @@ class Agent:
                     "recent_messages": self._session.get("recent_messages", []),
                     "recent_results": self._session.get("recent_results", []),
                 },
+                cancel=request_cancel,
             )
-        except (LlmError, ValueError) as error:
-            response = AgentResponse(f"I could not interpret this request: {error}")
-            self._append_message("assistant", response.text)
-            return response
+            self._ensure_request_active(request_token, request_cancel)
 
-        current = self._coerce_run(None)
-        if (
-            current is not None
-            and current.status == "waiting"
-            and current.waiting_for in {"clarification", "confirmation"}
-            and intake.explicit_parameters
-        ):
-            response = self._apply_parameter_update(current, intake.explicit_parameters)
-            self._append_message("assistant", response.text)
-            return response
-        if (
-            current is not None
-            and current.status == "waiting"
-            and current.waiting_for == "clarification"
-            and current.pending_data.get("category") == "ambiguous_molecule"
-            and intake.molecule_query
-        ):
-            response = self._apply_molecule_clarification(
-                current, intake.molecule_query, intake.molecule_input_kind
-            )
-            self._append_message("assistant", response.text)
-            return response
+            current = self._coerce_run(None)
+            explicit_parameters = filter_user_explicit_parameters(text, intake.explicit_parameters)
+            if (
+                current is not None
+                and current.status == "waiting"
+                and intake.molecule_query
+                and current.waiting_for == "clarification"
+                and current.pending_data.get("category") == "ambiguous_molecule"
+                and not _looks_like_molecule_change(text)
+            ):
+                response = self._apply_molecule_clarification(
+                    current,
+                    intake.molecule_query,
+                    intake.molecule_input_kind,
+                    cancel=request_cancel,
+                )
+                self._append_message("assistant", response.text)
+                return response
+            if (
+                current is not None
+                and current.status == "waiting"
+                and _is_parameter_continuation(current, intake, text, explicit_parameters)
+            ):
+                response = self._apply_parameter_update(
+                    current, explicit_parameters, cancel=request_cancel
+                )
+                self._append_message("assistant", response.text)
+                return response
+            if (
+                current is not None
+                and current.status == "waiting"
+                and intake.molecule_query
+                and _looks_like_molecule_change(text)
+            ):
+                response = self._apply_molecule_update(
+                    current,
+                    intake.molecule_query,
+                    intake.molecule_input_kind,
+                    cancel=request_cancel,
+                )
+                self._append_message("assistant", response.text)
+                return response
 
-        if intake.intent in {"chemistry_qa", "daily_qa"}:
-            return self._answer_question(text)
-        if intake.intent == "context_query":
-            return self._answer_context(text)
-        try:
+            if intake.intent in {"chemistry_qa", "daily_qa"}:
+                return self._answer_question(text, cancel=request_cancel)
+            if intake.intent == "context_query":
+                return self._answer_context(
+                    text, context_reference=intake.context_reference, cancel=request_cancel
+                )
+
             request = request_from_intake(text, intake, request_id=new_id("request"))
+            self._ensure_request_active(request_token, request_cancel)
             proposal = plan_message(
                 self.llm,
                 request,
@@ -201,25 +235,31 @@ class Agent:
                     "recent_messages": self._session.get("recent_messages", []),
                     "recent_results": self._session.get("recent_results", []),
                 },
+                cancel=request_cancel,
             )
+            self._ensure_request_active(request_token, request_cancel)
             plan = proposal_to_plan(request, proposal, self.registry, plan_id=new_id("plan"))
-            request = request.model_copy(update={"requested_results": plan.requested_results})
+            self._ensure_request_active(request_token, request_cancel)
             run = self._create_chat_run(request, plan)
             self._session["active_run_id"] = run.id
             self._save_session()
-            result = self.advance(run)
-            if result is not None:
-                response = AgentResponse(render_result(run, result), run=run, result=result)
-            elif run.status == "waiting":
-                response = AgentResponse(self._waiting_text(run), run=run)
-            else:
-                response = AgentResponse(render_run(run), run=run)
+            result = self.advance(run, cancel=request_cancel)
+            response = self._response_for_run(run, result)
             self._append_message("assistant", response.text)
             return response
-        except (LlmError, ValueError, OSError) as error:
+        except LlmError as error:
+            if error.category == "cancelled" or request_cancel.is_set():
+                response = AgentResponse("The current request was cancelled before it could run.")
+            else:
+                response = AgentResponse(f"I could not interpret this request: {error}")
+            self._append_message("assistant", response.text)
+            return response
+        except (ValueError, OSError) as error:
             response = AgentResponse(f"The request could not be planned: {error}")
             self._append_message("assistant", response.text)
             return response
+        finally:
+            self._finish_request(request_token, request_cancel)
 
     def advance(self, run: Run, *, cancel: Event | None = None) -> Result | None:
         """Continue the current Run until a result, wait point, or terminal state."""
@@ -263,10 +303,16 @@ class Agent:
                     save_run(self.config.data_root_path, run)
                     return last_result
                 tool = self.registry.get(step.tool)
-                if tool.requires_compute_permission and not self._prepare_orca_step(run, step):
-                    run.finish_active_interval()
-                    save_run(self.config.data_root_path, run)
-                    return last_result
+                if tool.requires_compute_permission:
+                    prepared_step = self._prepare_orca_step(run, step)
+                    if prepared_step is None:
+                        run.finish_active_interval()
+                        save_run(self.config.data_root_path, run)
+                        return last_result
+                    # Parameter resolution may replace a deferred Step.  The
+                    # exact replacement must be used for preview, fingerprint,
+                    # budget reservation, and execution in this same turn.
+                    step = prepared_step
                 if tool.requires_compute_permission and not run.execution_permission:
                     self._prepare_confirmation(run, step)
                     run.finish_active_interval()
@@ -378,18 +424,18 @@ class Agent:
                 f"The calculation was refused at the ORCA execution boundary: {error}",
                 run=current,
             )
-        if result is not None:
-            response = AgentResponse(render_result(current, result), run=current, result=result)
-        elif current.status == "waiting":
-            response = AgentResponse(self._waiting_text(current), run=current)
-        else:
-            response = AgentResponse(render_run(current), run=current)
+        response = self._response_for_run(current, result)
         self._append_message("assistant", response.text)
         return response
 
     def cancel(self, run: Run | str | None = None) -> AgentResponse:
+        active_request = self._active_request
+        if active_request is not None:
+            active_request[1].set()
         current = self._coerce_run(run)
         if current is None:
+            if active_request is not None:
+                return AgentResponse("Cancellation requested for the current request.")
             return AgentResponse("There is no active calculation.")
         event = self._cancel_events.setdefault(current.id, Event())
         event.set()
@@ -402,17 +448,29 @@ class Agent:
             current.status = "cancelled"
             current.waiting_for = None
             save_run(self.config.data_root_path, current)
+        if active_request is not None:
+            return AgentResponse("Cancellation requested for the current request.", run=current)
         return AgentResponse(f"Cancellation requested for {current.id}.", run=current)
 
     def request_cancel(self) -> AgentResponse:
-        """Signal cancellation without loading/saving a Run owned by a worker."""
+        """Signal cancellation without mutating a Run owned by the worker.
 
+        The input thread can call this while intake or planning is still in
+        flight, before a Run exists.  In that case the request Event is the
+        cancellation boundary and no durable Run is fabricated.
+        """
+
+        active_request = self._active_request
+        if active_request is not None:
+            active_request[1].set()
         run_id = self._session.get("active_run_id")
-        if not run_id:
-            return AgentResponse("There is no active calculation.")
-        event = self._cancel_events.setdefault(str(run_id), Event())
-        event.set()
-        return AgentResponse(f"Cancellation requested for {run_id}.")
+        if run_id and active_request is None:
+            event = self._cancel_events.setdefault(str(run_id), Event())
+            event.set()
+            return AgentResponse(f"Cancellation requested for {run_id}.")
+        if active_request is not None:
+            return AgentResponse("Cancellation requested for the current request.")
+        return AgentResponse("There is no active calculation.")
 
     def status(self) -> AgentResponse:
         current = self._coerce_run(None)
@@ -425,6 +483,10 @@ class Agent:
         current = self._coerce_run(None)
         if current is not None and current.status in {"running", "waiting"}:
             self.cancel(current)
+        if self._active_request is not None:
+            self._active_request[1].set()
+        self._request_sequence += 1
+        self._active_request = None
         self.session_id = new_id("session")
         self._session = {
             "session_id": self.session_id,
@@ -487,7 +549,7 @@ class Agent:
             {**run.plan.model_dump(mode="python"), "steps": steps}, strict=True
         )
 
-    def _prepare_orca_step(self, run: Run, step: Step) -> bool:
+    def _prepare_orca_step(self, run: Run, step: Step) -> Step | None:
         if (
             run.accepted_snapshot
             and "charge" in step.parameters
@@ -495,7 +557,7 @@ class Agent:
         ):
             validated = self.registry.get(step.tool).validate_parameters(step.parameters)
             _validate_orca_profile(validated)
-            return True
+            return step.model_copy(update={"parameters": validated})
         if (
             run.pending_data.get("step_id") == step.id
             and run.pending_data.get("parameters") == step.parameters
@@ -503,8 +565,8 @@ class Agent:
         ):
             validated = self.registry.get(step.tool).validate_parameters(step.parameters)
             _validate_orca_profile(validated)
-            return True
-        facts = self._known_structure_facts(run)
+            return step.model_copy(update={"parameters": validated})
+        facts = self._known_structure_facts(run, step)
         resolution = resolve_parameters(
             run.request.explicit_parameters,
             facts,
@@ -520,8 +582,9 @@ class Agent:
                 "step_id": step.id,
                 "missing_fields": list(resolution.missing_fields),
                 "parameter_sources": resolution.parameter_sources,
+                "parameters": dict(step.parameters),
             }
-            return False
+            return None
         validated = self.registry.get(step.tool).validate_parameters(
             resolution.effective_parameters
         )
@@ -532,33 +595,45 @@ class Agent:
         run.plan = _replace_step(run.plan, replacement)
         run.pending_data = {
             "step_id": step.id,
+            "parameters": dict(validated),
             "parameter_sources": resolution.parameter_sources,
             "effective_parameters": validated,
         }
-        return True
+        return replacement
 
-    def _apply_parameter_update(self, run: Run, parameters: dict[str, Any]) -> AgentResponse:
+    def _apply_parameter_update(
+        self, run: Run, parameters: dict[str, Any], *, cancel: Event | None = None
+    ) -> AgentResponse:
+        if cancel is not None and cancel.is_set():
+            return AgentResponse("The current request was cancelled.", run=run)
         step_id = str(run.pending_data.get("step_id", ""))
         step = next((item for item in run.plan.steps if item.id == step_id), None)
         if step is None:
-            step = next(
-                (
-                    item
-                    for item in run.plan.steps
-                    if item.tool in {"single_point", "optimize_geometry"}
-                ),
-                None,
-            )
+            science_steps = [
+                item
+                for item in run.plan.steps
+                if item.tool in {"single_point", "optimize_geometry"}
+            ]
+            step = science_steps[0] if len(science_steps) == 1 else None
         if step is None:
             return AgentResponse("The pending Run has no editable calculation step.", run=run)
         merged = dict(step.parameters)
         merged.update(parameters)
         try:
-            self.registry.get(step.tool).validate_parameters(merged)
+            tool = self.registry.get(step.tool)
+            validated_partial = tool.validate_parameters(merged, allow_deferred=True)
+            if step.tool in {"single_point", "optimize_geometry"}:
+                method_profile = validated_partial.get("method_profile")
+                environment = validated_partial.get("environment")
+                if method_profile is not None and environment is not None:
+                    normalized_profile = resolve_parameters(
+                        {}, {}, validated_partial, self.config.defaults
+                    ).effective_parameters
+                    _validate_orca_profile(normalized_profile)
             replacement = Step.model_validate(
                 {**step.model_dump(mode="python"), "parameters": merged}, strict=True
             )
-            run.request = run.request.model_copy(
+            candidate_request = run.request.model_copy(
                 update={
                     "explicit_parameters": {
                         **run.request.explicit_parameters,
@@ -570,63 +645,112 @@ class Agent:
                     },
                 }
             )
-            run.plan = _replace_step(run.plan, replacement)
-            run.plan = Plan.model_validate(
-                {**run.plan.model_dump(mode="python"), "revision": run.plan.revision + 1},
+            resolution = resolve_parameters(
+                candidate_request.explicit_parameters,
+                self._known_structure_facts(run, replacement),
+                merged,
+                self.config.defaults,
+                user_modifications=candidate_request.user_modifications,
+            )
+            if not resolution.missing_fields:
+                effective = tool.validate_parameters(resolution.effective_parameters)
+                _validate_orca_profile(effective)
+                self._validate_candidate_electronic_state(run, replacement, effective)
+            candidate_plan = _replace_step(run.plan, replacement)
+            candidate_plan = Plan.model_validate(
+                {
+                    **candidate_plan.model_dump(mode="python"),
+                    "revision": candidate_plan.revision + 1,
+                },
                 strict=True,
             )
-            run.plan = self.registry.validate_plan(run.plan)
-            run.execution_permission = not self.config.runtime.confirm_before_compute
-            run.accepted_snapshot = {}
-            run.accepted_execution_sha256 = None
-            _invalidate_current_results(run, step.id)
-            run.waiting_for = None
-            run.status = "running"
-            run.pending_data = {}
-            save_run(self.config.data_root_path, run)
-            result = self.advance(run)
-            if result is not None:
-                return AgentResponse(render_result(run, result), run=run, result=result)
-            return AgentResponse(self._waiting_text(run), run=run)
-        except ValueError as error:
+            candidate_plan = self.registry.validate_plan(candidate_plan)
+        except (TypeError, ValueError) as error:
             return AgentResponse(f"That parameter change was rejected: {error}", run=run)
+
+        run.request = candidate_request
+        run.plan = candidate_plan
+        run.execution_permission = not self.config.runtime.confirm_before_compute
+        run.accepted_snapshot = {}
+        run.accepted_execution_sha256 = None
+        _invalidate_current_results(run, step.id)
+        run.waiting_for = None
+        run.status = "running"
+        run.pending_data = {}
+        save_run(self.config.data_root_path, run)
+        try:
+            result = self.advance(
+                run,
+                cancel=cancel or self._cancel_events.setdefault(run.id, Event()),
+            )
+        except (PermissionError, ValueError, OSError) as error:
+            run.status = "failed"
+            run.pending_data = {"category": "execution_boundary", "reason": str(error)}
+            save_run(self.config.data_root_path, run)
+            return AgentResponse(f"The calculation could not continue: {error}", run=run)
+        return self._response_for_run(run, result)
 
     def _apply_molecule_clarification(
         self,
         run: Run,
         query: str,
         input_kind: str | None,
+        *,
+        cancel: Event | None = None,
     ) -> AgentResponse:
+        return self._apply_molecule_update(run, query, input_kind, cancel=cancel)
+
+    def _apply_molecule_update(
+        self,
+        run: Run,
+        query: str,
+        input_kind: str | None,
+        *,
+        cancel: Event | None = None,
+    ) -> AgentResponse:
+        if cancel is not None and cancel.is_set():
+            return AgentResponse("The current request was cancelled.", run=run)
         step_id = str(run.pending_data.get("step_id", ""))
         step = next((item for item in run.plan.steps if item.id == step_id), None)
         if step is None or step.tool != "resolve_molecule":
+            resolve_steps = [item for item in run.plan.steps if item.tool == "resolve_molecule"]
+            step = resolve_steps[0] if len(resolve_steps) == 1 else None
+        if step is None:
             return AgentResponse("The pending Run has no molecule-resolution step.", run=run)
         kind = input_kind or ("cid" if query.isdecimal() else "name")
-        replacement = Step.model_validate(
-            {
-                **step.model_dump(mode="python"),
-                "parameters": {"query": query, "input_kind": kind},
-            },
-            strict=True,
-        )
         try:
-            self.registry.get(step.tool).validate_parameters(replacement.parameters)
-            run.plan = _replace_step(run.plan, replacement)
-            run.plan = Plan.model_validate(
-                {**run.plan.model_dump(mode="python"), "revision": run.plan.revision + 1},
+            replacement = Step.model_validate(
+                {
+                    **step.model_dump(mode="python"),
+                    "parameters": {"query": query, "input_kind": kind},
+                },
                 strict=True,
             )
-            run.plan = self.registry.validate_plan(run.plan)
+            self.registry.get(step.tool).validate_parameters(replacement.parameters)
+            candidate_plan = _replace_step(run.plan, replacement)
+            candidate_plan = Plan.model_validate(
+                {
+                    **candidate_plan.model_dump(mode="python"),
+                    "revision": candidate_plan.revision + 1,
+                },
+                strict=True,
+            )
+            candidate_plan = self.registry.validate_plan(candidate_plan)
         except ValueError as error:
             return AgentResponse(f"That molecule choice was rejected: {error}", run=run)
+        run.plan = candidate_plan
+        _invalidate_current_results(run, step.id)
+        run.accepted_snapshot = {}
+        run.accepted_execution_sha256 = None
         run.status = "running"
         run.waiting_for = None
         run.pending_data = {}
         save_run(self.config.data_root_path, run)
-        result = self.advance(run)
-        if result is not None:
-            return AgentResponse(render_result(run, result), run=run, result=result)
-        return AgentResponse(self._waiting_text(run), run=run)
+        result = self.advance(
+            run,
+            cancel=cancel or self._cancel_events.setdefault(run.id, Event()),
+        )
+        return self._response_for_run(run, result)
 
     def _try_repair(self, run: Run, step: Step, result: Result, cancel: Event) -> bool:
         if not self.config.repair.enabled:
@@ -648,7 +772,13 @@ class Agent:
             }
             save_run(self.config.data_root_path, run)
             return False
-        if len(run.repair_records) >= self.config.repair.max_extra_orca_executions:
+        max_extra = int(
+            run.budget.get(
+                "max_extra_orca_executions",
+                self.config.repair.max_extra_orca_executions,
+            )
+        )
+        if run.extra_orca_executions >= max_extra:
             return False
         try:
             proposal = propose_repair(
@@ -694,6 +824,10 @@ class Agent:
         if step.tool not in {"single_point", "optimize_geometry"}:
             return True
         origin = run.origin_step_map.get(step.id, step.origin_step_id or step.id)
+        known_origin = step.id in run.origin_step_map or origin in run.origin_step_map.values()
+        new_science_step = bool(run.accepted_snapshot) and not known_origin
+        if step.id not in run.origin_step_map:
+            run.origin_step_map[step.id] = origin
         count = int(run.attempt_counts.get(origin, 0))
         if count >= int(run.budget.get("max_attempts_per_science_step", 3)):
             run.pending_data = {
@@ -701,7 +835,7 @@ class Agent:
                 "step_id": step.id,
             }
             return False
-        if count > 0 and run.extra_orca_executions >= int(
+        if (count > 0 or new_science_step) and run.extra_orca_executions >= int(
             run.budget.get("max_extra_orca_executions", 3)
         ):
             run.pending_data = {
@@ -710,7 +844,7 @@ class Agent:
             }
             return False
         run.attempt_counts[origin] = count + 1
-        if count > 0:
+        if count > 0 or new_science_step:
             run.extra_orca_executions += 1
         return True
 
@@ -721,8 +855,15 @@ class Agent:
 
     def _preview(self, run: Run, step: Step) -> dict[str, Any]:
         artifacts = self._input_artifacts(run, step)
-        structure = self._known_structure_facts(run)
+        structure = self._known_structure_facts(run, step)
         return {
+            "request": {
+                "description": run.request.description,
+                "operation": run.request.operation,
+                "requested_results": [
+                    target.model_dump(mode="json") for target in run.request.requested_results
+                ],
+            },
             "operation": "Opt" if step.tool == "optimize_geometry" else "SP",
             "step_id": step.id,
             "tool": step.tool,
@@ -730,14 +871,19 @@ class Agent:
             "parameter_sources": run.pending_data.get("parameter_sources", {}),
             "structure": structure,
             "artifact_bindings": [
-                {"id": artifact.id, "sha256": artifact.sha256, "role": artifact.role}
+                {
+                    "id": artifact.id,
+                    "sha256": artifact.sha256,
+                    "role": artifact.role,
+                    "artifact_type": artifact.artifact_type,
+                    "source": artifact.source,
+                    "structure_source": artifact.metadata.get("structure_source"),
+                }
                 for artifact in artifacts
             ],
             "resources": dict(run.resources),
-            "allowed_repairs": [
-                "restart_optimization",
-                "increase_scf_maxiter (only if separately verified)",
-            ],
+            "allowed_repairs": self._allowed_repairs(run, step),
+            "repair_scope": self._repair_scope(run),
             "budget": dict(run.budget),
         }
 
@@ -748,31 +894,195 @@ class Agent:
                 item = {"step_id": step.id, "id": artifact.id, "sha256": artifact.sha256}
                 if item not in bound:
                     bound.append(item)
+        repair_scope = self._repair_scope(run)
+        allowed_repairs = sorted(
+            {
+                action
+                for step_scope in repair_scope.get("steps", {}).values()
+                if isinstance(step_scope, dict)
+                for action in step_scope.get("actions", {})
+            }
+        )
         return {
             "request": run.request.model_dump(mode="json"),
             "plan": run.plan.model_dump(mode="json"),
             "resources": dict(run.resources),
             "bound_inputs": bound,
-            "allowed_repairs": ["restart_optimization", "increase_scf_maxiter"],
+            "allowed_repairs": allowed_repairs,
+            "repair_scope": repair_scope,
             "budgets": dict(run.budget),
+            "origin_step_map": dict(run.origin_step_map),
+            "repair_record_start": len(run.repair_records),
         }
 
-    def _known_structure_facts(self, run: Run) -> dict[str, Any]:
-        for artifact in reversed(run.artifact_index):
-            if artifact.artifact_type != "molecule" or artifact.role != "resolved_molecule":
+    def _known_structure_facts(self, run: Run, step: Step | None = None) -> dict[str, Any]:
+        """Read facts only from the molecule that produced this Step's geometry."""
+
+        if step is None:
+            return {}
+        geometry_reference = step.inputs.get("geometry")
+        if geometry_reference is None:
+            return {}
+        geometry_artifact = self._artifact_from_reference(run, geometry_reference)
+        if geometry_artifact is None:
+            return {}
+        molecule_artifact = self._molecule_artifact_for_geometry(run, geometry_artifact, seen=set())
+        if molecule_artifact is None:
+            return {}
+        try:
+            payload = json.loads(
+                artifact_path(self.config.data_root_path, run, molecule_artifact).read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {}
+        facts = payload.get("facts")
+        if isinstance(facts, dict):
+            enriched = dict(facts)
+            enriched.setdefault("source", payload.get("source"))
+            enriched.setdefault("query", payload.get("query"))
+            enriched.setdefault("input_kind", payload.get("input_kind"))
+            return enriched
+        return {}
+
+    def _validate_candidate_electronic_state(
+        self, run: Run, step: Step, parameters: dict[str, Any]
+    ) -> None:
+        reference = step.inputs.get("geometry")
+        if reference is None:
+            return
+        geometry_artifact = self._artifact_from_reference(run, reference)
+        if geometry_artifact is None:
+            raise ValueError("candidate geometry is not a current successful artifact")
+        try:
+            geometry = parse_xyz_bytes(
+                artifact_path(self.config.data_root_path, run, geometry_artifact).read_bytes()
+            )
+        except (OSError, ValueError) as error:
+            raise ValueError("candidate geometry cannot be validated") from error
+        validate_electronic_state(
+            geometry,
+            charge=parameters["charge"],
+            multiplicity=parameters["multiplicity"],
+        )
+
+    def _molecule_artifact_for_geometry(
+        self, run: Run, artifact: Any, *, seen: set[str]
+    ) -> Any | None:
+        if artifact.id in seen:
+            return None
+        seen.add(artifact.id)
+        if artifact.artifact_type == "molecule" and artifact.role == "resolved_molecule":
+            return artifact
+        molecule_id = artifact.metadata.get("molecule_artifact_id")
+        if isinstance(molecule_id, str):
+            try:
+                molecule = find_artifact(run, molecule_id)
+            except ValueError:
+                molecule = None
+            if (
+                molecule is not None
+                and molecule.artifact_type == "molecule"
+                and molecule.role == "resolved_molecule"
+            ):
+                return molecule
+        for attempt in reversed(run.attempts):
+            if (
+                attempt.get("step_id") != artifact.step_id
+                or attempt.get("attempt") != artifact.attempt
+                or artifact.id not in attempt.get("artifact_ids", [])
+            ):
+                continue
+            input_id = attempt.get("input_geometry_artifact_id")
+            if not isinstance(input_id, str):
                 continue
             try:
-                payload = json.loads(
-                    artifact_path(self.config.data_root_path, run, artifact).read_text(
-                        encoding="utf-8"
-                    )
-                )
-            except (OSError, ValueError, json.JSONDecodeError):
-                continue
-            facts = payload.get("facts")
-            if isinstance(facts, dict):
-                return facts
-        return {}
+                input_artifact = find_artifact(run, input_id)
+            except ValueError:
+                input_artifact = None
+            if input_artifact is not None:
+                return self._molecule_artifact_for_geometry(run, input_artifact, seen=seen)
+        if artifact.step_id is None:
+            return None
+        producer = next((item for item in run.plan.steps if item.id == artifact.step_id), None)
+        if producer is None:
+            return None
+        upstream_name = "molecule" if producer.tool == "generate_geometry" else "geometry"
+        upstream_reference = producer.inputs.get(upstream_name)
+        if upstream_reference is None:
+            return None
+        upstream = self._artifact_from_reference(run, upstream_reference)
+        if upstream is None:
+            return None
+        return self._molecule_artifact_for_geometry(run, upstream, seen=seen)
+
+    def _repair_scope(self, run: Run) -> dict[str, Any]:
+        iteration_increase_allowed = _iteration_increase_allowed(run.request.description)
+        scopes: dict[str, Any] = {}
+        for step in run.plan.steps:
+            if step.tool == "optimize_geometry":
+                actions: dict[str, Any] = {}
+                if iteration_increase_allowed:
+                    actions["restart_optimization"] = {
+                        "fields": ["geom_maxiter"],
+                        "maximum": 1000,
+                        "maximum_is_program_cap": True,
+                    }
+                scopes[step.id] = {
+                    "origin_step_id": run.origin_step_map.get(
+                        step.id, step.origin_step_id or step.id
+                    ),
+                    "mutable_parameters": ["geom_maxiter"],
+                    "immutable_parameters": [
+                        "method_profile",
+                        "environment",
+                        "charge",
+                        "multiplicity",
+                        "scf_maxiter",
+                    ],
+                    "geometry_rule": "only a program-validated restart_candidate from this Step",
+                    "actions": actions,
+                }
+            elif step.tool == "single_point":
+                actions = {}
+                if iteration_increase_allowed:
+                    actions["increase_scf_maxiter"] = {
+                        "fields": ["scf_maxiter"],
+                        "maximum": 1000,
+                        "maximum_is_program_cap": True,
+                    }
+                scopes[step.id] = {
+                    "origin_step_id": run.origin_step_map.get(
+                        step.id, step.origin_step_id or step.id
+                    ),
+                    "mutable_parameters": ["scf_maxiter"],
+                    "immutable_parameters": [
+                        "method_profile",
+                        "environment",
+                        "charge",
+                        "multiplicity",
+                        "geom_maxiter",
+                    ],
+                    "geometry_rule": "retain the accepted geometry reference",
+                    "actions": actions,
+                }
+        return {
+            "version": 1,
+            "iteration_increase_allowed": iteration_increase_allowed,
+            "steps": scopes,
+            "resources_immutable": dict(run.resources),
+            "max_attempts_per_science_step": run.budget.get("max_attempts_per_science_step"),
+            "max_extra_orca_executions": run.budget.get("max_extra_orca_executions"),
+        }
+
+    def _allowed_repairs(self, run: Run, step: Step) -> list[str]:
+        scope = self._repair_scope(run).get("steps", {})
+        step_scope = scope.get(step.id, {}) if isinstance(scope, dict) else {}
+        actions = step_scope.get("actions", {}) if isinstance(step_scope, dict) else {}
+        if not isinstance(actions, dict):
+            return []
+        return sorted(str(action) for action in actions)
 
     def _input_artifacts(self, run: Run, step: Step) -> list[Any]:
         artifacts: list[Any] = []
@@ -796,9 +1106,17 @@ class Agent:
         result = _load_bound_result(self.config.data_root_path, run, relative)
         if result is None or result.status != "succeeded":
             return None
+        upstream = next((item for item in run.plan.steps if item.id == reference.step_id), None)
+        if upstream is None or result.step_fingerprint != _step_fingerprint(upstream):
+            return None
         try:
             artifact_id = result.output_ports.get(reference.port)
-            return find_artifact(run, artifact_id) if artifact_id else None
+            if not artifact_id or artifact_id not in result.artifact_ids:
+                return None
+            artifact = find_artifact(run, artifact_id)
+            if artifact.step_id != reference.step_id or artifact.attempt != result.attempt:
+                return None
+            return artifact
         except ValueError:
             return None
 
@@ -837,15 +1155,44 @@ class Agent:
         )
         return limit - run.current_active_seconds()
 
+    def _response_for_run(self, run: Run, result: Result | None) -> AgentResponse:
+        # A successful preparation step is not the user's requested scientific
+        # result.  Waiting state always wins over the last intermediate Result.
+        if run.status == "waiting":
+            return AgentResponse(self._waiting_text(run), run=run, result=result)
+        if run.status in {"succeeded", "failed", "cancelled", "interrupted"}:
+            return AgentResponse(render_run(run, result), run=run, result=result)
+        if result is not None:
+            return AgentResponse(render_result(run, result), run=run, result=result)
+        return AgentResponse(render_run(run), run=run)
+
     def _waiting_text(self, run: Run) -> str:
         if run.waiting_for == "confirmation":
             preview = run.pending_data
             return (
                 "Prepared a calculation and need your confirmation: "
                 f"{preview.get('operation', 'calculation')} "
-                f"with {preview.get('parameters', {})}. Type /confirm to run it."
+                "with the following accepted preview. Type /confirm to run it.\n"
+                + json.dumps(preview, ensure_ascii=False, indent=2, sort_keys=True, default=str)
             )
-        return "More information is required: " + json.dumps(run.pending_data, ensure_ascii=False)
+        return "More information is required: " + json.dumps(
+            run.pending_data, ensure_ascii=False, sort_keys=True, default=str
+        )
+
+    def _begin_request(self) -> tuple[int, Event]:
+        self._request_sequence += 1
+        token = self._request_sequence
+        event = Event()
+        self._active_request = (token, event)
+        return token, event
+
+    def _finish_request(self, token: int, event: Event) -> None:
+        if self._active_request == (token, event):
+            self._active_request = None
+
+    def _ensure_request_active(self, token: int, event: Event) -> None:
+        if event.is_set() or self._active_request != (token, event):
+            raise LlmError("request cancelled", category="cancelled")
 
     def _append_message(self, role: str, content: str) -> None:
         messages = self._session.setdefault("recent_messages", [])
@@ -873,7 +1220,7 @@ class Agent:
         except OSError:
             pass
 
-    def _answer_question(self, question: str) -> AgentResponse:
+    def _answer_question(self, question: str, *, cancel: Event | None = None) -> AgentResponse:
         try:
             text = self.llm.complete_text(
                 [
@@ -883,19 +1230,45 @@ class Agent:
                             "Answer the question without claiming an unperformed computation."
                         ),
                     },
-                    {"role": "user", "content": question},
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "question": question,
+                                "recent_messages": self._session.get("recent_messages", [])[-12:],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
                 ],
                 purpose="answer",
+                cancel=cancel,
             )
         except LlmError as error:
-            text = f"I cannot answer through the configured model: {error}"
+            text = (
+                "The current request was cancelled."
+                if error.category == "cancelled"
+                else f"I cannot answer through the configured model: {error}"
+            )
         response = AgentResponse(text)
         self._append_message("assistant", text)
         return response
 
-    def _answer_context(self, question: str) -> AgentResponse:
-        run = self._coerce_run(None)
-        result = self._context_result(run) if run is not None else None
+    def _answer_context(
+        self,
+        question: str,
+        *,
+        context_reference: str | None = None,
+        cancel: Event | None = None,
+    ) -> AgentResponse:
+        if cancel is not None and cancel.is_set():
+            return AgentResponse("The current request was cancelled.")
+        run = self._context_run(context_reference)
+        result = (
+            self._context_result(run, context_reference=context_reference)
+            if run is not None
+            else None
+        )
         text = (
             context_answer(run, result, question)
             if run is not None
@@ -905,7 +1278,45 @@ class Agent:
         self._append_message("assistant", text)
         return response
 
-    def _context_result(self, run: Run) -> Result | None:
+    def _context_run(self, reference: str | None) -> Run | None:
+        active = self._coerce_run(None)
+        value = (reference or "").strip()
+        if not value or value.casefold() in {"last", "latest", "recent", "刚才", "最近"}:
+            return active
+        if active is not None and (
+            value == active.id or any(step.id == value for step in active.plan.steps)
+        ):
+            return active
+        recent_ids = {
+            str(item.get("run_id"))
+            for item in self._session.get("recent_results", [])
+            if isinstance(item, dict) and item.get("run_id")
+        }
+        if value not in recent_ids:
+            return None
+        try:
+            run = load_run(self.config.data_root_path, value)
+        except ValueError:
+            return None
+        if run.session_id not in {None, self.session_id}:
+            return None
+        return run
+
+    def _context_result(self, run: Run, *, context_reference: str | None = None) -> Result | None:
+        reference = (context_reference or "").strip()
+        if reference and reference not in {
+            "last",
+            "latest",
+            "recent",
+            "刚才",
+            "最近",
+            run.id,
+        }:
+            relative = run.current_results.get(reference)
+            if relative:
+                result = _load_bound_result(self.config.data_root_path, run, relative)
+                if result is not None and result.status == "succeeded":
+                    return result
         for step in reversed(run.plan.steps):
             relative = run.current_results.get(step.id)
             if not relative:
@@ -925,6 +1336,63 @@ def _bind_input_geometry(plan: Plan, artifact_id: str) -> Plan:
             inputs["geometry"] = InputReference(artifact_id=artifact_id)
         steps.append(step.model_copy(update={"inputs": inputs}))
     return plan.model_copy(update={"steps": steps})
+
+
+def _normalize_explicit_plan(registry: ToolRegistry, plan: Plan) -> Plan:
+    """Resolve defaults before an explicit Run receives its acceptance snapshot."""
+
+    steps: list[Step] = []
+    for step in plan.steps:
+        tool = registry.get(step.tool)
+        if tool.requires_compute_permission:
+            parameters = tool.validate_parameters(step.parameters)
+            if step.tool in {"single_point", "optimize_geometry"}:
+                _validate_orca_profile(parameters)
+            step = step.model_copy(update={"parameters": parameters})
+        steps.append(step)
+    return plan.model_copy(update={"steps": steps})
+
+
+def _is_parameter_continuation(
+    run: Run,
+    intake: Any,
+    message: str,
+    explicit_parameters: dict[str, Any],
+) -> bool:
+    if not explicit_parameters or intake.molecule_query or intake.structure_input:
+        return False
+    if intake.operation is not None and run.request.operation is not None:
+        if intake.operation != run.request.operation:
+            return False
+    if _looks_like_molecule_change(message):
+        return False
+    return run.waiting_for in {"clarification", "confirmation"}
+
+
+def _looks_like_molecule_change(message: str) -> bool:
+    return bool(
+        re.search(
+            r"(?:改成|改为|改用|换成|换为|换用|换一个|使用.+代替|换.+instead|"
+            r"change.+to|switch.+to|use.+instead|instead\s+of)",
+            message,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _iteration_increase_allowed(message: str) -> bool:
+    """Honor an explicit request not to raise an iteration limit."""
+
+    return not bool(
+        re.search(
+            r"(?:不得|不要|禁止|不允许|不能|无需|不需要)\s*"
+            r"(?:再?\s*)?(?:增加|提高|放宽|上调)\s*(?:迭代|步数|次数|上限|maxiter)?|"
+            r"(?:do\s*not|don't|without)\s+(?:increase|raise|relax|change)"
+            r"\s+(?:the\s+)?(?:iteration|iterations|maxiter|iteration\s+limit)",
+            message,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def _replace_step(plan: Plan, replacement: Step) -> Plan:

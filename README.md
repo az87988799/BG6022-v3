@@ -20,7 +20,12 @@ uv run pytest -m "not live_orca and not live_llm and not live_pubchem"
 ```
 
 Edit the ignored `config.toml` only on the local machine. It must point to an
-installed ORCA executable and a data directory outside the source tree.
+installed ORCA executable and a data directory outside the source tree. For
+the current M1 repair baseline, set `[runtime]` to `cores = 4`,
+`memory_mb = 1024`, `maxcore_mb = 192`, and `max_concurrent_jobs = 1`.
+Existing local configurations are not overwritten by the example file; update
+those four keys explicitly before creating a new Run. Existing or running Runs
+retain the resource snapshot with which they were created.
 
 ## Deterministic commands
 
