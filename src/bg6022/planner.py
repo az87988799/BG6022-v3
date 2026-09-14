@@ -6,7 +6,15 @@ import re
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictStr,
+    create_model,
+    field_validator,
+    model_validator,
+)
 
 from bg6022.llm import LlmClient
 from bg6022.models import InputReference, Plan, Request, ResultTarget, Step
@@ -14,6 +22,40 @@ from bg6022.tools.registry import ToolRegistry
 
 Intent = Literal["chemistry_compute", "chemistry_qa", "daily_qa", "context_query"]
 Operation = Literal["SP", "Opt"]
+QuerySelectionStatus = Literal["selected", "clarify", "unavailable"]
+
+
+class QuerySelection(BaseModel):
+    """Ephemeral model output for choosing facts from this intake round.
+
+    The short references are created by the Agent and are never persisted as
+    domain objects.  A dynamic Intake model adds the current candidate-set
+    validator before the model call is made.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    status: QuerySelectionStatus
+    refs: list[StrictStr] = Field(default_factory=list)
+    clarification: StrictStr | None = None
+    missing_description: StrictStr | None = None
+
+    @field_validator("refs")
+    @classmethod
+    def _bounded_refs(cls, value: list[str]) -> list[str]:
+        if len(value) > 3:
+            raise ValueError("query selection may contain at most three references")
+        if len(set(value)) != len(value):
+            raise ValueError("query selection references must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def _status_matches_refs(self) -> QuerySelection:
+        if self.status == "selected" and not self.refs:
+            raise ValueError("selected query result must contain at least one reference")
+        if self.status != "selected" and self.refs:
+            raise ValueError("clarify/unavailable query results cannot contain references")
+        return self
 
 
 class IntakeOutput(BaseModel):
@@ -28,12 +70,16 @@ class IntakeOutput(BaseModel):
     structure_input: dict[str, Any] = Field(default_factory=dict)
     requested_results: list[str] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
-    context_reference: StrictStr | None = None
+    query_selection: QuerySelection | None = None
 
     @model_validator(mode="after")
     def _intent_fields(self) -> IntakeOutput:
         if self.intent == "context_query" and self.explicit_parameters:
             raise ValueError("context_query cannot contain a parameter patch")
+        if self.intent == "context_query" and self.query_selection is None:
+            raise ValueError("context_query must contain query_selection")
+        if self.intent != "context_query" and self.query_selection is not None:
+            raise ValueError("query_selection is only valid for context_query")
         return self
 
 
@@ -112,22 +158,34 @@ def intake_message(
     message: str,
     *,
     context: Mapping[str, Any] | None = None,
+    result_catalog: list[Mapping[str, Any]] | None = None,
     cancel: Any = None,
 ) -> IntakeOutput:
     if not message.strip():
         raise ValueError("message must not be empty")
     prompt = load_prompt("intake")
-    return client.complete_json(
+    catalog = [dict(item) for item in (result_catalog or [])]
+    candidate_refs = tuple(
+        str(item["ref"])
+        for item in catalog
+        if isinstance(item, Mapping) and isinstance(item.get("ref"), str)
+    )
+    schema = _intake_schema(candidate_refs)
+    value = client.complete_json(
         [
             {"role": "system", "content": prompt},
             {
                 "role": "user",
                 "content": _json_context(
-                    {"message": message, "recent_context": _bounded_context(context)}
+                    {
+                        "message": message,
+                        "recent_context": _bounded_context(context),
+                        "result_catalog": catalog,
+                    }
                 ),
             },
         ],
-        IntakeOutput,
+        schema,
         purpose="intake",
         example={
             "intent": "chemistry_compute",
@@ -141,6 +199,7 @@ def intake_message(
         },
         cancel=cancel,
     )
+    return _coerce_intake_output(value, schema, candidate_refs)
 
 
 def plan_message(
@@ -399,8 +458,73 @@ def _bounded_context(context: Mapping[str, Any] | None) -> Mapping[str, Any]:
         recent = recent[-12:]
     results = context.get("recent_results")
     if isinstance(results, list):
-        results = results[-3:]
+        # The durable session keeps IDs as a locator for the Agent, but the
+        # intake model receives only a bounded status hint.  The actual
+        # result_catalog is the sole model-visible source for fact selection.
+        results = [
+            {"status": item.get("status")} for item in results[-3:] if isinstance(item, Mapping)
+        ]
     return {"recent_messages": recent or [], "recent_results": results or []}
+
+
+def _intake_schema(candidate_refs: tuple[str, ...]) -> type[BaseModel]:
+    """Build the local candidate-constrained schema for one intake round."""
+
+    if not candidate_refs:
+        # Keep the base type for the empty-catalog case so existing lightweight
+        # clients can still classify ordinary compute requests.  The
+        # cross-field and empty-candidate checks below remain authoritative.
+        return IntakeOutput
+
+    allowed = frozenset(candidate_refs)
+
+    def _refs_are_candidates(value: list[str]) -> list[str]:
+        unknown = sorted(set(value) - allowed)
+        if unknown:
+            raise ValueError(f"query selection references are outside this catalog: {unknown}")
+        return value
+
+    refs_validator = field_validator("refs")(_refs_are_candidates)
+    selection_model = create_model(
+        "QuerySelectionForCatalog",
+        __base__=QuerySelection,
+        __validators__={"_refs_are_candidates": refs_validator},
+    )
+    return create_model(
+        "IntakeOutputForCatalog",
+        __base__=IntakeOutput,
+        query_selection=(selection_model | None, None),
+    )
+
+
+def _coerce_intake_output(
+    value: Any, schema: type[BaseModel], candidate_refs: tuple[str, ...]
+) -> IntakeOutput:
+    payload = value.model_dump(mode="python") if isinstance(value, BaseModel) else value
+    try:
+        output = schema.model_validate(payload, strict=True)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"intake output failed local validation: {error}") from error
+    if not isinstance(output, IntakeOutput):
+        raise ValueError("intake output has an unexpected model type")
+    _validate_query_selection(output, candidate_refs)
+    return output
+
+
+def _validate_query_selection(output: IntakeOutput, candidate_refs: tuple[str, ...]) -> None:
+    selection = output.query_selection
+    if output.intent != "context_query":
+        if selection is not None:
+            raise ValueError("non-query intake output cannot select saved results")
+        return
+    if selection is None:
+        raise ValueError("context_query must contain query_selection")
+    candidate_set = set(candidate_refs)
+    unknown = sorted(set(selection.refs) - candidate_set)
+    if unknown:
+        raise ValueError(f"query selection references are outside this catalog: {unknown}")
+    if not candidate_set and selection.status == "selected":
+        raise ValueError("cannot select a result from an empty catalog")
 
 
 def _json_context(value: Mapping[str, Any]) -> str:
@@ -412,6 +536,7 @@ def _json_context(value: Mapping[str, Any]) -> str:
 __all__ = [
     "InputBindingProposal",
     "IntakeOutput",
+    "QuerySelection",
     "PlanProposal",
     "PlanStepProposal",
     "PlanTargetProposal",

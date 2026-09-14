@@ -3,19 +3,30 @@
 from __future__ import annotations
 
 import json
+import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
 from typing import Any
 
-from .answer import context_answer, render_result, render_run
+from .answer import (
+    fact_matches_question,
+    render_already_finished,
+    render_clarification,
+    render_confirmation,
+    render_result,
+    render_run,
+    render_selected_facts,
+)
 from .config import AppConfig, validate_execution_environment
 from .llm import LlmClient, LlmError
 from .models import InputReference, Plan, Request, Result, Run, Step
 from .orca.profiles import get_profile, resolve_parameters
 from .orca.repair_rules import applicable_repairs, applicable_scf_repair
 from .planner import (
+    QuerySelection,
     filter_user_explicit_parameters,
     intake_message,
     plan_message,
@@ -69,6 +80,7 @@ class Agent:
         self.llm = llm if llm is not None else LlmClient(config)
         self.session_id = session_id or new_id("session")
         self._cancel_events: dict[str, Event] = {}
+        self._query_bindings: dict[str, dict[str, Any]] = {}
         self._request_sequence = 0
         self._active_request: tuple[int, Event] | None = None
         try:
@@ -150,7 +162,7 @@ class Agent:
 
         text = message.strip()
         if not text:
-            return AgentResponse("Please enter a request.")
+            return AgentResponse("请输入请求。")
         if text.casefold() in {"/confirm", "confirm", "确认"}:
             return self.confirm()
         if text.casefold() in {"/cancel", "cancel", "取消"}:
@@ -164,6 +176,7 @@ class Agent:
         self._append_message("user", text)
         try:
             self._ensure_request_active(request_token, request_cancel)
+            result_catalog = self._build_query_catalog()
             intake = intake_message(
                 self.llm,
                 text,
@@ -171,6 +184,7 @@ class Agent:
                     "recent_messages": self._session.get("recent_messages", []),
                     "recent_results": self._session.get("recent_results", []),
                 },
+                result_catalog=result_catalog,
                 cancel=request_cancel,
             )
             self._ensure_request_active(request_token, request_cancel)
@@ -222,7 +236,10 @@ class Agent:
                 return self._answer_question(text, cancel=request_cancel)
             if intake.intent == "context_query":
                 return self._answer_context(
-                    text, context_reference=intake.context_reference, cancel=request_cancel
+                    text,
+                    selection=intake.query_selection,
+                    catalog=result_catalog,
+                    cancel=request_cancel,
                 )
 
             request = request_from_intake(text, intake, request_id=new_id("request"))
@@ -249,13 +266,13 @@ class Agent:
             return response
         except LlmError as error:
             if error.category == "cancelled" or request_cancel.is_set():
-                response = AgentResponse("The current request was cancelled before it could run.")
+                response = AgentResponse("当前请求已取消，尚未执行。")
             else:
-                response = AgentResponse(f"I could not interpret this request: {error}")
+                response = AgentResponse(f"暂时无法理解这个请求：{error}")
             self._append_message("assistant", response.text)
             return response
         except (ValueError, OSError) as error:
-            response = AgentResponse(f"The request could not be planned: {error}")
+            response = AgentResponse(f"请求无法规划：{error}")
             self._append_message("assistant", response.text)
             return response
         finally:
@@ -396,10 +413,19 @@ class Agent:
     def confirm(self, run: Run | str | None = None) -> AgentResponse:
         current = self._coerce_run(run)
         if current is None:
-            return AgentResponse("There is no prepared calculation to confirm.")
+            return AgentResponse("当前没有等待确认的计算。")
         if current.status in {"succeeded", "failed", "cancelled", "interrupted"}:
             result = self._latest_result(current)
-            return AgentResponse(render_run(current, result), run=current, result=result)
+            return AgentResponse(
+                render_already_finished(
+                    current,
+                    result,
+                    self.registry,
+                    structure=self._result_structure(current, result),
+                ),
+                run=current,
+                result=result,
+            )
         if current.waiting_for != "confirmation":
             return AgentResponse(self._waiting_text(current), run=current)
         current.execution_permission = True
@@ -421,7 +447,7 @@ class Agent:
             current.pending_data = {"category": "execution_boundary", "reason": str(error)}
             save_run(self.config.data_root_path, current)
             return AgentResponse(
-                f"The calculation was refused at the ORCA execution boundary: {error}",
+                f"计算在 ORCA 执行边界被拒绝（execution boundary）：{error}",
                 run=current,
             )
         response = self._response_for_run(current, result)
@@ -435,8 +461,8 @@ class Agent:
         current = self._coerce_run(run)
         if current is None:
             if active_request is not None:
-                return AgentResponse("Cancellation requested for the current request.")
-            return AgentResponse("There is no active calculation.")
+                return AgentResponse("已请求取消当前请求。")
+            return AgentResponse("当前没有活动中的计算。")
         event = self._cancel_events.setdefault(current.id, Event())
         event.set()
         if current.status == "waiting" and current.status not in {
@@ -449,8 +475,8 @@ class Agent:
             current.waiting_for = None
             save_run(self.config.data_root_path, current)
         if active_request is not None:
-            return AgentResponse("Cancellation requested for the current request.", run=current)
-        return AgentResponse(f"Cancellation requested for {current.id}.", run=current)
+            return AgentResponse("已请求取消当前请求。", run=current)
+        return AgentResponse("已请求取消当前计算。", run=current)
 
     def request_cancel(self) -> AgentResponse:
         """Signal cancellation without mutating a Run owned by the worker.
@@ -467,17 +493,26 @@ class Agent:
         if run_id and active_request is None:
             event = self._cancel_events.setdefault(str(run_id), Event())
             event.set()
-            return AgentResponse(f"Cancellation requested for {run_id}.")
+            return AgentResponse("已请求取消当前计算。")
         if active_request is not None:
-            return AgentResponse("Cancellation requested for the current request.")
-        return AgentResponse("There is no active calculation.")
+            return AgentResponse("已请求取消当前请求。")
+        return AgentResponse("当前没有活动中的计算。")
 
     def status(self) -> AgentResponse:
         current = self._coerce_run(None)
         if current is None:
-            return AgentResponse("No active Run.")
+            return AgentResponse("当前没有活动任务。")
         result = self._latest_result(current)
-        return AgentResponse(render_run(current, result), run=current, result=result)
+        return AgentResponse(
+            render_run(
+                current,
+                result,
+                self.registry,
+                structure=self._result_structure(current, result),
+            ),
+            run=current,
+            result=result,
+        )
 
     def new_session(self) -> AgentResponse:
         current = self._coerce_run(None)
@@ -496,7 +531,7 @@ class Agent:
             "pending_prompt": None,
         }
         self._save_session()
-        return AgentResponse("Started a new session.")
+        return AgentResponse("已开始新会话。")
 
     def _create_chat_run(self, request: Request, plan: Plan) -> Run:
         run = Run(
@@ -605,7 +640,7 @@ class Agent:
         self, run: Run, parameters: dict[str, Any], *, cancel: Event | None = None
     ) -> AgentResponse:
         if cancel is not None and cancel.is_set():
-            return AgentResponse("The current request was cancelled.", run=run)
+            return AgentResponse("当前请求已取消。", run=run)
         step_id = str(run.pending_data.get("step_id", ""))
         step = next((item for item in run.plan.steps if item.id == step_id), None)
         if step is None:
@@ -616,7 +651,7 @@ class Agent:
             ]
             step = science_steps[0] if len(science_steps) == 1 else None
         if step is None:
-            return AgentResponse("The pending Run has no editable calculation step.", run=run)
+            return AgentResponse("等待中的任务没有可编辑的计算步骤。", run=run)
         merged = dict(step.parameters)
         merged.update(parameters)
         try:
@@ -666,7 +701,7 @@ class Agent:
             )
             candidate_plan = self.registry.validate_plan(candidate_plan)
         except (TypeError, ValueError) as error:
-            return AgentResponse(f"That parameter change was rejected: {error}", run=run)
+            return AgentResponse(f"参数修改已拒绝（rejected）：{error}", run=run)
 
         run.request = candidate_request
         run.plan = candidate_plan
@@ -687,7 +722,7 @@ class Agent:
             run.status = "failed"
             run.pending_data = {"category": "execution_boundary", "reason": str(error)}
             save_run(self.config.data_root_path, run)
-            return AgentResponse(f"The calculation could not continue: {error}", run=run)
+            return AgentResponse(f"计算无法继续：{error}", run=run)
         return self._response_for_run(run, result)
 
     def _apply_molecule_clarification(
@@ -709,14 +744,14 @@ class Agent:
         cancel: Event | None = None,
     ) -> AgentResponse:
         if cancel is not None and cancel.is_set():
-            return AgentResponse("The current request was cancelled.", run=run)
+            return AgentResponse("当前请求已取消。", run=run)
         step_id = str(run.pending_data.get("step_id", ""))
         step = next((item for item in run.plan.steps if item.id == step_id), None)
         if step is None or step.tool != "resolve_molecule":
             resolve_steps = [item for item in run.plan.steps if item.tool == "resolve_molecule"]
             step = resolve_steps[0] if len(resolve_steps) == 1 else None
         if step is None:
-            return AgentResponse("The pending Run has no molecule-resolution step.", run=run)
+            return AgentResponse("等待中的任务没有分子解析步骤。", run=run)
         kind = input_kind or ("cid" if query.isdecimal() else "name")
         try:
             replacement = Step.model_validate(
@@ -737,7 +772,7 @@ class Agent:
             )
             candidate_plan = self.registry.validate_plan(candidate_plan)
         except ValueError as error:
-            return AgentResponse(f"That molecule choice was rejected: {error}", run=run)
+            return AgentResponse(f"该分子选择已拒绝（rejected）：{error}", run=run)
         run.plan = candidate_plan
         _invalidate_current_results(run, step.id)
         run.accepted_snapshot = {}
@@ -855,7 +890,13 @@ class Agent:
 
     def _preview(self, run: Run, step: Step) -> dict[str, Any]:
         artifacts = self._input_artifacts(run, step)
-        structure = self._known_structure_facts(run, step)
+        structure = dict(self._known_structure_facts(run, step))
+        geometry_facts = self._preview_geometry_facts(run, step)
+        structure.update(geometry_facts)
+        if not geometry_facts.get("geometry_available"):
+            # Molecule facts may contain the implicit-hydrogen graph count.  It
+            # is not a substitute for the atom count in the actual XYZ input.
+            structure.pop("atom_count", None)
         return {
             "request": {
                 "description": run.request.description,
@@ -868,6 +909,7 @@ class Agent:
             "step_id": step.id,
             "tool": step.tool,
             "parameters": dict(step.parameters),
+            "result_targets": self._preview_result_targets(run, step),
             "parameter_sources": run.pending_data.get("parameter_sources", {}),
             "structure": structure,
             "artifact_bindings": [
@@ -885,6 +927,50 @@ class Agent:
             "allowed_repairs": self._allowed_repairs(run, step),
             "repair_scope": self._repair_scope(run),
             "budget": dict(run.budget),
+        }
+
+    def _preview_result_targets(self, run: Run, step: Step) -> list[dict[str, str]]:
+        try:
+            tool = self.registry.get(step.tool)
+        except ValueError:
+            return []
+        targets: list[dict[str, str]] = []
+        for target in run.plan.requested_results:
+            if target.step_id != step.id:
+                continue
+            name = target.port or target.field
+            if name is None:
+                continue
+            metadata = dict(tool.result_metadata.get(name, {}))
+            metadata.setdefault("label", name.replace("_", " "))
+            metadata.setdefault("description", tool.description)
+            item = {
+                "name": name,
+                "kind": "port" if target.port is not None else "field",
+                "label": metadata["label"],
+                "description": metadata["description"],
+            }
+            if item not in targets:
+                targets.append(item)
+        return targets
+
+    def _preview_geometry_facts(self, run: Run, step: Step) -> dict[str, Any]:
+        reference = step.inputs.get("geometry")
+        if reference is None:
+            return {"geometry_available": False, "geometry_error": "geometry input is unavailable"}
+        artifact = self._artifact_from_reference(run, reference)
+        if artifact is None or artifact.artifact_type != "molecular_geometry":
+            return {"geometry_available": False, "geometry_error": "geometry input is unavailable"}
+        try:
+            geometry = parse_xyz_bytes(
+                artifact_path(self.config.data_root_path, run, artifact).read_bytes()
+            )
+        except (OSError, ValueError) as error:
+            return {"geometry_available": False, "geometry_error": str(error)}
+        return {
+            "geometry_available": True,
+            "atom_count": geometry.atom_count,
+            "atom_symbols": list(geometry.symbols),
         }
 
     def _acceptance_snapshot(self, run: Run) -> dict[str, Any]:
@@ -1129,6 +1215,15 @@ class Agent:
                 return result
         return None
 
+    def _result_structure(self, run: Run, result: Result | None) -> dict[str, Any] | None:
+        if result is None:
+            return None
+        step = next((item for item in run.plan.steps if item.id == result.step_id), None)
+        if step is None:
+            return None
+        structure = self._query_structure(run, step, result)
+        return structure or None
+
     def _coerce_run(self, run: Run | str | None) -> Run | None:
         if isinstance(run, Run):
             return run
@@ -1160,24 +1255,27 @@ class Agent:
         # result.  Waiting state always wins over the last intermediate Result.
         if run.status == "waiting":
             return AgentResponse(self._waiting_text(run), run=run, result=result)
+        structure = self._result_structure(run, result)
         if run.status in {"succeeded", "failed", "cancelled", "interrupted"}:
-            return AgentResponse(render_run(run, result), run=run, result=result)
+            return AgentResponse(
+                render_run(run, result, self.registry, structure=structure),
+                run=run,
+                result=result,
+            )
         if result is not None:
-            return AgentResponse(render_result(run, result), run=run, result=result)
-        return AgentResponse(render_run(run), run=run)
+            return AgentResponse(
+                render_result(run, result, self.registry, structure=structure),
+                run=run,
+                result=result,
+            )
+        return AgentResponse(render_run(run, registry=self.registry), run=run)
 
     def _waiting_text(self, run: Run) -> str:
         if run.waiting_for == "confirmation":
-            preview = run.pending_data
-            return (
-                "Prepared a calculation and need your confirmation: "
-                f"{preview.get('operation', 'calculation')} "
-                "with the following accepted preview. Type /confirm to run it.\n"
-                + json.dumps(preview, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+            return "计算等待确认（waiting for confirmation）。\n" + render_confirmation(
+                run.pending_data
             )
-        return "More information is required: " + json.dumps(
-            run.pending_data, ensure_ascii=False, sort_keys=True, default=str
-        )
+        return "任务正在等待补充信息。\n" + render_clarification(run.pending_data)
 
     def _begin_request(self) -> tuple[int, Event]:
         self._request_sequence += 1
@@ -1207,7 +1305,8 @@ class Agent:
                 "run_id": run.id,
                 "step_id": result.step_id,
                 "status": result.status,
-                "values": result.values,
+                "result_path": f"{result.attempt_relative_path}/result.json",
+                "attempt": result.attempt,
             }
         )
         self._session["recent_results"] = summaries[-3:]
@@ -1219,6 +1318,352 @@ class Agent:
             save_session(self.config.data_root_path, self.session_id, self._session)
         except OSError:
             pass
+
+    def _build_query_catalog(self) -> list[dict[str, Any]]:
+        """Build short, public references for valid facts in this session.
+
+        The catalog deliberately contains no Run IDs, paths, hashes, or
+        numeric values.  Those details stay in ``_query_bindings`` and are
+        re-read from disk after the model selects a short reference.
+        """
+
+        self._query_bindings = {}
+        active_run_id = self._session.get("active_run_id")
+        indexed_ids: list[str] = []
+        if isinstance(active_run_id, str) and active_run_id:
+            indexed_ids.append(active_run_id)
+        for summary in self._session.get("recent_results", []):
+            if not isinstance(summary, Mapping):
+                continue
+            run_id = summary.get("run_id")
+            if isinstance(run_id, str) and run_id and run_id not in indexed_ids:
+                indexed_ids.append(run_id)
+
+        catalog: list[dict[str, Any]] = []
+        for run_id in indexed_ids:
+            try:
+                run = load_run(self.config.data_root_path, run_id)
+            except ValueError:
+                continue
+            # A missing session_id is tolerated only because this Run was
+            # explicitly indexed by this session.  A present foreign session
+            # is never imported into the catalog.
+            if run.session_id not in {None, self.session_id}:
+                continue
+            for step in run.plan.steps:
+                relative = run.current_results.get(step.id)
+                if not isinstance(relative, str):
+                    continue
+                result = _load_bound_result(self.config.data_root_path, run, relative)
+                if result is None or not self._query_result_is_valid(run, step, result, relative):
+                    continue
+                try:
+                    tool = self.registry.get(step.tool)
+                except ValueError:
+                    continue
+                structure = self._query_structure(run, step, result)
+                for name, expected_type in tool.results.items():
+                    if name in tool.output_ports or name not in result.values:
+                        continue
+                    value = result.values[name]
+                    if not _query_value_is_compatible(value, expected_type):
+                        continue
+                    ref = f"r{len(catalog) + 1}"
+                    binding = {
+                        "session_id": self.session_id,
+                        "run_id": run.id,
+                        "step_id": step.id,
+                        "result_path": relative,
+                        "attempt": result.attempt,
+                        "step_fingerprint": _step_fingerprint(step),
+                        "kind": "field",
+                        "name": name,
+                    }
+                    self._query_bindings[ref] = binding
+                    catalog.append(
+                        self._public_query_entry(
+                            ref,
+                            run,
+                            step,
+                            tool,
+                            name=name,
+                            kind="field",
+                            expected_type=expected_type,
+                            structure=structure,
+                        )
+                    )
+                for name, expected_type in tool.output_ports.items():
+                    artifact = self._query_port_artifact(run, step, result, name, expected_type)
+                    if artifact is None:
+                        continue
+                    ref = f"r{len(catalog) + 1}"
+                    binding = {
+                        "session_id": self.session_id,
+                        "run_id": run.id,
+                        "step_id": step.id,
+                        "result_path": relative,
+                        "attempt": result.attempt,
+                        "step_fingerprint": _step_fingerprint(step),
+                        "kind": "port",
+                        "name": name,
+                        "artifact_id": artifact.id,
+                    }
+                    self._query_bindings[ref] = binding
+                    catalog.append(
+                        self._public_query_entry(
+                            ref,
+                            run,
+                            step,
+                            tool,
+                            name=name,
+                            kind="port",
+                            expected_type=expected_type,
+                            structure=structure,
+                        )
+                    )
+        return catalog
+
+    def _public_query_entry(
+        self,
+        ref: str,
+        run: Run,
+        step: Step,
+        tool: Any,
+        *,
+        name: str,
+        kind: str,
+        expected_type: str,
+        structure: dict[str, Any],
+    ) -> dict[str, Any]:
+        metadata = dict(tool.result_metadata.get(name, {}))
+        metadata.setdefault("label", name.replace("_", " "))
+        metadata.setdefault("description", tool.description)
+        item = {
+            "ref": ref,
+            "active_task": run.id == self._session.get("active_run_id"),
+            "task": {
+                "description": run.request.description,
+                "status": run.status,
+                "created_at": run.created_at,
+                "updated_at": run.updated_at,
+            },
+            "system": structure,
+            "step": {
+                "purpose": _step_purpose(step),
+                "tool": tool.name,
+                "method_profile": step.parameters.get("method_profile"),
+                "environment": step.parameters.get("environment"),
+                "charge": step.parameters.get("charge"),
+                "multiplicity": step.parameters.get("multiplicity"),
+            },
+            "result": {
+                "name": name,
+                "kind": kind,
+                "label": metadata["label"],
+                "description": metadata["description"],
+                "unit": expected_type if kind == "field" else None,
+                "artifact_type": expected_type if kind == "port" else None,
+                "caveat": metadata.get("caveat"),
+                "validity": "verified",
+            },
+        }
+        return item
+
+    def _load_query_fact(self, binding: Mapping[str, Any] | str) -> dict[str, Any] | None:
+        """Reload one private catalog binding and verify it has not changed."""
+
+        if isinstance(binding, str):
+            resolved = self._query_bindings.get(binding)
+        elif isinstance(binding, Mapping) and isinstance(binding.get("ref"), str):
+            resolved = self._query_bindings.get(str(binding["ref"]))
+        else:
+            resolved = (
+                binding if any(item is binding for item in self._query_bindings.values()) else None
+            )
+        if resolved is None:
+            return None
+        if resolved.get("session_id") != self.session_id:
+            return None
+        run_id = resolved.get("run_id")
+        if not isinstance(run_id, str):
+            return None
+        try:
+            run = load_run(self.config.data_root_path, run_id)
+        except ValueError:
+            return None
+        if run.session_id not in {None, self.session_id}:
+            return None
+        relative = resolved.get("result_path")
+        step_id = resolved.get("step_id")
+        if not isinstance(relative, str) or not isinstance(step_id, str):
+            return None
+        step = next((item for item in run.plan.steps if item.id == step_id), None)
+        result = _load_bound_result(self.config.data_root_path, run, relative)
+        if step is None or result is None:
+            return None
+        if not self._query_result_is_valid(run, step, result, relative):
+            return None
+        if result.attempt != resolved.get("attempt") or result.step_fingerprint != resolved.get(
+            "step_fingerprint"
+        ):
+            return None
+        try:
+            tool = self.registry.get(step.tool)
+        except ValueError:
+            return None
+        name = resolved.get("name")
+        kind = resolved.get("kind")
+        if not isinstance(name, str) or kind not in {"field", "port"}:
+            return None
+        expected_type = tool.results.get(name) if kind == "field" else tool.output_ports.get(name)
+        if not isinstance(expected_type, str):
+            return None
+        value: Any
+        if kind == "field":
+            if name not in result.values or not _query_value_is_compatible(
+                result.values[name], expected_type
+            ):
+                return None
+            value = result.values[name]
+        else:
+            artifact = self._query_port_artifact(run, step, result, name, expected_type)
+            if artifact is None or artifact.id != resolved.get("artifact_id"):
+                return None
+            value = {"artifact_id": artifact.id}
+        structure = self._query_structure(run, step, result)
+        metadata = dict(tool.result_metadata.get(name, {}))
+        metadata.setdefault("label", name.replace("_", " "))
+        metadata.setdefault("description", tool.description)
+        return {
+            "task_key": f"{run.id}:{step.id}",
+            "system": _query_system_label(structure),
+            "_run": run,
+            "_result": result,
+            "run_status": run.status,
+            "result_status": result.status,
+            "step_tool": step.tool,
+            "method_profile": step.parameters.get("method_profile"),
+            "environment": step.parameters.get("environment"),
+            "name": name,
+            "kind": kind,
+            "value": value,
+            "expected_type": expected_type,
+            "metadata": metadata,
+        }
+
+    def _query_result_is_valid(self, run: Run, step: Step, result: Result, relative: str) -> bool:
+        if (
+            result.run_id != run.id
+            or result.step_id != step.id
+            or result.status != "succeeded"
+            or run.current_results.get(step.id) != relative
+            or result.attempt < 1
+            or result.step_fingerprint != _step_fingerprint(step)
+        ):
+            return False
+        expected_relative = f"{result.attempt_relative_path.rstrip('/')}/result.json"
+        if not result.attempt_relative_path or expected_relative != relative:
+            return False
+        attempt_records = [item for item in run.attempts if item.get("step_id") == step.id]
+        if attempt_records:
+            matching_attempts = [
+                item
+                for item in attempt_records
+                if item.get("attempt") == result.attempt
+                and item.get("phase") == "finished"
+                and item.get("status") == "succeeded"
+            ]
+            if len(matching_attempts) != 1:
+                return False
+            recorded_artifacts = matching_attempts[0].get("artifact_ids")
+            if isinstance(recorded_artifacts, list) and any(
+                artifact_id not in recorded_artifacts for artifact_id in result.artifact_ids
+            ):
+                return False
+        for input_name, reference in step.inputs.items():
+            artifact = self._artifact_from_reference(run, reference)
+            if artifact is None or artifact.run_id != run.id:
+                return False
+            try:
+                artifact_path(self.config.data_root_path, run, artifact)
+            except (OSError, ValueError):
+                return False
+            if artifact.id not in result.input_artifact_ids:
+                return False
+            if result.input_bindings.get(input_name) != artifact.id:
+                return False
+        return True
+
+    def _query_port_artifact(
+        self,
+        run: Run,
+        step: Step,
+        result: Result,
+        name: str,
+        expected_type: str,
+    ) -> Any | None:
+        artifact_id = result.output_ports.get(name)
+        if (
+            not isinstance(artifact_id, str)
+            or name not in result.output_ports
+            or artifact_id not in result.artifact_ids
+        ):
+            return None
+        try:
+            artifact = find_artifact(run, artifact_id)
+            if (
+                artifact.run_id != run.id
+                or artifact.step_id != step.id
+                or artifact.attempt != result.attempt
+                or artifact.artifact_type != expected_type
+                or artifact.role == "restart_candidate"
+            ):
+                return None
+            path = artifact_path(self.config.data_root_path, run, artifact)
+            if expected_type == "molecular_geometry":
+                parse_xyz_bytes(path.read_bytes())
+            return artifact
+        except (OSError, ValueError):
+            return None
+
+    def _query_structure(self, run: Run, step: Step, result: Result) -> dict[str, Any]:
+        artifacts: list[Any] = []
+        for reference in step.inputs.values():
+            artifact = self._artifact_from_reference(run, reference)
+            if artifact is not None:
+                artifacts.append(artifact)
+        for artifact_id in result.output_ports.values():
+            try:
+                artifact = find_artifact(run, artifact_id)
+            except ValueError:
+                continue
+            if artifact not in artifacts:
+                artifacts.append(artifact)
+        for artifact in artifacts:
+            molecule = (
+                artifact
+                if artifact.artifact_type == "molecule" and artifact.role == "resolved_molecule"
+                else self._molecule_artifact_for_geometry(run, artifact, seen=set())
+            )
+            if molecule is None:
+                continue
+            try:
+                payload = json.loads(
+                    artifact_path(self.config.data_root_path, run, molecule).read_text(
+                        encoding="utf-8"
+                    )
+                )
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            facts = payload.get("facts")
+            if not isinstance(facts, dict):
+                continue
+            return {
+                key: facts[key]
+                for key in ("formula", "title", "query", "cid", "atom_count")
+                if key in facts and isinstance(facts[key], (str, int, float))
+            }
+        return {}
 
     def _answer_question(self, question: str, *, cancel: Event | None = None) -> AgentResponse:
         try:
@@ -1246,9 +1691,9 @@ class Agent:
             )
         except LlmError as error:
             text = (
-                "The current request was cancelled."
+                "当前请求已取消。"
                 if error.category == "cancelled"
-                else f"I cannot answer through the configured model: {error}"
+                else f"当前配置的模型无法回答：{error}"
             )
         response = AgentResponse(text)
         self._append_message("assistant", text)
@@ -1258,73 +1703,54 @@ class Agent:
         self,
         question: str,
         *,
-        context_reference: str | None = None,
+        selection: QuerySelection | None,
+        catalog: list[Mapping[str, Any]],
         cancel: Event | None = None,
     ) -> AgentResponse:
         if cancel is not None and cancel.is_set():
-            return AgentResponse("The current request was cancelled.")
-        run = self._context_run(context_reference)
-        result = (
-            self._context_result(run, context_reference=context_reference)
-            if run is not None
-            else None
-        )
-        text = (
-            context_answer(run, result, question)
-            if run is not None
-            else "No saved calculation result is available."
-        )
+            return AgentResponse("当前请求已取消。")
+        if selection is None:
+            text = render_clarification({"status": "unavailable", "missing_description": question})
+            response = AgentResponse(text)
+            self._append_message("assistant", text)
+            return response
+        if selection.status != "selected":
+            text = render_clarification(selection.model_dump(mode="python"))
+            response = AgentResponse(text)
+            self._append_message("assistant", text)
+            return response
+
+        catalog_refs = {
+            str(item.get("ref"))
+            for item in catalog
+            if isinstance(item, Mapping) and isinstance(item.get("ref"), str)
+        }
+        if any(ref not in catalog_refs for ref in selection.refs):
+            text = render_clarification({"binding_invalid": True})
+            response = AgentResponse(text)
+            self._append_message("assistant", text)
+            return response
+        facts: list[dict[str, Any]] = []
+        for reference in selection.refs:
+            fact = self._load_query_fact(reference)
+            if fact is None:
+                text = render_clarification({"binding_invalid": True})
+                response = AgentResponse(text)
+                self._append_message("assistant", text)
+                return response
+            if not fact_matches_question(question, fact):
+                text = "本次任务尚未得到所问性质；已保存的其他性质不能替代它。"
+                response = AgentResponse(text)
+                self._append_message("assistant", text)
+                return response
+            facts.append(fact)
+        text = render_selected_facts(facts)
+        first = facts[0] if facts else {}
+        run = first.get("_run")
+        result = first.get("_result")
         response = AgentResponse(text, run=run, result=result)
         self._append_message("assistant", text)
         return response
-
-    def _context_run(self, reference: str | None) -> Run | None:
-        active = self._coerce_run(None)
-        value = (reference or "").strip()
-        if not value or value.casefold() in {"last", "latest", "recent", "刚才", "最近"}:
-            return active
-        if active is not None and (
-            value == active.id or any(step.id == value for step in active.plan.steps)
-        ):
-            return active
-        recent_ids = {
-            str(item.get("run_id"))
-            for item in self._session.get("recent_results", [])
-            if isinstance(item, dict) and item.get("run_id")
-        }
-        if value not in recent_ids:
-            return None
-        try:
-            run = load_run(self.config.data_root_path, value)
-        except ValueError:
-            return None
-        if run.session_id not in {None, self.session_id}:
-            return None
-        return run
-
-    def _context_result(self, run: Run, *, context_reference: str | None = None) -> Result | None:
-        reference = (context_reference or "").strip()
-        if reference and reference not in {
-            "last",
-            "latest",
-            "recent",
-            "刚才",
-            "最近",
-            run.id,
-        }:
-            relative = run.current_results.get(reference)
-            if relative:
-                result = _load_bound_result(self.config.data_root_path, run, relative)
-                if result is not None and result.status == "succeeded":
-                    return result
-        for step in reversed(run.plan.steps):
-            relative = run.current_results.get(step.id)
-            if not relative:
-                continue
-            result = _load_bound_result(self.config.data_root_path, run, relative)
-            if result is not None and result.status == "succeeded" and result.values:
-                return result
-        return self._latest_result(run)
 
 
 def _bind_input_geometry(plan: Plan, artifact_id: str) -> Plan:
@@ -1525,6 +1951,72 @@ def _step_fingerprint(step: Step) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _query_value_is_compatible(value: Any, declared_type: str) -> bool:
+    """Accept only finite values whose persisted unit/type matches the Tool."""
+
+    if declared_type == "Eh":
+        if not isinstance(value, Mapping):
+            return False
+        raw = value.get("value")
+        if type(raw) not in {int, float} or not math.isfinite(float(raw)):
+            return False
+        if value.get("unit") != "Eh":
+            return False
+        token = value.get("token")
+        if token is not None:
+            if not isinstance(token, str):
+                return False
+            try:
+                if not math.isfinite(float(token)):
+                    return False
+            except ValueError:
+                return False
+        return True
+    if declared_type == "integer":
+        if isinstance(value, Mapping):
+            value = value.get("value")
+        return type(value) is int
+    if declared_type == "text":
+        if isinstance(value, Mapping):
+            value = value.get("value")
+        return type(value) is str
+    if isinstance(value, Mapping):
+        raw = value.get("value")
+        if type(raw) in {int, float} and not math.isfinite(float(raw)):
+            return False
+        unit = value.get("unit")
+        if unit is not None and unit != declared_type:
+            return False
+        return True
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return math.isfinite(float(value))
+    return True
+
+
+def _step_purpose(step: Step) -> str:
+    return {
+        "resolve_molecule": "解析分子身份",
+        "generate_geometry": "生成初始几何",
+        "single_point": "计算单点电子能",
+        "optimize_geometry": "进行几何优化并检查收敛",
+    }.get(step.tool, step.tool)
+
+
+def _query_system_label(structure: Mapping[str, Any]) -> str:
+    formula = structure.get("formula")
+    if formula == "H2O":
+        return "水分子（H₂O）"
+    title = structure.get("title")
+    if isinstance(title, str) and title and title.casefold() not in {"o", "water"}:
+        return title
+    if isinstance(formula, str) and formula:
+        return formula.translate(str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉"))
+    query = structure.get("query")
+    if isinstance(query, str) and query:
+        return query
+    return "该体系"
 
 
 def _validate_orca_profile(parameters: dict[str, Any]) -> None:

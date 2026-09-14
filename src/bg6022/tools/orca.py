@@ -74,6 +74,13 @@ def make_single_point_tool(config: AppConfig | None = None) -> Tool:
         parameter_model=SinglePointParameters,
         output_ports={},
         results={"sp_electronic_energy": "Eh"},
+        result_metadata={
+            "sp_electronic_energy": {
+                "label": "单点电子能",
+                "description": "给定输入几何上的电子能，不含零点能和热校正",
+                "caveat": "这是固定几何的单点结果，不代表几何优化或频率验证",
+            }
+        },
     )
 
 
@@ -88,6 +95,18 @@ def make_optimize_tool(config: AppConfig | None = None) -> Tool:
         parameter_model=OptimizeParameters,
         output_ports={"optimized_geometry": "molecular_geometry"},
         results={"opt_final_electronic_energy": "Eh", "optimized_geometry": "molecular_geometry"},
+        result_metadata={
+            "opt_final_electronic_energy": {
+                "label": "优化后的电子能",
+                "description": "几何优化末态的电子能，不含零点能和热校正",
+                "caveat": "本次仅完成几何优化，尚未进行频率验证",
+            },
+            "optimized_geometry": {
+                "label": "优化后的几何",
+                "description": "通过几何优化收敛检查的输出结构",
+                "caveat": "频率稳定性、全局最低点和热力学性质未验证",
+            },
+        },
     )
 
 
@@ -100,6 +119,7 @@ def _make_tool(
     parameter_model: type[OrcaParameters],
     output_ports: dict[str, str],
     results: dict[str, str],
+    result_metadata: dict[str, dict[str, str]],
 ) -> Tool:
     def execute(step: Step, run: Run, cancel: Event) -> Result:
         if config is None:
@@ -122,6 +142,7 @@ def _make_tool(
         input_ports={"geometry": "molecular_geometry"},
         output_ports=output_ports,
         results=results,
+        result_metadata=result_metadata,
         success_conditions=[
             "normal ORCA termination",
             "exit code 0",

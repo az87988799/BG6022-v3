@@ -238,6 +238,7 @@ class Tool(StrictModel):
     input_ports: dict[str, str] = Field(default_factory=dict)
     output_ports: dict[str, str] = Field(default_factory=dict)
     results: dict[str, str] = Field(default_factory=dict)
+    result_metadata: dict[str, dict[str, str]] = Field(default_factory=dict)
     success_conditions: list[str] = Field(default_factory=list)
     repair_capabilities: list[str] = Field(default_factory=list)
     requires_compute_permission: bool = True
@@ -248,6 +249,26 @@ class Tool(StrictModel):
     model_config = ConfigDict(
         extra="forbid", strict=True, arbitrary_types_allowed=True, validate_assignment=True
     )
+
+    @model_validator(mode="after")
+    def _validate_result_metadata(self) -> Tool:
+        """Keep presentation metadata attached to the Tool result contract.
+
+        Result metadata is descriptive only.  The executable result contract
+        remains ``results``/``output_ports``; metadata can neither add a new
+        result nor silently describe a field that the Tool cannot produce.
+        """
+
+        declared = set(self.results) | set(self.output_ports)
+        unknown = sorted(set(self.result_metadata) - declared)
+        if unknown:
+            raise ValueError(f"result metadata has undeclared keys: {unknown}")
+        allowed = {"label", "description", "caveat"}
+        for name, metadata in self.result_metadata.items():
+            extra = sorted(set(metadata) - allowed)
+            if extra:
+                raise ValueError(f"result metadata for {name!r} has unsupported keys: {extra}")
+        return self
 
     def execute(self, step: Step, run: Run, *, cancel: Any) -> Result:
         if self.execute_function is None:
