@@ -13,6 +13,9 @@ from typing import Any
 
 from .models import Artifact, Result, Run
 
+# Retain the active Run plus up to five distinct earlier Runs.
+MAX_RECENT_RUNS = 6
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -266,7 +269,16 @@ def save_session(data_root: str | Path, session_id: str, payload: dict[str, Any]
         bounded["recent_messages"] = messages[-12:]
     results = bounded.get("recent_results")
     if isinstance(results, list):
-        bounded["recent_results"] = results[-3:]
+        recent_by_run: list[dict[str, Any]] = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            run_id = item.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                continue
+            recent_by_run = [entry for entry in recent_by_run if entry.get("run_id") != run_id]
+            recent_by_run.append(item)
+        bounded["recent_results"] = recent_by_run[-MAX_RECENT_RUNS:]
     path = session_path(data_root, session_id)
     atomic_write_json(path, bounded)
     return path
@@ -473,6 +485,7 @@ __all__ = [
     "register_file_artifact",
     "run_directory",
     "load_session",
+    "MAX_RECENT_RUNS",
     "save_session",
     "session_directory",
     "session_path",

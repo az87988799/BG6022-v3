@@ -549,8 +549,25 @@ _STATE_LABELS = {
 _ANY_STATE_LABEL_RE = re.compile(
     rf"(?:{_STATE_LABELS['charge']}|{_STATE_LABELS['multiplicity']})", re.IGNORECASE
 )
-_CORRECTION_TARGET_RE = re.compile(
-    rf"(?:改\s*(?:为|成)|变为|change(?:d)?\s+to|switch\s+to|then\s+to|to|->|→)\s*({_STATE_TOKEN})",
+_FIELD_CORRECTION_RE = re.compile(
+    rf"^\s*(?:(?:(?:changed?|change)\s+)?(?:from|从|由)\s*)?"
+    rf"(?P<old>{_STATE_TOKEN})\s*"
+    rf"(?:改\s*(?:为|成)|变为|change(?:d)?\s+to|switch\s+to|to|->|→)\s*"
+    rf"(?P<new>{_STATE_TOKEN})",
+    re.IGNORECASE,
+)
+_FIELD_ASSIGNMENT_PREFIX_RE = re.compile(
+    r"^\s*(?:(?:is|equals?\s*(?:to)?|set(?:ting)?\s+(?:to|as)|to)\s*|"
+    r"(?:设(?:置)?(?:为|成)|指定(?:为|成)|为|是|等于)|[:=：])\s*",
+    re.IGNORECASE,
+)
+_UNCHANGED_STATE_RE = re.compile(
+    r"^\s*(?:(?:is|remains?|stays?)\s+)?(?:"
+    r"不变|原值|当前值|现值|原样|不(?:再)?(?:修改|改变|变更|改动)|"
+    r"不要(?:再)?(?:修改|改(?:变)?|变更|改动)|无需(?:修改|改变|变更|改动)|"
+    r"unchanged|same(?:\s+as\s+before)?|the\s+same(?:\s+as\s+before)?|as\s+is|"
+    r"(?:do\s+not|don't)\s+change|"
+    r"(?:keep|leave)(?:\s+it)?\s+(?:unchanged|as\s+is|the\s+same))",
     re.IGNORECASE,
 )
 
@@ -562,6 +579,7 @@ def _parse_electronic_state(message: str, name: str) -> ElectronicStateInput:
     invalid: list[str] = []
     ambiguous = False
     mentioned = False
+    unchanged_only = False
     evidence: str | None = None
 
     phrase_values = (
@@ -600,54 +618,87 @@ def _parse_electronic_state(message: str, name: str) -> ElectronicStateInput:
         end = len(message)
         if label_index + 1 < len(all_labels):
             end = min(end, all_labels[label_index + 1].start())
-        sentence_break = re.search(r"[\n。！？?!;；]", message[start:end])
+        sentence_break = re.search(r"[\n。！？?!;；,，]", message[start:end])
         if sentence_break is not None:
             end = start + sentence_break.start()
         segment = message[start:end]
-        tokens = list(_STATE_TOKEN_RE.finditer(segment))
-        if not tokens:
-            prior_breaks = [
-                message.rfind(mark, 0, label.start()) + 1
-                for mark in ("\n", "。", "！", "？", "!", "?", ";", "；", ",", "，")
-            ]
-            local_prefix = message[max(prior_breaks) : label.start()]
+        prior_breaks = [
+            message.rfind(mark, 0, label.start()) + 1
+            for mark in ("\n", "。", "！", "？", "!", "?", ";", "；", ",", "，")
+        ]
+        local_prefix = message[max(prior_breaks) : label.start()]
+        unchanged_match = _UNCHANGED_STATE_RE.match(segment)
+        unchanged_before_label = bool(
+            re.search(
+                r"(?:保持|维持|保留|不要(?:再)?(?:修改|改(?:变)?|变更)|"
+                r"不(?:再)?(?:修改|改变|变更|改动)|无需(?:修改|改变|变更)|"
+                r"(?:do\s+not|don't)\s+change)\s*$",
+                local_prefix,
+                re.IGNORECASE,
+            )
+        )
+        if unchanged_match or unchanged_before_label:
+            # An explicit request to retain this field is not an assignment.
+            # In particular, numbers belonging to a later parameter must not
+            # flow through the electronic-state label.
+            if values:
+                ambiguous = True
+            unchanged_only = True
+            continue
+
+        token = _bound_electronic_state_token(segment)
+        if token is None:
             segment_has_value_phrase = any(
                 re.search(pattern, local_prefix + segment, re.IGNORECASE) is not None
                 for pattern, _value in phrase_values
             )
-            if not segment_has_value_phrase:
+            if _STATE_TOKEN_RE.search(segment) is not None or not segment_has_value_phrase:
                 ambiguous = True
             continue
-
-        chosen_tokens = tokens
-        if len(tokens) > 1:
-            targets = list(_CORRECTION_TARGET_RE.finditer(segment))
-            if len(targets) == 1:
-                target_start = targets[0].start(1)
-                chosen_tokens = [token for token in tokens if token.start() >= target_start]
-            if len(chosen_tokens) != 1:
-                ambiguous = True
-                continue
-
-        token = chosen_tokens[0].group("token")
+        token_end = segment.find(token) + len(token)
+        if re.match(
+            rf"\s*(?:或(?:者)?|还是|or)\s*{_STATE_TOKEN}(?![A-Za-z0-9_.])",
+            segment[token_end:],
+            re.IGNORECASE,
+        ):
+            ambiguous = True
+            continue
         parsed = _parse_signed_integer(token)
         if parsed is None or (name == "multiplicity" and parsed <= 0):
             invalid.append(token)
             continue
-        if _is_negated_statement(segment, chosen_tokens[0].start()):
+        if _is_negated_statement(segment, segment.find(token)):
             continue
         values.add(parsed)
         evidence = evidence or segment.strip()
 
     if invalid:
         return ElectronicStateInput(status="invalid", evidence=evidence, detail=", ".join(invalid))
-    if len(values) > 1 or ambiguous:
+    if len(values) > 1 or ambiguous or (unchanged_only and values):
         return ElectronicStateInput(status="ambiguous", evidence=evidence)
     if len(values) == 1:
         return ElectronicStateInput(status="set", value=next(iter(values)), evidence=evidence)
     if mentioned:
+        if unchanged_only:
+            return ElectronicStateInput(status="absent")
         return ElectronicStateInput(status="ambiguous", evidence=evidence)
     return ElectronicStateInput(status="absent")
+
+
+def _bound_electronic_state_token(segment: str) -> str | None:
+    """Extract only the value directly bound to this q/M label."""
+
+    correction = _FIELD_CORRECTION_RE.match(segment)
+    if correction is not None:
+        return correction.group("new")
+
+    value_text = segment
+    assignment_prefix = _FIELD_ASSIGNMENT_PREFIX_RE.match(value_text)
+    if assignment_prefix is not None:
+        value_text = value_text[assignment_prefix.end() :]
+    value_text = value_text.lstrip()
+    direct_value = _STATE_TOKEN_RE.match(value_text)
+    return direct_value.group("token") if direct_value is not None else None
 
 
 def _verified_candidate_evidence(

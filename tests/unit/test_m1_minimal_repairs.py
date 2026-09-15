@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from bg6022.orca.parser import inspect_attempt
 from bg6022.orca.profiles import resolve_parameters
 from bg6022.planner import (
     ElectronicStateCandidate,
+    InputBindingProposal,
     PlanProposal,
     PlanStepProposal,
     PlanTargetProposal,
@@ -233,6 +235,133 @@ def test_conflicting_parameter_statements_require_clarification() -> None:
     assert result.states["multiplicity"].status == "ambiguous"
     assert result.clarification_fields == ("multiplicity",)
     assert "multiplicity" not in result.explicit_parameters
+
+
+@pytest.mark.parametrize(
+    ("message", "parameters", "expected"),
+    [
+        ("电荷不变，优化步数设为2", {"geom_maxiter": 2}, {"geom_maxiter": 2}),
+        ("多重度不变，优化步数设为3", {"geom_maxiter": 3}, {"geom_maxiter": 3}),
+        ("电荷不变优化步数设为2", {"geom_maxiter": 2}, {"geom_maxiter": 2}),
+        ("优化步数设为2，电荷不变", {"geom_maxiter": 2}, {"geom_maxiter": 2}),
+        (
+            "电荷从0改为+1，优化步数设为2",
+            {"geom_maxiter": 2},
+            {"charge": 1, "geom_maxiter": 2},
+        ),
+        (
+            "多重度设为3，优化步数为2",
+            {"geom_maxiter": 2},
+            {"multiplicity": 3, "geom_maxiter": 2},
+        ),
+    ],
+)
+def test_electronic_state_values_are_bound_to_their_own_field(
+    message: str, parameters: dict[str, object], expected: dict[str, object]
+) -> None:
+    normalized = normalize_user_explicit_parameters(message, parameters)
+
+    assert normalized.explicit_parameters == expected
+    if "电荷不变" in message:
+        assert normalized.states["charge"].status == "absent"
+    if "多重度不变" in message:
+        assert normalized.states["multiplicity"].status == "absent"
+
+
+class ParameterContinuationClient:
+    def complete_json(self, messages, schema, **kwargs):
+        payload = json.loads(messages[-1]["content"])
+        if kwargs["purpose"] == "intake":
+            message = payload["message"]
+            if message.startswith("优化"):
+                value = {
+                    "intent": "chemistry_compute",
+                    "operation": "Opt",
+                    "molecule_query": "O",
+                    "molecule_input_kind": "smiles",
+                    "explicit_parameters": {"charge": 0, "multiplicity": 1},
+                    "electronic_state_candidates": [
+                        {
+                            "field": "charge",
+                            "raw_value": "0",
+                            "evidence": "电荷设为0",
+                        },
+                        {
+                            "field": "multiplicity",
+                            "raw_value": "1",
+                            "evidence": "多重度设为1",
+                        },
+                    ],
+                    "requested_results": ["energy"],
+                }
+            else:
+                value = {
+                    "intent": "chemistry_compute",
+                    "explicit_parameters": {"geom_maxiter": 2},
+                }
+            return schema.model_validate(value, strict=True)
+
+        if kwargs["purpose"] == "planner":
+            value = {
+                "steps": [
+                    {
+                        "key": "molecule",
+                        "tool": "resolve_molecule",
+                        "parameters": {"query": "O", "input_kind": "smiles"},
+                    },
+                    {
+                        "key": "geometry",
+                        "tool": "generate_geometry",
+                        "inputs": {
+                            "molecule": InputBindingProposal(step_key="molecule", port="molecule")
+                        },
+                    },
+                    {
+                        "key": "opt",
+                        "tool": "optimize_geometry",
+                        "parameters": {"method_profile": "r2scan3c", "environment": "gas"},
+                        "inputs": {
+                            "geometry": InputBindingProposal(step_key="geometry", port="geometry")
+                        },
+                    },
+                ],
+                "requested_results": [{"step_key": "opt", "field": "opt_final_electronic_energy"}],
+            }
+            return schema.model_validate(value, strict=True)
+        raise AssertionError(f"unexpected model purpose: {kwargs['purpose']}")
+
+
+def test_agent_parameter_update_preserves_charge_in_request_step_and_preview(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    agent = Agent(
+        config,
+        build_registry(config),
+        llm=ParameterContinuationClient(),
+        session_id="parameter_update",
+    )
+
+    initial = agent.handle_message("优化 SMILES O，电荷设为0，多重度设为1并输出能量")
+    assert initial.run is not None and initial.run.status == "waiting"
+    assert initial.run.waiting_for == "confirmation"
+    assert initial.run.request.explicit_parameters["charge"] == 0
+    assert initial.run.request.explicit_parameters["multiplicity"] == 1
+
+    updated = agent.handle_message("电荷不变，优化步数设为2")
+
+    assert updated.run is not None and updated.run.status == "waiting"
+    assert updated.run.waiting_for == "confirmation"
+    assert updated.run.request.explicit_parameters["charge"] == 0
+    assert updated.run.request.explicit_parameters["multiplicity"] == 1
+    assert updated.run.request.user_modifications["geom_maxiter"] == 2
+    opt_step = next(step for step in updated.run.plan.steps if step.tool == "optimize_geometry")
+    assert opt_step.parameters["charge"] == 0
+    assert opt_step.parameters["multiplicity"] == 1
+    assert opt_step.parameters["geom_maxiter"] == 2
+    assert updated.run.pending_data["parameters"]["charge"] == 0
+    assert updated.run.pending_data["parameters"]["multiplicity"] == 1
+    assert "电荷为 0，自旋多重度为 1" in updated.text
 
 
 def test_request_target_and_operation_cannot_be_dropped() -> None:

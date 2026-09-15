@@ -38,6 +38,7 @@ from .planner import (
 )
 from .repair import apply_repair_proposal, propose_repair
 from .session import (
+    MAX_RECENT_RUNS,
     artifact_path,
     create_run,
     execution_fingerprint,
@@ -57,6 +58,7 @@ from .tools.molecule import parse_xyz_bytes, validate_electronic_state
 from .tools.registry import ToolRegistry
 
 INPUT_GEOMETRY_PLACEHOLDER = "__input_geometry__"
+MAX_QUERY_CATALOG_ITEMS = 24
 
 
 @dataclass(frozen=True)
@@ -1353,8 +1355,19 @@ class Agent:
         self._save_session()
 
     def _record_result_summary(self, run: Run, result: Result) -> None:
-        summaries = self._session.setdefault("recent_results", [])
-        summaries.append(
+        summaries = self._session.get("recent_results", [])
+        recent_by_run: list[dict[str, Any]] = []
+        if isinstance(summaries, list):
+            for item in summaries:
+                if not isinstance(item, Mapping):
+                    continue
+                run_id = item.get("run_id")
+                if not isinstance(run_id, str) or not run_id:
+                    continue
+                recent_by_run = [entry for entry in recent_by_run if entry["run_id"] != run_id]
+                recent_by_run.append(dict(item))
+        recent_by_run = [entry for entry in recent_by_run if entry["run_id"] != run.id]
+        recent_by_run.append(
             {
                 "run_id": run.id,
                 "step_id": result.step_id,
@@ -1363,7 +1376,7 @@ class Agent:
                 "attempt": result.attempt,
             }
         )
-        self._session["recent_results"] = summaries[-3:]
+        self._session["recent_results"] = recent_by_run[-MAX_RECENT_RUNS:]
         self._session["active_run_id"] = run.id
         self._save_session()
 
@@ -1384,21 +1397,46 @@ class Agent:
         self._query_bindings = {}
         subject_refs: dict[str, str] = {}
 
-        def _subject_ref(run: Run, step: Step) -> str | None:
+        def _subject_ref(run: Run, step: Step) -> str:
             task_key = f"{run.id}:{step.id}"
             if task_key in subject_refs:
                 return subject_refs[task_key]
-            if len(subject_refs) >= 3:
-                return None
             ref = f"t{len(subject_refs) + 1}"
             subject_refs[task_key] = ref
             return ref
+
+        def _ordered_steps(run: Run) -> list[Step]:
+            by_id = {step.id: step for step in run.plan.steps}
+            prioritized: list[Step] = []
+            seen: set[str] = set()
+            for target in run.plan.requested_results:
+                candidate = by_id.get(target.step_id) if target.step_id is not None else None
+                if candidate is None:
+                    name = target.port or target.field
+                    matching: list[Step] = []
+                    if name is not None:
+                        for step in run.plan.steps:
+                            try:
+                                tool = self.registry.get(step.tool)
+                            except ValueError:
+                                continue
+                            declared = (
+                                tool.output_ports if target.port is not None else tool.results
+                            )
+                            if name in declared:
+                                matching.append(step)
+                    if len(matching) == 1:
+                        candidate = matching[0]
+                if candidate is not None and candidate.id not in seen:
+                    prioritized.append(candidate)
+                    seen.add(candidate.id)
+            return prioritized + [step for step in run.plan.steps if step.id not in seen]
 
         active_run_id = self._session.get("active_run_id")
         indexed_ids: list[str] = []
         if isinstance(active_run_id, str) and active_run_id:
             indexed_ids.append(active_run_id)
-        for summary in self._session.get("recent_results", []):
+        for summary in reversed(self._session.get("recent_results", [])):
             if not isinstance(summary, Mapping):
                 continue
             run_id = summary.get("run_id")
@@ -1416,7 +1454,9 @@ class Agent:
             # is never imported into the catalog.
             if run.session_id not in {None, self.session_id}:
                 continue
-            for step in run.plan.steps:
+            for step in _ordered_steps(run):
+                if len(catalog) >= MAX_QUERY_CATALOG_ITEMS:
+                    return catalog
                 relative = run.current_results.get(step.id)
                 if not isinstance(relative, str):
                     continue
@@ -1432,12 +1472,12 @@ class Agent:
                     if name in tool.output_ports or name not in result.values:
                         continue
                     property_name = tool.result_properties.get(name)
-                    subject_ref = _subject_ref(run, step)
-                    if property_name is None or subject_ref is None:
+                    if property_name is None:
                         continue
                     value = result.values[name]
                     if not _query_value_is_compatible(value, expected_type):
                         continue
+                    subject_ref = _subject_ref(run, step)
                     binding = {
                         "session_id": self.session_id,
                         "run_id": run.id,
@@ -1463,14 +1503,16 @@ class Agent:
                             structure=structure,
                         )
                     )
+                    if len(catalog) >= MAX_QUERY_CATALOG_ITEMS:
+                        return catalog
                 for name, expected_type in tool.output_ports.items():
                     property_name = tool.result_properties.get(name)
-                    subject_ref = _subject_ref(run, step)
-                    if property_name is None or subject_ref is None:
+                    if property_name is None:
                         continue
                     artifact = self._query_port_artifact(run, step, result, name, expected_type)
                     if artifact is None:
                         continue
+                    subject_ref = _subject_ref(run, step)
                     binding = {
                         "session_id": self.session_id,
                         "run_id": run.id,
@@ -1497,6 +1539,8 @@ class Agent:
                             structure=structure,
                         )
                     )
+                    if len(catalog) >= MAX_QUERY_CATALOG_ITEMS:
+                        return catalog
         return catalog
 
     def _public_query_entry(
