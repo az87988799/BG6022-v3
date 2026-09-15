@@ -2,17 +2,18 @@ from __future__ import annotations
 
 import pytest
 
-from bg6022.models import InputReference, Plan, Request, Step, Tool
+from bg6022.models import GoalCheckRequirement, InputReference, Plan, Request, Step, Tool
 from bg6022.tools.registry import build_registry, describe_tools
 
 
-def test_m1_tools_are_public() -> None:
+def test_m1_and_m2_tools_are_public() -> None:
     names = {item["name"] for item in describe_tools()}
     assert names == {
         "resolve_molecule",
         "generate_geometry",
         "single_point",
         "optimize_geometry",
+        "frequency",
     }
 
 
@@ -98,4 +99,34 @@ def test_validate_plan_rejects_self_reference_without_key_error() -> None:
         ],
     )
     with pytest.raises(ValueError, match="earlier step"):
+        build_registry().validate_plan(plan)
+
+
+def test_local_minimum_gate_requires_same_geometry_reference_as_frequency_check() -> None:
+    request = Request(id="request_gate_binding", description="test gate binding")
+    plan = Plan(
+        id="plan_gate_binding",
+        request_id=request.id,
+        steps=[
+            Step(
+                id="frequency",
+                tool="frequency",
+                parameters={"charge": 0, "multiplicity": 1},
+                inputs={"geometry": InputReference(artifact_id="checked_geometry")},
+            ),
+            Step(
+                id="single_point",
+                tool="single_point",
+                parameters={"charge": 0, "multiplicity": 1},
+                inputs={"geometry": InputReference(artifact_id="different_geometry")},
+                goal_checks=[
+                    GoalCheckRequirement(
+                        source_step_id="frequency", check="local_minimum_supported"
+                    )
+                ],
+            ),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="same geometry checked"):
         build_registry().validate_plan(plan)

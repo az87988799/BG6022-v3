@@ -26,6 +26,8 @@ RunStatus = Literal[
     "interrupted",
 ]
 ResultStatus = Literal["succeeded", "failed", "cancelled", "interrupted", "needs_input"]
+Operation = Literal["SP", "Opt", "Freq"]
+ScientificCheckStatus = Literal["passed", "not_met", "unverified"]
 
 
 class StrictModel(BaseModel):
@@ -43,25 +45,47 @@ class ResultTarget(StrictModel):
     step_id: str | None = None
     field: str | None = None
     port: str | None = None
+    check: str | None = None
 
     @model_validator(mode="after")
     def _one_target_kind(self) -> ResultTarget:
-        if (self.field is None) == (self.port is None):
-            raise ValueError("result target must contain exactly one field or port")
+        if sum(value is not None for value in (self.field, self.port, self.check)) != 1:
+            raise ValueError("result target must contain exactly one field, port, or check")
         return self
 
 
 class Request(StrictModel):
     id: str
     description: str
+    operations: list[Operation] = Field(default_factory=list)
     requested_results: list[ResultTarget] = Field(default_factory=list)
     explicit_parameters: dict[str, Any] = Field(default_factory=dict)
     source: Literal["cli", "chat"] = "cli"
-    operation: Literal["SP", "Opt"] | None = None
     original_text: str | None = None
     user_modifications: dict[str, Any] = Field(default_factory=dict)
     structure_input: dict[str, Any] = Field(default_factory=dict)
     missing_fields: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _load_legacy_operation(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "operation" not in value:
+            return value
+        data = dict(value)
+        legacy = data.pop("operation")
+        if legacy is None:
+            return data
+        if "operations" in data and data["operations"] != [legacy]:
+            raise ValueError("legacy operation conflicts with operations")
+        data["operations"] = [legacy]
+        return data
+
+    @field_validator("operations")
+    @classmethod
+    def _unique_operations(cls, value: list[Operation]) -> list[Operation]:
+        if len(set(value)) != len(value):
+            raise ValueError("requested operations must be unique")
+        return value
 
     @field_validator("requested_results", mode="before")
     @classmethod
@@ -69,6 +93,12 @@ class Request(StrictModel):
         if value is None:
             return []
         return [{"field": item} if isinstance(item, str) else item for item in value]
+
+    @property
+    def operation(self) -> Operation | None:
+        """Read-only compatibility for old single-operation callers."""
+
+        return self.operations[0] if len(self.operations) == 1 else None
 
 
 class InputReference(StrictModel):
@@ -89,12 +119,29 @@ class InputReference(StrictModel):
         return self
 
 
+class GoalCheckRequirement(StrictModel):
+    """A source Tool check that must have a declared status before this Step runs."""
+
+    source_step_id: str
+    check: str
+    required_status: ScientificCheckStatus = "passed"
+
+
+class ScientificCheckResult(StrictModel):
+    """Program-computed evidence for a named scientific goal check."""
+
+    status: ScientificCheckStatus
+    input_geometry_sha256: str | None = None
+    conditions: dict[str, Any] = Field(default_factory=dict)
+    reason: str | None = None
+
+
 class Step(StrictModel):
     id: str
     tool: str
     parameters: dict[str, Any] = Field(default_factory=dict)
     inputs: dict[str, InputReference] = Field(default_factory=dict)
-    goal_checks: list[str] = Field(default_factory=list)
+    goal_checks: list[GoalCheckRequirement] = Field(default_factory=list)
     origin_step_id: str | None = None
 
 
@@ -148,6 +195,7 @@ class Result(StrictModel):
     status: ResultStatus
     values: dict[str, Any] = Field(default_factory=dict)
     checks: dict[str, Any] = Field(default_factory=dict)
+    scientific_checks: dict[str, ScientificCheckResult] = Field(default_factory=dict)
     diagnostics: dict[str, Any] = Field(default_factory=dict)
     artifact_ids: list[str] = Field(default_factory=list)
     output_ports: dict[str, str] = Field(default_factory=dict)
@@ -174,6 +222,7 @@ class Run(StrictModel):
     current_results: dict[str, str] = Field(default_factory=dict)
     waiting_for: Literal["confirmation", "clarification", "repair", None] = None
     pending_data: dict[str, Any] = Field(default_factory=dict)
+    parameter_sources_by_step: dict[str, dict[str, str]] = Field(default_factory=dict)
     accepted_snapshot: dict[str, Any] = Field(default_factory=dict)
     repair_records: list[dict[str, Any]] = Field(default_factory=list)
     budget: dict[str, Any] = Field(default_factory=dict)
@@ -240,6 +289,7 @@ ResultProperty = Literal[
 class Tool(StrictModel):
     name: str
     description: str
+    operations: list[Operation] = Field(default_factory=list)
     parameter_model: str = "none"
     parameter_schema: dict[str, Any] = Field(default_factory=dict)
     parameter_type: type[BaseModel] | None = Field(default=None, exclude=True, repr=False)
@@ -249,6 +299,7 @@ class Tool(StrictModel):
     result_properties: dict[str, ResultProperty] = Field(default_factory=dict)
     result_metadata: dict[str, dict[str, str]] = Field(default_factory=dict)
     success_conditions: list[str] = Field(default_factory=list)
+    scientific_checks: dict[str, str] = Field(default_factory=dict)
     repair_capabilities: list[str] = Field(default_factory=list)
     requires_compute_permission: bool = True
     parameter_preparation: Literal["none", "orca_electronic_state"] = "none"

@@ -54,7 +54,13 @@ def propose_repair(
             {"role": "system", "content": load_prompt("repair")},
             {
                 "role": "user",
-                "content": _context(run, step, result, options),
+                "content": _context(
+                    run,
+                    step,
+                    result,
+                    options,
+                    remaining_timeout_seconds=remaining_timeout_seconds,
+                ),
             },
         ],
         RepairProposal,
@@ -97,13 +103,84 @@ def apply_repair_proposal(
     )
 
 
-def _context(run: Run, step: Step, result: Result, options: list[RepairOption]) -> str:
+def _context(
+    run: Run,
+    step: Step,
+    result: Result,
+    options: list[RepairOption],
+    *,
+    remaining_timeout_seconds: float | None,
+) -> str:
     import json
 
+    origin = run.origin_step_map.get(step.id, step.origin_step_id or step.id)
+    max_attempts = int(run.budget.get("max_attempts_per_science_step", 3))
+    used_attempts = int(run.attempt_counts.get(origin, 0))
+    attempts = [
+        {
+            name: item[name]
+            for name in ("attempt", "phase", "status", "result_category", "operation")
+            if name in item
+        }
+        for item in run.attempts
+        if item.get("step_id") == step.id
+    ][-max_attempts:]
+    snapshot = run.accepted_snapshot if isinstance(run.accepted_snapshot, dict) else {}
+    original_request = snapshot.get("request")
+    if not isinstance(original_request, dict):
+        original_request = run.request.model_dump(mode="json")
+    accepted_plan = snapshot.get("plan")
+    original_step = None
+    if isinstance(accepted_plan, dict) and isinstance(accepted_plan.get("steps"), list):
+        original_step = next(
+            (
+                item
+                for item in accepted_plan["steps"]
+                if isinstance(item, dict) and item.get("id") == step.id
+            ),
+            None,
+        )
     return json.dumps(
         {
             "failed_step": step.id,
             "tool": step.tool,
+            "prior_attempts": attempts,
+            "attempt_budget": {
+                "origin_step_id": origin,
+                "used": used_attempts,
+                "maximum": max_attempts,
+                "remaining": max(0, max_attempts - used_attempts),
+            },
+            "run_budget": {
+                "extra_orca_executions_used": run.extra_orca_executions,
+                "extra_orca_executions_maximum": int(
+                    run.budget.get("max_extra_orca_executions", 3)
+                ),
+                "remaining_active_seconds": remaining_timeout_seconds,
+            },
+            "original_scientific_constraints": {
+                "request": {
+                    name: original_request.get(name)
+                    for name in (
+                        "description",
+                        "operations",
+                        "requested_results",
+                        "explicit_parameters",
+                        "user_modifications",
+                    )
+                    if name in original_request
+                },
+                "step": original_step
+                or {
+                    "tool": step.tool,
+                    "parameters": dict(step.parameters),
+                    "inputs": {
+                        name: reference.model_dump(mode="json")
+                        for name, reference in step.inputs.items()
+                    },
+                    "goal_checks": [goal.model_dump(mode="json") for goal in step.goal_checks],
+                },
+            },
             "result": {
                 "status": result.status,
                 "attempt": result.attempt,

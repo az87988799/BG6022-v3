@@ -192,6 +192,7 @@ def _run_tool(args: argparse.Namespace) -> int:
     request = Request(
         id=new_id("request"),
         description=f"explicit CLI execution of {args.tool}",
+        operations=list(tool.operations),
         requested_results=_result_targets(tool),
         explicit_parameters=validated,
     )

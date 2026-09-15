@@ -12,7 +12,16 @@ from bg6022.answer import (
     select_facts_for_question,
 )
 from bg6022.config import load_config
-from bg6022.models import InputReference, Plan, Request, Result, ResultTarget, Run, Step
+from bg6022.models import (
+    GoalCheckRequirement,
+    InputReference,
+    Plan,
+    Request,
+    Result,
+    ResultTarget,
+    Run,
+    Step,
+)
 from bg6022.session import utc_now
 from bg6022.tools.registry import build_registry
 
@@ -82,7 +91,10 @@ def test_confirmation_is_chinese_and_uses_the_bound_xyz_atom_count(tmp_path: Pat
     text = render_confirmation(run.pending_data)
     assert "水分子（H₂O）" in text
     assert "3 个原子" in text
-    assert "结果目标：优化后的电子能、优化后的几何" in text
+    assert "优化后的电子能" in text
+    assert "优化后的几何" in text
+    assert "完整计算计划" in text
+    assert "生成初始结构" in text
     assert "4 核" in text
     assert "1024 MB" in text
     assert "192 MB" in text
@@ -90,6 +102,83 @@ def test_confirmation_is_chinese_and_uses_the_bound_xyz_atom_count(tmp_path: Pat
     assert "20 分钟" in text
     assert "60 分钟" in text
     assert "{" not in text and "}" not in text
+
+
+def test_confirmation_discloses_the_full_ordered_opt_freq_sp_plan(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    registry = build_registry(config)
+    agent = Agent(config, registry, llm=None, session_id="session_confirm_composed")
+    opt = Step(
+        id="opt",
+        tool="optimize_geometry",
+        parameters={
+            "method_profile": "r2scan3c",
+            "environment": "gas",
+            "charge": 0,
+            "multiplicity": 1,
+        },
+        inputs={"geometry": InputReference(artifact_id="request_geometry")},
+    )
+    freq = Step(
+        id="freq",
+        tool="frequency",
+        parameters={
+            "method_profile": "r2scan3c",
+            "environment": "gas",
+            "charge": 0,
+            "multiplicity": 1,
+        },
+        inputs={"geometry": InputReference(step_id=opt.id, port="optimized_geometry")},
+    )
+    sp = Step(
+        id="sp",
+        tool="single_point",
+        parameters={
+            "method_profile": "r2scan3c",
+            "environment": "gas",
+            "charge": 0,
+            "multiplicity": 1,
+        },
+        inputs={"geometry": InputReference(step_id=opt.id, port="optimized_geometry")},
+        goal_checks=[GoalCheckRequirement(source_step_id=freq.id, check="local_minimum_supported")],
+    )
+    targets = [
+        ResultTarget(step_id=freq.id, field="vibrational_frequencies"),
+        ResultTarget(step_id=freq.id, check="local_minimum_supported"),
+        ResultTarget(step_id=sp.id, field="sp_electronic_energy"),
+    ]
+    request = Request(
+        id="request_composed_confirmation",
+        description="optimize water, calculate frequencies, then run an independent SP",
+        operations=["Opt", "Freq", "SP"],
+        requested_results=targets,
+        explicit_parameters={"charge": 0, "multiplicity": 1},
+        structure_input={
+            "xyz_text": "3\nwater\nO 0 0 0\nH 0.758602 0 0.504284\nH -0.758602 0 0.504284\n"
+        },
+        source="chat",
+    )
+    plan = Plan(
+        id="plan_composed_confirmation",
+        request_id=request.id,
+        steps=[opt, freq, sp],
+        requested_results=targets,
+    )
+    run = agent._create_chat_run(request, plan)
+    agent.advance(run)
+    assert run.status == "waiting"
+    assert run.waiting_for == "confirmation", run.pending_data
+    text = render_confirmation(run.pending_data)
+
+    assert "完整计算计划" in text
+    assert text.index("几何优化") < text.index("频率计算")
+    assert text.index("频率计算") < text.index("独立单点计算")
+    assert "局部极小值检查（passed）" in text
+    assert "振动频率" in text
+    assert "单点电子能" in text
+    assert "1024 MB" in text and "192 MB" in text
+    assert "result.json" not in text
+    assert "sha256" not in text
 
 
 def test_result_and_repeat_confirmation_are_property_scoped_natural_language(

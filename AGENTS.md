@@ -23,3 +23,11 @@
     simulated evidence remain separate.
 12. New capability should add a Tool and its local adapter/tests, not another
     Kernel, Service, or Record framework.
+
+## Master plan and phase workflow
+
+- The v3 implementation master plan is `E:\chrome\总方案BG6022_v3_Migration_Rebuild_Plan (1).md`. Read it at the start of every phase task and use it to check the phase goals, dependencies, engineering principles, and acceptance evidence.
+- The master plan is project guidance, not authorization to implement every phase or every aspirational item it describes. The detailed phase plan supplied by the user defines the current task's scope. Do not mark a phase complete until the user accepts the implementation.
+- If the master plan conflicts with this file or the user's current instructions, follow this file and the current user instructions. In particular, the active compute budget is 4 cores, 1024 MB total, `%maxcore 192`, and one concurrent job; the master plan's older 2048 MB / `%maxcore 384` values do not apply unless the user explicitly changes this constraint.
+- After completing and validating each user-provided phase plan, commit the corresponding changes and push them to `https://github.com/az87988799/BG6022-v3.git`. The user's current push instruction supersedes the master plan's older instruction to push only on explicit request.
+- Once implementation, validation, commit, and push are done, report the phase as awaiting user acceptance. Do not call it complete until the user accepts it.

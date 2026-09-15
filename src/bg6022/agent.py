@@ -59,6 +59,7 @@ from .tools.registry import ToolRegistry
 
 INPUT_GEOMETRY_PLACEHOLDER = "__input_geometry__"
 MAX_QUERY_CATALOG_ITEMS = 24
+MAX_HISTORY_GEOMETRIES = 8
 
 
 @dataclass(frozen=True)
@@ -181,6 +182,7 @@ class Agent:
         try:
             self._ensure_request_active(request_token, request_cancel)
             result_catalog = self._build_query_catalog()
+            geometry_catalog, geometry_bindings = self._build_geometry_catalog()
             intake = intake_message(
                 self.llm,
                 text,
@@ -189,9 +191,72 @@ class Agent:
                     "recent_results": self._session.get("recent_results", []),
                 },
                 result_catalog=result_catalog,
+                geometry_catalog=geometry_catalog,
                 cancel=request_cancel,
             )
             self._ensure_request_active(request_token, request_cancel)
+
+            selected_geometry_alias = intake.history_geometry_alias
+            history_geometry_requested = _requests_history_geometry(text)
+            if selected_geometry_alias is not None and not history_geometry_requested:
+                raise ValueError(
+                    "a historical geometry can be selected only when the user explicitly "
+                    "requests reuse of a previous structure"
+                )
+            if history_geometry_requested and len(geometry_catalog) > 1:
+                # The intake model can help interpret a request, but it must not
+                # choose among multiple historical structures on the user's behalf.
+                explicit_alias = _explicit_history_geometry_alias(text, geometry_catalog)
+                if explicit_alias is None:
+                    options = "\n".join(
+                        f"- {item['alias']}: {item['description']} "
+                        f"({_query_system_label(item.get('system', {}))})"
+                        for item in geometry_catalog
+                    )
+                    response = AgentResponse(
+                        "当前会话有多个可复用的成功优化结构，请明确选择一个结构别名后再继续：\n"
+                        f"{options}\n回复如“复用 geometry_1”。"
+                    )
+                    self._append_message("assistant", response.text)
+                    return response
+                selected_geometry_alias = explicit_alias
+                intake = intake.model_copy(
+                    update={"history_geometry_alias": selected_geometry_alias}
+                )
+            if (
+                selected_geometry_alias is None
+                and intake.intent == "chemistry_compute"
+                and history_geometry_requested
+            ):
+                if not geometry_catalog:
+                    response = AgentResponse(
+                        "当前会话没有找到可安全复用的成功优化结构；我没有改用新结构或启动计算。"
+                    )
+                    self._append_message("assistant", response.text)
+                    return response
+                if len(geometry_catalog) > 1:
+                    response = AgentResponse(
+                        "当前会话有多个可复用的成功优化结构，请说明要使用哪一个分子或任务。"
+                    )
+                    self._append_message("assistant", response.text)
+                    return response
+                selected_geometry_alias = str(geometry_catalog[0]["alias"])
+                intake = intake.model_copy(
+                    update={"history_geometry_alias": selected_geometry_alias}
+                )
+            if selected_geometry_alias is not None:
+                if intake.intent != "chemistry_compute":
+                    raise ValueError(
+                        "a historical geometry alias can only be used for a calculation"
+                    )
+                if selected_geometry_alias not in geometry_bindings:
+                    raise ValueError(
+                        "intake selected a history geometry outside the verified catalog"
+                    )
+                if intake.structure_input.get("xyz_text") or intake.structure_input.get("xyz"):
+                    raise ValueError(
+                        "a request cannot combine a historical geometry alias with inline XYZ"
+                    )
 
             current = self._coerce_run(None)
             normalized_parameters = normalize_user_explicit_parameters(
@@ -282,6 +347,15 @@ class Agent:
                     context={
                         "recent_messages": self._session.get("recent_messages", []),
                         "recent_results": self._session.get("recent_results", []),
+                        "geometry_catalog": (
+                            [
+                                item
+                                for item in geometry_catalog
+                                if item.get("alias") == selected_geometry_alias
+                            ]
+                            if selected_geometry_alias is not None
+                            else []
+                        ),
                     },
                     validation_feedback=validation_feedback,
                     cancel=request_cancel,
@@ -289,8 +363,15 @@ class Agent:
                 self._ensure_request_active(request_token, request_cancel)
                 try:
                     plan = proposal_to_plan(
-                        request, proposal, self.registry, plan_id=new_id("plan")
+                        request,
+                        proposal,
+                        self.registry,
+                        plan_id=new_id("plan"),
+                        artifact_aliases=_selected_artifact_aliases(
+                            request, selected_geometry_alias
+                        ),
                     )
+                    _validate_selected_geometry_binding(plan, request, selected_geometry_alias)
                     break
                 except ValueError as error:
                     if revision >= max_revisions:
@@ -304,7 +385,15 @@ class Agent:
             if plan is None:
                 raise ValueError("Planner did not produce a locally valid Plan")
             self._ensure_request_active(request_token, request_cancel)
-            run = self._create_chat_run(request, plan)
+            run = self._create_chat_run(
+                request,
+                plan,
+                history_geometry_binding=(
+                    geometry_bindings.get(selected_geometry_alias)
+                    if selected_geometry_alias is not None
+                    else None
+                ),
+            )
             self._session["active_run_id"] = run.id
             self._save_session()
             result = self.advance(run, cancel=request_cancel)
@@ -360,29 +449,58 @@ class Agent:
                     run.finish_active_interval()
                     save_run(self.config.data_root_path, run)
                     return last_result
-                step = _next_ready_step(run)
+                step = _next_ready_step(run, self.config.data_root_path)
                 if step is None:
+                    blocked_checks = _unmet_goal_checks(
+                        self.config.data_root_path, run, self.registry
+                    )
                     run.status = "failed"
-                    run.pending_data = {
-                        "category": "plan_incomplete",
-                        "reason": (
-                            "No executable Step remains before requested results were satisfied"
-                        ),
-                    }
+                    if blocked_checks:
+                        run.pending_data = {
+                            "category": "goal_not_met",
+                            "reason": (
+                                "A required scientific check did not reach its required status"
+                            ),
+                            "blocked_goal_checks": blocked_checks,
+                        }
+                    else:
+                        run.pending_data = {
+                            "category": "plan_incomplete",
+                            "reason": (
+                                "No executable Step remains before requested results were satisfied"
+                            ),
+                        }
                     run.finish_active_interval()
                     save_run(self.config.data_root_path, run)
                     return last_result
                 tool = self.registry.get(step.tool)
                 if tool.parameter_preparation == "orca_electronic_state":
-                    prepared_step = self._prepare_orca_step(run, step)
-                    if prepared_step is None:
-                        run.finish_active_interval()
-                        save_run(self.config.data_root_path, run)
-                        return last_result
-                    # Parameter resolution may replace a deferred Step.  The
-                    # exact replacement must be used for preview, fingerprint,
-                    # budget reservation, and execution in this same turn.
-                    step = prepared_step
+                    if tool.requires_compute_permission and not run.execution_permission:
+                        # Resolve every ORCA Step before showing one confirmation
+                        # for the whole Plan. Later operations often consume a
+                        # future geometry port, so structure facts are traced
+                        # back through that port to the already prepared input.
+                        for planned_step in run.plan.steps:
+                            planned_tool = self.registry.get(planned_step.tool)
+                            if planned_tool.parameter_preparation != "orca_electronic_state":
+                                continue
+                            prepared_step = self._prepare_orca_step(run, planned_step)
+                            if prepared_step is None:
+                                run.finish_active_interval()
+                                save_run(self.config.data_root_path, run)
+                                return last_result
+                        step = next(item for item in run.plan.steps if item.id == step.id)
+                    else:
+                        prepared_step = self._prepare_orca_step(run, step)
+                        if prepared_step is None:
+                            run.finish_active_interval()
+                            save_run(self.config.data_root_path, run)
+                            return last_result
+                        # Parameter resolution may replace a deferred Step. The
+                        # exact replacement must be used for preview, fingerprint,
+                        # budget reservation, and execution in this same turn.
+                        step = prepared_step
+                    tool = self.registry.get(step.tool)
                 if tool.requires_compute_permission and not run.execution_permission:
                     self._prepare_confirmation(run, step)
                     run.finish_active_interval()
@@ -418,7 +536,10 @@ class Agent:
                     raise
                 last_result = result
                 result.step_fingerprint = _step_fingerprint(step)
-                if run.pending_data.get("parameter_sources"):
+                step_parameter_sources = run.parameter_sources_by_step.get(step.id)
+                if step_parameter_sources:
+                    result.parameter_sources = dict(step_parameter_sources)
+                elif run.pending_data.get("parameter_sources"):
                     result.parameter_sources = dict(run.pending_data["parameter_sources"])
                 result.input_bindings = {
                     name: artifact.id
@@ -590,7 +711,21 @@ class Agent:
         self._save_session()
         return AgentResponse("已开始新会话。")
 
-    def _create_chat_run(self, request: Request, plan: Plan) -> Run:
+    def _create_chat_run(
+        self,
+        request: Request,
+        plan: Plan,
+        *,
+        history_geometry_binding: Mapping[str, Any] | None = None,
+    ) -> Run:
+        history_alias = request.structure_input.get("history_geometry_alias")
+        verified_history = (
+            self._verify_history_geometry_binding(history_geometry_binding)
+            if history_alias is not None and history_geometry_binding is not None
+            else None
+        )
+        if history_alias is not None and verified_history is None:
+            raise ValueError("selected history geometry has no verified source binding")
         run = Run(
             id=new_id("run"),
             request=request,
@@ -605,15 +740,59 @@ class Agent:
             updated_at=utc_now(),
         )
         create_run(self.config.data_root_path, run)
-        self._seed_structure_input(run)
+        alias_replacements: dict[str, str] = {}
+        if verified_history is not None:
+            source_run, source_step, source_result, source_artifact, source_path = verified_history
+            copied = register_file_artifact(
+                self.config.data_root_path,
+                run,
+                source_path,
+                artifact_type="molecular_geometry",
+                role="input_geometry",
+                source="history:verified_optimized_geometry",
+                extension=".xyz",
+                metadata={
+                    "history_source_role": "optimized_geometry",
+                    "history_source_run_id": source_run.id,
+                    "history_source_step_id": source_step.id,
+                    "history_source_attempt": source_result.attempt,
+                    "history_source_artifact_id": source_artifact.id,
+                    "history_source_sha256": source_artifact.sha256,
+                },
+            )
+            if copied.sha256 != source_artifact.sha256:
+                raise ValueError("copied history geometry hash differs from its verified source")
+            assert isinstance(history_alias, str)
+            alias_replacements[history_alias] = copied.id
+        input_artifact = self._seed_structure_input(run)
+        if input_artifact is not None:
+            alias_replacements["request_geometry"] = input_artifact.id
+            alias_replacements[INPUT_GEOMETRY_PLACEHOLDER] = input_artifact.id
+        updated_steps = []
+        for step in run.plan.steps:
+            inputs = {
+                name: (
+                    InputReference(artifact_id=alias_replacements[reference.artifact_id])
+                    if reference.artifact_id in alias_replacements
+                    else reference
+                )
+                for name, reference in step.inputs.items()
+            }
+            if inputs != step.inputs:
+                updated_steps.append(step.model_copy(update={"inputs": inputs}))
+            else:
+                updated_steps.append(step)
+        run.plan = Plan.model_validate(
+            {**run.plan.model_dump(mode="python"), "steps": updated_steps}, strict=True
+        )
         save_run(self.config.data_root_path, run)
         return run
 
-    def _seed_structure_input(self, run: Run) -> None:
+    def _seed_structure_input(self, run: Run) -> Any | None:
         value = run.request.structure_input
         xyz_text = value.get("xyz_text") or value.get("xyz") if isinstance(value, dict) else None
         if xyz_text is None:
-            return
+            return None
         if not isinstance(xyz_text, str):
             raise ValueError("chat structure_input.xyz_text must be text")
         geometry_bytes = xyz_text.encode("utf-8")
@@ -628,18 +807,7 @@ class Agent:
             extension=".xyz",
             metadata={"imported_as_raw_bytes": True, "source": "chat"},
         )
-        steps = []
-        for step in run.plan.steps:
-            inputs = {}
-            for name, reference in step.inputs.items():
-                if reference.artifact_id in {"request_geometry", INPUT_GEOMETRY_PLACEHOLDER}:
-                    inputs[name] = InputReference(artifact_id=artifact.id)
-                else:
-                    inputs[name] = reference
-            steps.append(step.model_copy(update={"inputs": inputs}))
-        run.plan = Plan.model_validate(
-            {**run.plan.model_dump(mode="python"), "steps": steps}, strict=True
-        )
+        return artifact
 
     def _prepare_orca_step(self, run: Run, step: Step) -> Step | None:
         if (
@@ -691,6 +859,7 @@ class Agent:
             "parameter_sources": resolution.parameter_sources,
             "effective_parameters": validated,
         }
+        run.parameter_sources_by_step[step.id] = dict(resolution.parameter_sources)
         return replacement
 
     def _apply_parameter_update(
@@ -960,18 +1129,19 @@ class Agent:
         return {
             "request": {
                 "description": run.request.description,
-                "operation": run.request.operation,
+                "operations": list(run.request.operations),
                 "requested_results": [
                     target.model_dump(mode="json") for target in run.request.requested_results
                 ],
             },
-            "operation": run.request.operation
+            "operation": (self.registry.get(step.tool).operations or [None])[0]
             or {"optimize_geometry": "Opt", "single_point": "SP"}.get(step.tool, "Tool"),
             "step_id": step.id,
             "tool": step.tool,
+            "plan_steps": self._preview_plan_steps(run),
             "parameters": dict(step.parameters),
             "result_targets": self._preview_result_targets(run, step),
-            "parameter_sources": run.pending_data.get("parameter_sources", {}),
+            "parameter_sources": run.parameter_sources_by_step.get(step.id, {}),
             "structure": structure,
             "artifact_bindings": [
                 {
@@ -990,6 +1160,59 @@ class Agent:
             "budget": dict(run.budget),
         }
 
+    def _preview_plan_steps(self, run: Run) -> list[dict[str, Any]]:
+        step_numbers = {step.id: index for index, step in enumerate(run.plan.steps, start=1)}
+        summaries: list[dict[str, Any]] = []
+        for index, step in enumerate(run.plan.steps, start=1):
+            tool = self.registry.get(step.tool)
+            inputs: list[dict[str, Any]] = []
+            for name, reference in step.inputs.items():
+                if reference.step_id is not None:
+                    source_index = step_numbers.get(reference.step_id)
+                    inputs.append(
+                        {
+                            "name": name,
+                            "source_step": f"步骤 {source_index}" if source_index else "未知步骤",
+                            "port": reference.port,
+                        }
+                    )
+                    continue
+                artifact = self._artifact_from_reference(run, reference)
+                inputs.append(
+                    {
+                        "name": name,
+                        "artifact_role": artifact.role if artifact is not None else "待绑定结构",
+                        "history_geometry": bool(
+                            artifact is not None
+                            and artifact.source == "history:verified_optimized_geometry"
+                        ),
+                    }
+                )
+            goals = [
+                {
+                    "source_step": (
+                        f"步骤 {step_numbers[goal.source_step_id]}"
+                        if goal.source_step_id in step_numbers
+                        else "未知步骤"
+                    ),
+                    "check": goal.check,
+                    "required_status": goal.required_status,
+                }
+                for goal in step.goal_checks
+            ]
+            summaries.append(
+                {
+                    "index": index,
+                    "tool": tool.name,
+                    "operations": list(tool.operations),
+                    "parameters": dict(step.parameters),
+                    "inputs": inputs,
+                    "goal_checks": goals,
+                    "requested_results": self._preview_result_targets(run, step),
+                }
+            )
+        return summaries
+
     def _preview_result_targets(self, run: Run, step: Step) -> list[dict[str, str]]:
         try:
             tool = self.registry.get(step.tool)
@@ -999,7 +1222,7 @@ class Agent:
         for target in run.plan.requested_results:
             if target.step_id != step.id:
                 continue
-            name = target.port or target.field
+            name = target.check or target.port or target.field
             if name is None:
                 continue
             metadata = dict(tool.result_metadata.get(name, {}))
@@ -1007,7 +1230,13 @@ class Agent:
             metadata.setdefault("description", tool.description)
             item = {
                 "name": name,
-                "kind": "port" if target.port is not None else "field",
+                "kind": (
+                    "check"
+                    if target.check is not None
+                    else "port"
+                    if target.port is not None
+                    else "field"
+                ),
                 "label": metadata["label"],
                 "description": metadata["description"],
             }
@@ -1065,14 +1294,27 @@ class Agent:
     def _known_structure_facts(self, run: Run, step: Step | None = None) -> dict[str, Any]:
         """Read facts only from the molecule that produced this Step's geometry."""
 
+        return self._known_structure_facts_from_step(run, step, seen=set())
+
+    def _known_structure_facts_from_step(
+        self, run: Run, step: Step | None, *, seen: set[str]
+    ) -> dict[str, Any]:
         if step is None:
             return {}
+        if step.id in seen:
+            return {}
+        seen.add(step.id)
         geometry_reference = step.inputs.get("geometry")
         if geometry_reference is None:
             return {}
         geometry_artifact = self._artifact_from_reference(run, geometry_reference)
         if geometry_artifact is None:
-            return {}
+            if geometry_reference.step_id is None:
+                return {}
+            source_step = next(
+                (item for item in run.plan.steps if item.id == geometry_reference.step_id), None
+            )
+            return self._known_structure_facts_from_step(run, source_step, seen=seen)
         molecule_artifact = self._molecule_artifact_for_geometry(run, geometry_artifact, seen=set())
         if molecule_artifact is None:
             return {}
@@ -1543,6 +1785,134 @@ class Agent:
                         return catalog
         return catalog
 
+    def _build_geometry_catalog(self) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+        """Expose bounded aliases for current, verified optimized geometries."""
+
+        indexed_ids: list[str] = []
+        active_run_id = self._session.get("active_run_id")
+        if isinstance(active_run_id, str) and active_run_id:
+            indexed_ids.append(active_run_id)
+        for summary in reversed(self._session.get("recent_results", [])):
+            if not isinstance(summary, Mapping):
+                continue
+            run_id = summary.get("run_id")
+            if isinstance(run_id, str) and run_id and run_id not in indexed_ids:
+                indexed_ids.append(run_id)
+
+        catalog: list[dict[str, Any]] = []
+        bindings: dict[str, dict[str, Any]] = {}
+        for run_id in indexed_ids:
+            try:
+                run = load_run(self.config.data_root_path, run_id)
+            except ValueError:
+                continue
+            if run.session_id not in {None, self.session_id}:
+                continue
+            for step in reversed(run.plan.steps):
+                if len(catalog) >= MAX_HISTORY_GEOMETRIES:
+                    return catalog, bindings
+                try:
+                    tool = self.registry.get(step.tool)
+                except ValueError:
+                    continue
+                if tool.name != "optimize_geometry":
+                    continue
+                relative = run.current_results.get(step.id)
+                if not isinstance(relative, str):
+                    continue
+                result = _load_bound_result(self.config.data_root_path, run, relative)
+                if result is None or not self._query_result_is_valid(run, step, result, relative):
+                    continue
+                artifact = self._query_port_artifact(
+                    run, step, result, "optimized_geometry", "molecular_geometry"
+                )
+                if artifact is None or artifact.role != "optimized_geometry":
+                    continue
+                try:
+                    geometry_path = artifact_path(self.config.data_root_path, run, artifact)
+                    geometry = parse_xyz_bytes(geometry_path.read_bytes())
+                except (OSError, ValueError):
+                    continue
+                alias = f"geometry_{len(catalog) + 1}"
+                binding = {
+                    "session_id": self.session_id,
+                    "run_id": run.id,
+                    "step_id": step.id,
+                    "result_path": relative,
+                    "attempt": result.attempt,
+                    "step_fingerprint": _step_fingerprint(step),
+                    "artifact_id": artifact.id,
+                    "sha256": artifact.sha256,
+                }
+                bindings[alias] = binding
+                system = self._query_structure(run, step, result)
+                catalog.append(
+                    {
+                        "alias": alias,
+                        "description": run.request.description[:160],
+                        "created_at": run.created_at,
+                        "run_status": run.status,
+                        "system": system,
+                        "geometry": {
+                            "role": "verified optimized_geometry",
+                            "atom_count": geometry.atom_count,
+                        },
+                        "calculation": {
+                            "method_profile": step.parameters.get("method_profile"),
+                            "environment": step.parameters.get("environment"),
+                            "charge": step.parameters.get("charge"),
+                            "multiplicity": step.parameters.get("multiplicity"),
+                        },
+                    }
+                )
+        return catalog, bindings
+
+    def _verify_history_geometry_binding(
+        self, binding: Mapping[str, Any]
+    ) -> tuple[Run, Step, Result, Any, Path]:
+        """Revalidate source result and bytes immediately before copying them."""
+
+        if binding.get("session_id") != self.session_id:
+            raise ValueError("history geometry belongs to another session")
+        run_id = binding.get("run_id")
+        step_id = binding.get("step_id")
+        relative = binding.get("result_path")
+        if not all(isinstance(item, str) and item for item in (run_id, step_id, relative)):
+            raise ValueError("history geometry binding is malformed")
+        source_run = load_run(self.config.data_root_path, run_id)
+        if source_run.session_id not in {None, self.session_id}:
+            raise ValueError("history geometry source is outside this session")
+        step = next((item for item in source_run.plan.steps if item.id == step_id), None)
+        result = _load_bound_result(self.config.data_root_path, source_run, relative)
+        if (
+            step is None
+            or step.tool != "optimize_geometry"
+            or result is None
+            or source_run.current_results.get(step.id) != relative
+            or result.status != "succeeded"
+            or result.run_id != source_run.id
+            or result.step_id != step.id
+            or result.attempt != binding.get("attempt")
+            or result.step_fingerprint != _step_fingerprint(step)
+            or result.step_fingerprint != binding.get("step_fingerprint")
+        ):
+            raise ValueError("history geometry no longer belongs to a current successful result")
+        artifact = self._query_port_artifact(
+            source_run, step, result, "optimized_geometry", "molecular_geometry"
+        )
+        if (
+            artifact is None
+            or artifact.id != binding.get("artifact_id")
+            or artifact.role != "optimized_geometry"
+            or artifact.step_id != step.id
+            or artifact.attempt != result.attempt
+            or artifact.sha256 != binding.get("sha256")
+        ):
+            raise ValueError("history geometry artifact binding is invalid")
+        path = artifact_path(self.config.data_root_path, source_run, artifact)
+        parse_xyz_bytes(path.read_bytes())
+        return source_run, step, result, artifact, path
+
     def _public_query_entry(
         self,
         subject_ref: str,
@@ -1724,34 +2094,76 @@ class Agent:
         verified = {(fact.get("step_id"), fact.get("kind"), fact.get("name")) for fact in facts}
         labels: list[str] = []
         for target in run.plan.requested_results:
+            if target.check is not None:
+                candidates = [
+                    step
+                    for step in run.plan.steps
+                    if target.check in self.registry.get(step.tool).scientific_checks
+                    and (target.step_id is None or target.step_id == step.id)
+                ]
+                if len(candidates) == 1:
+                    step = candidates[0]
+                    relative = run.current_results.get(step.id)
+                    result = (
+                        _load_bound_result(self.config.data_root_path, run, relative)
+                        if relative is not None
+                        else None
+                    )
+                    check = (
+                        result.scientific_checks.get(target.check)
+                        if result is not None and result.step_fingerprint == _step_fingerprint(step)
+                        else None
+                    )
+                    if (
+                        check is not None
+                        and check.status == "passed"
+                        and _result_check_input_is_bound(
+                            self.config.data_root_path, run, result, check
+                        )
+                    ):
+                        continue
+                check_labels = {
+                    "frequency_complete": "完整频率检查",
+                    "local_minimum_supported": "局部极小值检查",
+                }
+                label = check_labels.get(target.check, target.check.replace("_", " "))
+                if label not in labels:
+                    labels.append(label)
+                continue
+
             kind = "port" if target.port is not None else "field"
             name = target.port or target.field
             if name is None:
                 continue
-            if name == "energy":
-                name = {
-                    "SP": "sp_electronic_energy",
-                    "Opt": "opt_final_electronic_energy",
-                }.get(run.request.operation, name)
-            elif name == "geometry" and run.request.operation == "Opt":
+            requested_operations = set(run.request.operations)
+            if (
+                name == "energy"
+                and "SP" in requested_operations
+                and "Opt" not in requested_operations
+            ):
+                name = "sp_electronic_energy"
+            elif (
+                name == "energy"
+                and "Opt" in requested_operations
+                and "SP" not in requested_operations
+            ):
+                name = "opt_final_electronic_energy"
+            elif name in {"geometry", "molecular_geometry"} and "Opt" in requested_operations:
                 kind, name = "port", "optimized_geometry"
             else:
                 aliases = {
                     "sp_energy": ("field", "sp_electronic_energy"),
                     "opt_energy": ("field", "opt_final_electronic_energy"),
                     "optimized_geometry": ("port", "optimized_geometry"),
+                    "frequency": ("field", "vibrational_frequencies"),
+                    "frequencies": ("field", "vibrational_frequencies"),
                 }
                 kind, name = aliases.get(name, (kind, name))
 
             producers = [
                 step
                 for step in run.plan.steps
-                if (
-                    name in self.registry.get(step.tool).output_ports
-                    if kind == "port"
-                    else name in self.registry.get(step.tool).results
-                    and name not in self.registry.get(step.tool).output_ports
-                )
+                if name in _declared_target_names(self.registry, step, kind)
             ]
             candidates = [
                 step for step in producers if target.step_id is None or target.step_id == step.id
@@ -1775,11 +2187,12 @@ class Agent:
             if label not in labels:
                 labels.append(label)
 
-        if run.request.operation is not None:
-            expected_tool = {"SP": "single_point", "Opt": "optimize_geometry"}[
-                run.request.operation
+        for operation in run.request.operations:
+            expected_steps = [
+                step
+                for step in run.plan.steps
+                if operation in self.registry.get(step.tool).operations
             ]
-            expected_steps = [step for step in run.plan.steps if step.tool == expected_tool]
             operation_complete = bool(expected_steps) and all(
                 (relative := run.current_results.get(step.id)) is not None
                 and (result := _load_bound_result(self.config.data_root_path, run, relative))
@@ -1788,7 +2201,11 @@ class Agent:
                 for step in expected_steps
             )
             if not operation_complete:
-                operation_label = {"SP": "单点计算", "Opt": "几何优化"}[run.request.operation]
+                operation_label = {
+                    "SP": "单点计算",
+                    "Opt": "几何优化",
+                    "Freq": "频率计算",
+                }[operation]
                 labels.insert(0, operation_label)
         return list(dict.fromkeys(labels))
 
@@ -1832,6 +2249,32 @@ class Agent:
             if artifact.id not in result.input_artifact_ids:
                 return False
             if result.input_bindings.get(input_name) != artifact.id:
+                return False
+        if step.tool == "frequency":
+            required_checks = (
+                "runner_succeeded",
+                "exit_code_zero",
+                "process_tree_empty",
+                "normal_termination",
+                "stdout_valid_utf8",
+                "stdout_within_size_limit",
+                "stderr_within_size_limit",
+                "scf_converged",
+                "input_hashes_match",
+                "frequency_section_complete",
+                "frequency_values_finite",
+                "frequency_mode_indices_match_hessian",
+                "hessian_present",
+                "hessian_valid",
+            )
+            if any(result.checks.get(name) is not True for name in required_checks):
+                return False
+            if not _query_value_is_compatible(
+                result.values.get("vibrational_frequencies"), "frequency"
+            ):
+                return False
+            artifact = self._query_port_artifact(run, step, result, "hessian", "orca_hessian")
+            if artifact is None or artifact.role != "verified_hessian":
                 return False
         return True
 
@@ -2030,12 +2473,127 @@ def _is_parameter_continuation(
 ) -> bool:
     if not explicit_parameters or intake.molecule_query or intake.structure_input:
         return False
-    if intake.operation is not None and run.request.operation is not None:
-        if intake.operation != run.request.operation:
+    if intake.operations and run.request.operations:
+        if intake.operations != run.request.operations:
             return False
     if _looks_like_molecule_change(message):
         return False
     return run.waiting_for in {"clarification", "confirmation"}
+
+
+def _selected_artifact_aliases(
+    request: Request, selected_history_alias: str | None
+) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    if selected_history_alias is not None:
+        aliases[selected_history_alias] = selected_history_alias
+    structure_input = request.structure_input
+    if isinstance(structure_input, Mapping) and (
+        structure_input.get("xyz_text") is not None or structure_input.get("xyz") is not None
+    ):
+        aliases["request_geometry"] = "request_geometry"
+        aliases[INPUT_GEOMETRY_PLACEHOLDER] = INPUT_GEOMETRY_PLACEHOLDER
+    return aliases
+
+
+def _requests_history_geometry(message: str) -> bool:
+    history = r"刚才|之前|此前|上次|上一个|最近|历史|previous|prior|last|recent"
+    geometry = r"结构|几何|优化结果|优化后的|geometry|structure|optimized"
+    explicit_alias = re.search(r"(?<![A-Za-z0-9_-])geometry_\d+(?![A-Za-z0-9_-])", message, re.I)
+    alias_action = re.search(
+        r"use|using|reuse|select|choose|take|apply|使用|复用|沿用|采用|选择|基于|选用",
+        message,
+        re.I,
+    )
+    if explicit_alias is not None and alias_action is not None:
+        denied_alias_action = re.search(
+            r"(?:do\s+not|don't|never|without|avoid|must\s+not|should\s+not|"
+            r"不要(?:再)?|不(?:要)?|别|禁止)"
+            r".{0,16}(?:use|using|reuse|select|choose|take|apply|使用|复用|沿用|采用|选择|基于|选用)"
+            r".{0,24}geometry_\d+",
+            message,
+            re.I,
+        )
+        return denied_alias_action is None
+    relation = re.search(
+        rf"(?:{history}).{{0,32}}(?:{geometry})|"
+        rf"(?:{geometry}).{{0,32}}(?:{history})",
+        message,
+        re.I,
+    )
+    if relation is None:
+        return False
+    if re.search(
+        r"(?:do\s+not|don't|never|without|avoid|exclude|must\s+not|should\s+not|"
+        r"不要(?:再)?|不(?:要)?|别|禁止)"
+        r".{0,12}(?:use|using|reuse|select|choose|take|apply|使用|复用|沿用|采用|选择|用)"
+        r".{0,32}(?:刚才|之前|此前|上次|上一个|最近|历史|previous|prior|last|recent)"
+        r".{0,24}(?:结构|几何|优化结果|优化后的|geometry|structure|optimized)|"
+        r"(?:刚才|之前|此前|上次|上一个|最近|历史|previous|prior|last|recent)"
+        r".{0,32}(?:结构|几何|优化结果|优化后的|geometry|structure|optimized)"
+        r".{0,12}(?:不要(?:再)?|不(?:要)?|别|禁止).{0,8}"
+        r"(?:use|using|reuse|select|choose|take|apply|使用|复用|沿用|采用|选择|用)",
+        message,
+        re.I,
+    ):
+        return False
+    action = (
+        r"use|using|reuse|select|choose|take|apply|run|perform|calculate|compute|conduct|"
+        r"single[ -]?point|\bSP\b|\bFreq\b|\bOpt\b|"
+        r"使用|复用|沿用|采用|选择|基于|继续|运行|执行|计算|单点|频率|优化"
+    )
+    return bool(
+        re.search(rf"(?:{action}).{{0,64}}(?:{history}|{geometry})", message, re.I)
+        or re.search(rf"(?:{history}|{geometry}).{{0,64}}(?:{action})", message, re.I)
+    )
+
+
+def _explicit_history_geometry_alias(
+    message: str, geometry_catalog: list[dict[str, Any]]
+) -> str | None:
+    """Return an alias only when the user named exactly one offered alias."""
+
+    available = {
+        str(item["alias"]).casefold(): str(item["alias"])
+        for item in geometry_catalog
+        if isinstance(item.get("alias"), str)
+    }
+    mentioned = {
+        match.casefold()
+        for match in re.findall(r"(?<![A-Za-z0-9_-])geometry_\d+(?![A-Za-z0-9_-])", message, re.I)
+    }
+    selected = mentioned & available.keys()
+    if len(selected) != 1:
+        return None
+    return available[next(iter(selected))]
+
+
+def _validate_selected_geometry_binding(
+    plan: Plan, request: Request, selected_history_alias: str | None
+) -> None:
+    selected_alias = selected_history_alias
+    if (
+        selected_alias is None
+        and isinstance(request.structure_input, Mapping)
+        and (
+            request.structure_input.get("xyz_text") is not None
+            or request.structure_input.get("xyz") is not None
+        )
+    ):
+        selected_alias = "request_geometry"
+    if selected_alias is None:
+        return
+    if any(step.tool in {"resolve_molecule", "generate_geometry"} for step in plan.steps):
+        raise ValueError(
+            "a supplied geometry must be used directly without new structure preparation"
+        )
+    if not any(
+        step.tool in {"single_point", "optimize_geometry", "frequency"}
+        and (reference := step.inputs.get("geometry")) is not None
+        and reference.artifact_id == selected_alias
+        for step in plan.steps
+    ):
+        raise ValueError("Plan does not use the selected supplied geometry as a calculation input")
 
 
 def _looks_like_molecule_change(message: str) -> bool:
@@ -2074,16 +2632,187 @@ def _replace_step(plan: Plan, replacement: Step) -> Plan:
     )
 
 
-def _next_ready_step(run: Run) -> Step | None:
+def _next_ready_step(run: Run, data_root: str | None = None) -> Step | None:
     for step in run.plan.steps:
         if step.id in run.current_results:
             continue
         if all(
             reference.step_id is None or reference.step_id in run.current_results
             for reference in step.inputs.values()
+        ) and all(
+            data_root is not None
+            and _goal_check_requirement_met(data_root, run, requirement, dependent_step=step)
+            for requirement in step.goal_checks
         ):
             return step
     return None
+
+
+def _goal_check_requirement_met(
+    data_root: str,
+    run: Run,
+    requirement: Any,
+    *,
+    dependent_step: Step | None = None,
+) -> bool:
+    source_step = next(
+        (item for item in run.plan.steps if item.id == requirement.source_step_id), None
+    )
+    relative = run.current_results.get(requirement.source_step_id)
+    if source_step is None or relative is None:
+        return False
+    result = _load_bound_result(data_root, run, relative)
+    if (
+        result is None
+        or result.status != "succeeded"
+        or result.run_id != run.id
+        or result.step_id != source_step.id
+        or result.step_fingerprint != _step_fingerprint(source_step)
+    ):
+        return False
+    check = result.scientific_checks.get(requirement.check)
+    return bool(
+        check is not None
+        and check.status == requirement.required_status
+        and _result_check_input_is_bound(data_root, run, result, check)
+        and (
+            dependent_step is None
+            or _goal_check_geometry_matches(requirement, source_step, dependent_step)
+        )
+    )
+
+
+def _goal_check_geometry_matches(requirement: Any, source_step: Step, dependent_step: Step) -> bool:
+    """Keep a local-minimum gate attached to the exact geometry it verified."""
+
+    if requirement.check != "local_minimum_supported":
+        return True
+    source_geometry = source_step.inputs.get("geometry")
+    dependent_geometry = dependent_step.inputs.get("geometry")
+    return (
+        source_step.tool == "frequency"
+        and source_geometry is not None
+        and source_geometry == dependent_geometry
+    )
+
+
+def _result_check_input_is_bound(data_root: str, run: Run, result: Result, check: Any) -> bool:
+    """Bind a scientific check to the exact, hash-verified geometry input."""
+
+    artifact_id = result.input_bindings.get("geometry")
+    if (
+        not isinstance(artifact_id, str)
+        or artifact_id not in result.input_artifact_ids
+        or not isinstance(check.input_geometry_sha256, str)
+    ):
+        return False
+    try:
+        artifact = find_artifact(run, artifact_id)
+        if (
+            artifact.run_id != run.id
+            or artifact.artifact_type != "molecular_geometry"
+            or artifact.sha256 != check.input_geometry_sha256
+        ):
+            return False
+        artifact_path(data_root, run, artifact)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _unmet_goal_checks(data_root: str, run: Run, registry: ToolRegistry) -> list[dict[str, Any]]:
+    blocked: list[dict[str, Any]] = []
+    for step in run.plan.steps:
+        if step.id in run.current_results:
+            continue
+        for requirement in step.goal_checks:
+            source_step = next(
+                (item for item in run.plan.steps if item.id == requirement.source_step_id), None
+            )
+            relative = run.current_results.get(requirement.source_step_id)
+            source_result = (
+                _load_bound_result(data_root, run, relative) if relative is not None else None
+            )
+            if (
+                source_step is None
+                or source_result is None
+                or source_result.status != "succeeded"
+                or source_result.step_fingerprint != _step_fingerprint(source_step)
+            ):
+                continue
+            check = source_result.scientific_checks.get(requirement.check)
+            actual_status = check.status if check is not None else "unverified"
+            input_bound = (
+                check is not None
+                and _result_check_input_is_bound(data_root, run, source_result, check)
+                and _goal_check_geometry_matches(requirement, source_step, step)
+            )
+            if actual_status != requirement.required_status or not input_bound:
+                blocked.append(
+                    {
+                        "dependent_step_id": step.id,
+                        "source_step_id": requirement.source_step_id,
+                        "check": requirement.check,
+                        "required_status": requirement.required_status,
+                        "actual_status": actual_status if input_bound else "unverified",
+                        "reason": (
+                            check.reason
+                            if check is not None and input_bound
+                            else "scientific check is not bound to the dependent Step geometry"
+                            if check is not None
+                            else "check result is missing"
+                        ),
+                    }
+                )
+    for target in run.plan.requested_results:
+        if target.check is None:
+            continue
+        candidates = [
+            step
+            for step in run.plan.steps
+            if target.check in _declared_target_names(registry, step, "check")
+        ]
+        if target.step_id is not None:
+            candidates = [step for step in candidates if step.id == target.step_id]
+        if len(candidates) != 1:
+            continue
+        source_step = candidates[0]
+        relative = run.current_results.get(source_step.id)
+        source_result = (
+            _load_bound_result(data_root, run, relative) if relative is not None else None
+        )
+        if (
+            source_result is None
+            or source_result.status != "succeeded"
+            or source_result.step_fingerprint != _step_fingerprint(source_step)
+        ):
+            continue
+        check = source_result.scientific_checks.get(target.check)
+        actual_status = check.status if check is not None else "unverified"
+        input_bound = check is not None and _result_check_input_is_bound(
+            data_root, run, source_result, check
+        )
+        if actual_status != "passed" or not input_bound:
+            blocked.append(
+                {
+                    "dependent_step_id": None,
+                    "source_step_id": source_step.id,
+                    "check": target.check,
+                    "required_status": "passed",
+                    "actual_status": actual_status if input_bound else "unverified",
+                    "reason": check.reason if check is not None else "check result is missing",
+                }
+            )
+    return blocked
+
+
+def _declared_target_names(registry: ToolRegistry, step: Step, kind: str) -> set[str]:
+    tool = registry.get(step.tool)
+    if kind == "port":
+        return set(tool.output_ports)
+    if kind == "check":
+        return set(tool.scientific_checks)
+    return set(tool.results) - set(tool.output_ports)
 
 
 def _invalidate_current_results(run: Run, changed_step_id: str) -> None:
@@ -2096,21 +2825,22 @@ def _invalidate_current_results(run: Run, changed_step_id: str) -> None:
         for step in run.plan.steps:
             if step.id in invalidated:
                 continue
-            if any(reference.step_id in invalidated for reference in step.inputs.values()):
+            if any(reference.step_id in invalidated for reference in step.inputs.values()) or any(
+                requirement.source_step_id in invalidated for requirement in step.goal_checks
+            ):
                 invalidated.add(step.id)
                 changed = True
     for step_id in invalidated:
         run.current_results.pop(step_id, None)
+        run.parameter_sources_by_step.pop(step_id, None)
         run.step_status[step_id] = "planned"
 
 
 def _requested_results_satisfied(data_root: str, run: Run, registry: ToolRegistry) -> bool:
-    if run.request.operation is not None:
-        required_tool = {
-            "SP": "single_point",
-            "Opt": "optimize_geometry",
-        }[run.request.operation]
-        required_steps = [step for step in run.plan.steps if step.tool == required_tool]
+    for operation in run.request.operations:
+        required_steps = [
+            step for step in run.plan.steps if operation in registry.get(step.tool).operations
+        ]
         if not required_steps:
             return False
         for step in required_steps:
@@ -2131,18 +2861,18 @@ def _requested_results_satisfied(data_root: str, run: Run, registry: ToolRegistr
             if step_id is None:
                 # Old M0 targets were unqualified; the registry ensures this
                 # is unique, so the first producer is the only legal binding.
-                kind = "port" if target.port is not None else "field"
-                name = target.port or target.field
+                kind = (
+                    "check"
+                    if target.check is not None
+                    else "port"
+                    if target.port is not None
+                    else "field"
+                )
+                name = target.check or target.port or target.field
                 matches = [
                     step.id
                     for step in run.plan.steps
-                    if name is not None
-                    and (
-                        name in registry.get(step.tool).output_ports
-                        if kind == "port"
-                        else name in registry.get(step.tool).results
-                        and name not in registry.get(step.tool).output_ports
-                    )
+                    if name is not None and name in _declared_target_names(registry, step, kind)
                 ]
                 if len(matches) != 1:
                     return False
@@ -2158,6 +2888,21 @@ def _requested_results_satisfied(data_root: str, run: Run, registry: ToolRegistr
                 return False
             if target.field is not None and target.field not in result.values:
                 return False
+            if target.field is not None:
+                tool = registry.get(step.tool)
+                expected_type = tool.results.get(target.field)
+                if (
+                    expected_type is None
+                    or target.field in tool.output_ports
+                    or not _query_value_is_compatible(result.values[target.field], expected_type)
+                ):
+                    return False
+            if target.check is not None:
+                check = result.scientific_checks.get(target.check)
+                if check is None or check.status != "passed":
+                    return False
+                if not _result_check_input_is_bound(data_root, run, result, check):
+                    return False
             if target.port is not None:
                 tool = registry.get(step.tool)
                 artifact_id = result.output_ports.get(target.port)
@@ -2219,6 +2964,30 @@ def _step_fingerprint(step: Step) -> str:
 def _query_value_is_compatible(value: Any, declared_type: str) -> bool:
     """Accept only finite values whose persisted unit/type matches the Tool."""
 
+    if declared_type == "frequency":
+        if not isinstance(value, Mapping) or value.get("complete") is not True:
+            return False
+        if value.get("unit") != "cm^-1" or type(value.get("scaling_applied")) is not bool:
+            return False
+        modes = value.get("modes")
+        if not isinstance(modes, list) or not modes:
+            return False
+        indices: list[int] = []
+        for mode in modes:
+            if not isinstance(mode, Mapping):
+                return False
+            index, number = mode.get("index"), mode.get("value")
+            if type(index) is not int or type(number) not in {int, float}:
+                return False
+            if mode.get("unit") != "cm^-1" or not math.isfinite(float(number)):
+                return False
+            indices.append(index)
+        if indices != list(range(len(indices))):
+            return False
+        factor = value.get("scaling_factor")
+        return factor is None or (
+            type(factor) in {int, float} and math.isfinite(float(factor)) and factor > 0
+        )
     if declared_type == "Eh":
         if not isinstance(value, Mapping):
             return False
@@ -2264,6 +3033,7 @@ def _step_purpose(step: Step) -> str:
         "generate_geometry": "生成初始几何",
         "single_point": "计算单点电子能",
         "optimize_geometry": "进行几何优化并检查收敛",
+        "frequency": "计算振动频率并检查 Hessian",
     }.get(step.tool, step.tool)
 
 

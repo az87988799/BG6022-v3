@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from bg6022.agent import Agent, _step_fingerprint
+from bg6022.agent import Agent, _requests_history_geometry, _step_fingerprint
 from bg6022.config import load_config
 from bg6022.models import InputReference, Plan, Request, Result, ResultTarget, Run, Step, Tool
-from bg6022.planner import intake_message
+from bg6022.planner import IntakeOutput, intake_message
 from bg6022.session import (
     create_run,
     load_run,
@@ -658,6 +658,122 @@ def test_three_step_runs_preserve_current_and_historical_energy_for_queries(
     )
 
 
+@pytest.mark.parametrize(
+    "user_message",
+    [
+        "Optimize fresh water with charge 0 and multiplicity 1; start from scratch.",
+        "Do not use or reuse the previous optimized geometry; generate fresh water "
+        "with charge 0 and multiplicity 1.",
+    ],
+)
+def test_model_cannot_select_history_geometry_without_user_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    user_message: str,
+) -> None:
+    config = _config(tmp_path)
+    registry = build_registry()
+    source_run, source_results = _save_three_step_opt_run(
+        config,
+        session_id="session_spurious_history_geometry",
+        run_id="run_history_geometry_source",
+        description="previous optimized water geometry",
+        energy_token=None,
+    )
+    agent = Agent(config, registry, llm=None, session_id="session_spurious_history_geometry")
+    agent._record_result_summary(source_run, source_results[-1])
+
+    def select_history_geometry(*_args, **_kwargs) -> IntakeOutput:
+        return IntakeOutput(
+            intent="chemistry_compute",
+            operations=["Opt"],
+            molecule_query="water",
+            molecule_input_kind="name",
+            history_geometry_alias="geometry_1",
+            explicit_parameters={"charge": 0, "multiplicity": 1},
+            requested_results=["opt_final_electronic_energy"],
+        )
+
+    monkeypatch.setattr("bg6022.agent.intake_message", select_history_geometry)
+
+    response = agent.handle_message(user_message)
+
+    assert "only when the user explicitly requests reuse" in response.text
+    assert response.run is None
+    assert agent._session["active_run_id"] == source_run.id
+    assert len(list((Path(config.data_root_path) / "runs").iterdir())) == 1
+
+
+def test_model_cannot_choose_between_multiple_history_geometries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    registry = build_registry()
+    agent = Agent(config, registry, llm=None, session_id="session_ambiguous_history_geometry")
+    for run_id, description in (
+        ("run_history_geometry_first", "first successful water optimization"),
+        ("run_history_geometry_second", "second successful water optimization"),
+    ):
+        source_run, source_results = _save_three_step_opt_run(
+            config,
+            session_id="session_ambiguous_history_geometry",
+            run_id=run_id,
+            description=description,
+            energy_token=None,
+        )
+        agent._record_result_summary(source_run, source_results[-1])
+    previous_active_run_id = agent._session.get("active_run_id")
+
+    def choose_first_geometry(*_args, **_kwargs) -> IntakeOutput:
+        return IntakeOutput(
+            intent="chemistry_compute",
+            operations=["SP"],
+            molecule_query="water",
+            molecule_input_kind="name",
+            history_geometry_alias="geometry_1",
+            explicit_parameters={"charge": 0, "multiplicity": 1},
+            requested_results=["sp_electronic_energy"],
+        )
+
+    monkeypatch.setattr("bg6022.agent.intake_message", choose_first_geometry)
+
+    response = agent.handle_message("Run SP using the previous optimized geometry.")
+
+    assert "多个可复用" in response.text
+    assert "geometry_1" in response.text
+    assert "geometry_2" in response.text
+    assert response.run is None
+    assert agent._session.get("active_run_id") == previous_active_run_id
+    assert len(list((Path(config.data_root_path) / "runs").iterdir())) == 2
+
+    class PlanningStarted(Exception):
+        pass
+
+    def start_planning(*_args, **_kwargs):
+        raise PlanningStarted
+
+    monkeypatch.setattr("bg6022.agent.plan_message", start_planning)
+    with pytest.raises(PlanningStarted):
+        agent.handle_message("复用 geometry_1")
+
+
+def test_history_geometry_request_requires_affirmative_reuse_intent() -> None:
+    assert _requests_history_geometry(
+        "Run an SP on the successful optimized geometry from my previous water task."
+    )
+    assert not _requests_history_geometry(
+        "Do not use or reuse the previous optimized geometry; start from scratch."
+    )
+    assert not _requests_history_geometry(
+        "Optimize fresh water; start from scratch and do not reuse prior geometry."
+    )
+    assert not _requests_history_geometry("不要复用之前的结构，重新优化。")
+    assert not _requests_history_geometry("之前的结构不要使用，请重新建立。")
+    assert _requests_history_geometry("复用 geometry_1")
+    assert not _requests_history_geometry("不要复用 geometry_1")
+
+
 def test_current_task_cannot_borrow_energy_from_a_different_task(tmp_path: Path) -> None:
     config = _config(tmp_path)
     registry = build_registry()
@@ -881,7 +997,7 @@ def test_current_result_is_removed_when_the_step_fingerprint_changes(tmp_path: P
     )
     changed = load_run(config.data_root_path, run.id)
     changed.plan = changed.plan.model_copy(
-        update={"steps": [Step(id="measure", tool="measure", goal_checks=["changed"])]}
+        update={"steps": [Step(id="measure", tool="measure", origin_step_id="changed")]}
     )
     save_run(config.data_root_path, changed)
     save_session(

@@ -18,11 +18,19 @@ from pydantic import (
 )
 
 from bg6022.llm import LlmClient
-from bg6022.models import InputReference, Plan, Request, ResultProperty, ResultTarget, Step
+from bg6022.models import (
+    GoalCheckRequirement,
+    InputReference,
+    Operation,
+    Plan,
+    Request,
+    ResultProperty,
+    ResultTarget,
+    Step,
+)
 from bg6022.tools.registry import ToolRegistry
 
 Intent = Literal["chemistry_compute", "chemistry_qa", "daily_qa", "context_query"]
-Operation = Literal["SP", "Opt"]
 QuerySelectionStatus = Literal["selected", "clarify", "unavailable"]
 ElectronicStateField = Literal["charge", "multiplicity"]
 ElectronicStateStatus = Literal["absent", "set", "ambiguous", "invalid"]
@@ -105,9 +113,10 @@ class IntakeOutput(BaseModel):
 
     intent: Intent
     answer: StrictStr | None = None
-    operation: Operation | None = None
+    operations: list[Operation] = Field(default_factory=list)
     molecule_query: StrictStr | None = None
     molecule_input_kind: Literal["name", "cas", "cid", "smiles"] | None = None
+    history_geometry_alias: StrictStr | None = None
     explicit_parameters: dict[str, Any] = Field(default_factory=dict)
     electronic_state_candidates: list[ElectronicStateCandidate] = Field(default_factory=list)
     structure_input: dict[str, Any] = Field(default_factory=dict)
@@ -115,10 +124,25 @@ class IntakeOutput(BaseModel):
     missing_fields: list[str] = Field(default_factory=list)
     query_selection: QuerySelection | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _load_legacy_operation(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "operation" not in value:
+            return value
+        data = dict(value)
+        legacy = data.pop("operation")
+        if legacy is not None:
+            if "operations" in data and data["operations"] != [legacy]:
+                raise ValueError("legacy operation conflicts with operations")
+            data["operations"] = [legacy]
+        return data
+
     @model_validator(mode="after")
     def _intent_fields(self) -> IntakeOutput:
         if self.intent == "context_query" and (
-            self.explicit_parameters or self.electronic_state_candidates
+            self.explicit_parameters
+            or self.electronic_state_candidates
+            or self.history_geometry_alias
         ):
             raise ValueError("context_query cannot contain a parameter patch")
         if self.intent == "context_query" and self.query_selection is None:
@@ -126,6 +150,19 @@ class IntakeOutput(BaseModel):
         if self.intent != "context_query" and self.query_selection is not None:
             raise ValueError("query_selection is only valid for context_query")
         return self
+
+    @field_validator("operations")
+    @classmethod
+    def _unique_operations(cls, value: list[Operation]) -> list[Operation]:
+        if len(set(value)) != len(value):
+            raise ValueError("requested operations must be unique")
+        return value
+
+    @property
+    def operation(self) -> Operation | None:
+        """Read-only compatibility with pre-M2 intake handlers."""
+
+        return self.operations[0] if len(self.operations) == 1 else None
 
 
 class InputBindingProposal(BaseModel):
@@ -148,6 +185,14 @@ class InputBindingProposal(BaseModel):
         return self
 
 
+class GoalCheckProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    source_step_key: StrictStr
+    check: StrictStr
+    required_status: Literal["passed", "not_met", "unverified"] = "passed"
+
+
 class PlanStepProposal(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -155,7 +200,7 @@ class PlanStepProposal(BaseModel):
     tool: StrictStr
     parameters: dict[str, Any] = Field(default_factory=dict)
     inputs: dict[str, InputBindingProposal] = Field(default_factory=dict)
-    goal_checks: list[str] = Field(default_factory=list)
+    goal_checks: list[GoalCheckProposal] = Field(default_factory=list)
 
 
 class PlanTargetProposal(BaseModel):
@@ -164,11 +209,12 @@ class PlanTargetProposal(BaseModel):
     step_key: StrictStr
     field: StrictStr | None = None
     port: StrictStr | None = None
+    check: StrictStr | None = None
 
     @model_validator(mode="after")
     def _one_target(self) -> PlanTargetProposal:
-        if (self.field is None) == (self.port is None):
-            raise ValueError("plan target needs exactly one field or port")
+        if sum(value is not None for value in (self.field, self.port, self.check)) != 1:
+            raise ValueError("plan target needs exactly one field, port, or check")
         return self
 
 
@@ -204,6 +250,7 @@ def intake_message(
     *,
     context: Mapping[str, Any] | None = None,
     result_catalog: list[Mapping[str, Any]] | None = None,
+    geometry_catalog: list[Mapping[str, Any]] | None = None,
     cancel: Any = None,
 ) -> IntakeOutput:
     if not message.strip():
@@ -226,6 +273,7 @@ def intake_message(
                         "message": message,
                         "recent_context": _bounded_context(context),
                         "result_catalog": catalog,
+                        "geometry_catalog": [dict(item) for item in (geometry_catalog or [])],
                     }
                 ),
             },
@@ -234,9 +282,10 @@ def intake_message(
         purpose="intake",
         example={
             "intent": "chemistry_compute",
-            "operation": "Opt",
+            "operations": ["Opt"],
             "molecule_query": "water",
             "molecule_input_kind": "name",
+            "history_geometry_alias": None,
             "structure_input": {},
             "explicit_parameters": {},
             "electronic_state_candidates": [],
@@ -307,7 +356,12 @@ def plan_message(
 
 
 def proposal_to_plan(
-    request: Request, proposal: PlanProposal, registry: ToolRegistry, *, plan_id: str
+    request: Request,
+    proposal: PlanProposal,
+    registry: ToolRegistry,
+    *,
+    plan_id: str,
+    artifact_aliases: Mapping[str, str] | None = None,
 ) -> Plan:
     """Map model-only keys to stable domain IDs and run both plan validations."""
 
@@ -315,12 +369,19 @@ def proposal_to_plan(
     if len(set(keys)) != len(keys):
         raise ValueError("planner returned duplicate step keys")
     step_ids = {key: _step_id(index, key) for index, key in enumerate(keys, start=1)}
+    allowed_artifact_aliases = dict(artifact_aliases or {})
     steps: list[Step] = []
     for item in proposal.steps:
         inputs: dict[str, InputReference] = {}
         for name, binding in item.inputs.items():
             if binding.artifact_alias is not None:
-                inputs[name] = InputReference(artifact_id=binding.artifact_alias)
+                resolved_alias = allowed_artifact_aliases.get(binding.artifact_alias)
+                if resolved_alias is None:
+                    raise ValueError(
+                        "planner input uses an unknown or unselected artifact alias "
+                        f"{binding.artifact_alias!r}"
+                    )
+                inputs[name] = InputReference(artifact_id=resolved_alias)
             else:
                 assert binding.step_key is not None and binding.port is not None
                 if binding.step_key not in step_ids:
@@ -328,6 +389,14 @@ def proposal_to_plan(
                         f"planner input references unknown step key {binding.step_key}"
                     )
                 inputs[name] = InputReference(step_id=step_ids[binding.step_key], port=binding.port)
+        unknown_goal_sources = sorted(
+            {goal.source_step_key for goal in item.goal_checks} - set(step_ids)
+        )
+        if unknown_goal_sources:
+            raise ValueError(
+                "planner goal check references unknown step key(s): "
+                + ", ".join(unknown_goal_sources)
+            )
         steps.append(
             Step(
                 id=step_ids[item.key],
@@ -335,7 +404,14 @@ def proposal_to_plan(
                 tool=item.tool,
                 parameters=dict(item.parameters),
                 inputs=inputs,
-                goal_checks=list(item.goal_checks),
+                goal_checks=[
+                    GoalCheckRequirement(
+                        source_step_id=step_ids[goal.source_step_key],
+                        check=goal.check,
+                        required_status=goal.required_status,
+                    )
+                    for goal in item.goal_checks
+                ],
             )
         )
     targets = [
@@ -360,18 +436,23 @@ def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) 
     """
 
     plan = registry.validate_plan(plan)
-    science_tools = {
-        step.tool for step in plan.steps if step.tool in {"single_point", "optimize_geometry"}
-    }
-    if request.operation is not None:
-        expected_tool = {"SP": "single_point", "Opt": "optimize_geometry"}[request.operation]
-        if expected_tool not in science_tools:
-            raise ValueError(f"Plan does not cover the requested {request.operation} calculation")
-        unexpected = sorted(science_tools - {expected_tool})
-        if unexpected:
-            raise ValueError(
-                f"Plan adds unrequested scientific operation(s): {', '.join(unexpected)}"
-            )
+    proposed_operations = [
+        operation for step in plan.steps for operation in registry.get(step.tool).operations
+    ]
+    # A missing operation list is retained only for pre-composition explicit
+    # CLI/test Requests. Chat intake is rejected unless it declares an
+    # operation, so new user Plans always receive this full coverage check.
+    if request.operations and proposed_operations != request.operations:
+        missing = [item for item in request.operations if item not in proposed_operations]
+        extra = [item for item in proposed_operations if item not in request.operations]
+        if missing:
+            if len(missing) == 1:
+                label = {"SP": "SP", "Opt": "Opt", "Freq": "frequency"}[missing[0]]
+                raise ValueError(f"Plan does not cover the requested {label} calculation")
+            raise ValueError(f"Plan does not cover requested operation(s): {', '.join(missing)}")
+        if extra:
+            raise ValueError(f"Plan adds unrequested operation(s): {', '.join(extra)}")
+        raise ValueError("Plan operation order does not match the user's requested order")
 
     plan_targets = plan.requested_results
     for request_target in request.requested_results:
@@ -384,8 +465,36 @@ def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) 
             name = request_target.port or request_target.field or "<unknown>"
             raise ValueError(f"Plan does not cover the requested result: {name}")
         if len(matches) > 1:
-            name = request_target.port or request_target.field or "<unknown>"
+            name = (
+                request_target.check or request_target.port or request_target.field or "<unknown>"
+            )
             raise ValueError(f"Requested result is ambiguous in the Plan: {name}")
+
+    # A requested local-minimum goal paired with SP is a prerequisite, not
+    # merely a report target. Enforce the edge here so a model cannot omit the
+    # runtime gate and still launch the downstream calculation.
+    if "SP" in request.operations and any(
+        target.check == "local_minimum_supported" for target in request.requested_results
+    ):
+        check_targets = [
+            target for target in plan_targets if target.check == "local_minimum_supported"
+        ]
+        if len(check_targets) != 1 or check_targets[0].step_id is None:
+            raise ValueError("the local-minimum check must have one explicit producer before SP")
+        check_step_id = check_targets[0].step_id
+        for step in plan.steps:
+            if "SP" not in registry.get(step.tool).operations:
+                continue
+            prerequisite = GoalCheckRequirement(
+                source_step_id=check_step_id,
+                check="local_minimum_supported",
+                required_status="passed",
+            )
+            if prerequisite not in step.goal_checks:
+                raise ValueError(
+                    f"SP step {step.id!r} must require local_minimum_supported "
+                    "to be passed before execution"
+                )
     return plan
 
 
@@ -396,6 +505,17 @@ def request_from_intake(
     request_id: str,
     normalized_parameters: ParameterNormalization | None = None,
 ) -> Request:
+    if intake.intent == "chemistry_compute" and not intake.operations:
+        raise ValueError(
+            "the requested scientific operation is missing; please specify SP, Opt, or Freq"
+        )
+    if {"SP", "Opt"}.issubset(intake.operations) and any(
+        value in {"energy", "electronic_energy"} for value in intake.requested_results
+    ):
+        raise ValueError(
+            "the request includes both Opt and SP, so ‘energy’ is ambiguous; "
+            "specify Opt energy or SP energy"
+        )
     if any(key in intake.structure_input for key in {"path", "local_path", "file"}):
         raise ValueError("model intake cannot authorize a local file path")
     normalized = normalized_parameters or normalize_user_explicit_parameters(
@@ -410,11 +530,23 @@ def request_from_intake(
         id=request_id,
         description=message,
         original_text=message,
-        requested_results=[ResultTarget(field=value) for value in intake.requested_results],
+        requested_results=[
+            ResultTarget(check=value)
+            if value in {"frequency_complete", "local_minimum_supported"}
+            else ResultTarget(field=value)
+            for value in intake.requested_results
+        ],
         explicit_parameters=dict(normalized.explicit_parameters),
-        structure_input=dict(intake.structure_input),
+        structure_input={
+            **dict(intake.structure_input),
+            **(
+                {"history_geometry_alias": intake.history_geometry_alias}
+                if intake.history_geometry_alias is not None
+                else {}
+            ),
+        },
         source="chat",
-        operation=intake.operation,
+        operations=list(intake.operations),
         missing_fields=list(intake.missing_fields),
     )
 
@@ -484,13 +616,14 @@ def _request_target_matches(
         return False
 
     request_kind, request_name = _semantic_target(request_target, request)
-    plan_kind = "port" if plan_target.port is not None else "field"
-    plan_name = plan_target.port or plan_target.field
-    if request_target.field == "energy" and request.operation is None:
-        return plan_kind == "field" and plan_name in {
-            "sp_electronic_energy",
-            "opt_final_electronic_energy",
-        }
+    plan_kind = (
+        "check"
+        if plan_target.check is not None
+        else "port"
+        if plan_target.port is not None
+        else "field"
+    )
+    plan_name = plan_target.check or plan_target.port or plan_target.field
     return request_kind == plan_kind and request_name == plan_name
 
 
@@ -503,14 +636,21 @@ def _proposal_target_to_result_target(
         raise ValueError(
             f"planner requested result references unknown step key {target.step_key!r}"
         ) from error
-    return ResultTarget(step_id=step_id, field=target.field, port=target.port)
+    return ResultTarget(
+        step_id=step_id,
+        field=target.field,
+        port=target.port,
+        check=target.check,
+    )
 
 
 def _semantic_target(target: ResultTarget, request: Request) -> tuple[str, str | None]:
+    if target.check is not None:
+        return "check", target.check
     if target.port is not None:
         return "port", target.port
     name = target.field
-    if name in {"geometry", "molecular_geometry"} and request.operation == "Opt":
+    if name in {"geometry", "molecular_geometry"} and "Opt" in request.operations:
         return "port", "optimized_geometry"
     aliases = {
         "optimized_geometry": ("port", "optimized_geometry"),
@@ -518,13 +658,16 @@ def _semantic_target(target: ResultTarget, request: Request) -> tuple[str, str |
         "molecular_geometry": ("port", "geometry"),
         "sp_energy": ("field", "sp_electronic_energy"),
         "opt_energy": ("field", "opt_final_electronic_energy"),
+        "frequency": ("field", "vibrational_frequencies"),
+        "frequencies": ("field", "vibrational_frequencies"),
     }
     if name in aliases:
         return aliases[name]
     if name in {"energy", "electronic_energy"}:
-        if request.operation == "SP":
+        operations = set(request.operations)
+        if "SP" in operations and "Opt" not in operations:
             return "field", "sp_electronic_energy"
-        if request.operation == "Opt":
+        if "Opt" in operations and "SP" not in operations:
             return "field", "opt_final_electronic_energy"
     return "field", name
 
@@ -836,7 +979,18 @@ def _bounded_context(context: Mapping[str, Any] | None) -> Mapping[str, Any]:
         results = [
             {"status": item.get("status")} for item in results[-3:] if isinstance(item, Mapping)
         ]
-    return {"recent_messages": recent or [], "recent_results": results or []}
+    geometry_catalog = context.get("geometry_catalog")
+    if isinstance(geometry_catalog, list):
+        geometry_catalog = [
+            dict(item) for item in geometry_catalog[:8] if isinstance(item, Mapping)
+        ]
+    else:
+        geometry_catalog = []
+    return {
+        "recent_messages": recent or [],
+        "recent_results": results or [],
+        "geometry_catalog": geometry_catalog,
+    }
 
 
 def _intake_schema(candidate_refs: tuple[str, ...]) -> type[BaseModel]:

@@ -1,8 +1,9 @@
-"""Thin single-point and geometry-optimization Tools sharing one ORCA path."""
+"""ORCA Tools sharing one validated input, execution, and parsing path."""
 
 from __future__ import annotations
 
 import json
+import math
 import time
 from pathlib import Path
 from threading import Event
@@ -11,10 +12,19 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator
 
 from bg6022.config import AppConfig, validate_execution_environment
-from bg6022.models import InputReference, Plan, Result, ResultProperty, Run, Step, Tool
+from bg6022.models import (
+    InputReference,
+    Plan,
+    Result,
+    ResultProperty,
+    Run,
+    ScientificCheckResult,
+    Step,
+    Tool,
+)
 from bg6022.orca.checks import evaluate_success
 from bg6022.orca.input import OrcaInputSpec, render_input
-from bg6022.orca.parser import inspect_attempt
+from bg6022.orca.parser import EnergyObservation, inspect_attempt
 from bg6022.orca.profiles import get_profile
 from bg6022.orca.repair_rules import applicable_repairs, applicable_scf_repair
 from bg6022.orca.runner import ProcessFacts, RunnerResources, run_orca
@@ -34,7 +44,7 @@ from bg6022.session import (
     utc_now,
     write_execution_guard,
 )
-from bg6022.tools.molecule import parse_xyz_bytes, validate_electronic_state
+from bg6022.tools.molecule import ParsedGeometry, parse_xyz_bytes, validate_electronic_state
 
 
 class OrcaParameters(BaseModel):
@@ -60,6 +70,10 @@ class SinglePointParameters(OrcaParameters):
 
 class OptimizeParameters(OrcaParameters):
     geom_maxiter: StrictInt | None = Field(default=None, ge=1, le=1000)
+
+
+class FrequencyParameters(OrcaParameters):
+    pass
 
 
 ParametersModel = TypeVar("ParametersModel", bound=OrcaParameters)
@@ -115,6 +129,38 @@ def make_optimize_tool(config: AppConfig | None = None) -> Tool:
     )
 
 
+def make_frequency_tool(config: AppConfig | None = None) -> Tool:
+    return _make_tool(
+        config,
+        operation="Freq",
+        name="frequency",
+        description=(
+            "Run an ORCA vibrational frequency calculation on the registered input geometry; "
+            "this Tool does not optimize the geometry."
+        ),
+        parameter_model=FrequencyParameters,
+        output_ports={"hessian": "orca_hessian"},
+        results={"vibrational_frequencies": "frequency"},
+        result_properties={"vibrational_frequencies": "frequency"},
+        result_metadata={
+            "vibrational_frequencies": {
+                "label": "振动频率",
+                "description": "ORCA 本次 Hessian 计算的有符号频率，单位 cm⁻¹",
+                "caveat": "负频率会保留；频率本身不证明全局最低点或热力学自由能",
+            }
+        },
+        scientific_checks={
+            "frequency_complete": (
+                "Complete finite frequency modes and matching Hessian for this input geometry."
+            ),
+            "local_minimum_supported": (
+                "A current successful optimized geometry with complete frequencies "
+                "and no negative vibrational modes after ORCA's supported external-mode check."
+            ),
+        },
+    )
+
+
 def _make_tool(
     config: AppConfig | None,
     *,
@@ -126,6 +172,7 @@ def _make_tool(
     results: dict[str, str],
     result_properties: dict[str, ResultProperty],
     result_metadata: dict[str, dict[str, str]],
+    scientific_checks: dict[str, str] | None = None,
 ) -> Tool:
     def execute(step: Step, run: Run, cancel: Event) -> Result:
         if config is None:
@@ -142,6 +189,7 @@ def _make_tool(
     return Tool(
         name=name,
         description=description,
+        operations=[operation],
         parameter_model=parameter_model.__name__,
         parameter_schema=parameter_model.model_json_schema(),
         parameter_type=parameter_model,
@@ -150,17 +198,31 @@ def _make_tool(
         results=results,
         result_properties=result_properties,
         result_metadata=result_metadata,
-        success_conditions=[
-            "normal ORCA termination",
-            "exit code 0",
-            "SCF convergence",
-            "selected finite final electronic energy",
-            "unchanged execution inputs",
-        ]
-        + (["optimization convergence", "final geometry binding"] if operation == "Opt" else []),
-        repair_capabilities=(
-            ["restart_optimization"] if operation == "Opt" else ["increase_scf_maxiter"]
+        scientific_checks=scientific_checks or {},
+        success_conditions=(
+            [
+                "normal ORCA termination",
+                "exit code 0",
+                "SCF convergence",
+                "unchanged execution inputs",
+                "complete frequency modes",
+                "matching Hessian bound to the input geometry",
+            ]
+            if operation == "Freq"
+            else [
+                "normal ORCA termination",
+                "exit code 0",
+                "SCF convergence",
+                "selected finite final electronic energy",
+                "unchanged execution inputs",
+            ]
+            + (["optimization convergence", "final geometry binding"] if operation == "Opt" else [])
         ),
+        repair_capabilities={
+            "Opt": ["restart_optimization", "increase_scf_maxiter"],
+            "SP": ["increase_scf_maxiter"],
+            "Freq": [],
+        }[operation],
         requires_compute_permission=True,
         parameter_preparation="orca_electronic_state",
         execution_budget="orca",
@@ -185,6 +247,8 @@ def execute_orca_step(
         raise ValueError(
             f"environment {parameters.environment!r} is not implemented for {profile.name!r}"
         )
+    if operation not in profile.supported_operations:
+        raise ValueError(f"operation {operation!r} is not implemented for {profile.name!r}")
     reference = step.inputs.get("geometry")
     if reference is None:
         raise ValueError("ORCA Tool requires a geometry input reference")
@@ -342,6 +406,8 @@ def _execute_prepared_attempt(
     stderr_path.touch(exist_ok=True)
     output_xyz_path = attempt_dir / "input.xyz"
     output_path_present = output_xyz_path.exists() or output_xyz_path.is_symlink()
+    hessian_path = attempt_dir / "input.hess"
+    hessian_path_present = hessian_path.is_file() and not hessian_path.is_symlink()
     input_hashes_match, input_hash_error = _check_input_hashes(
         attempt_dir,
         expected_geometry_sha=expected_geometry_sha,
@@ -357,6 +423,8 @@ def _execute_prepared_attempt(
         stop_reason=process_facts.stop_reason,
         process_tree_empty=process_facts.process_tree_empty,
         output_xyz=output_xyz_path if output_path_present else None,
+        hessian=hessian_path if operation == "Freq" and hessian_path_present else None,
+        expected_atom_count=geometry.atom_count if operation == "Freq" else None,
         input_hashes_match=input_hashes_match,
         input_hash_error=input_hash_error,
         max_output_bytes=int(run.resources["output_limit_bytes"]),
@@ -382,6 +450,27 @@ def _execute_prepared_attempt(
             attempt=attempt,
         )
         artifact_ids.append(artifact.id)
+
+    hessian_artifact = None
+    if operation == "Freq" and hessian_path_present:
+        hessian_artifact = register_file_artifact(
+            config.data_root_path,
+            run,
+            hessian_path,
+            artifact_type="orca_hessian",
+            role="verified_hessian" if outcome.success else "raw_hessian",
+            source=f"{step.id}/attempt-{attempt:02d}/input.hess",
+            step_id=step.id,
+            attempt=attempt,
+            metadata={
+                "validated_for_input_geometry_sha256": (
+                    expected_geometry_sha if facts.hessian_valid is True else None
+                ),
+                "dimension": facts.hessian_dimension,
+                "validation_error": facts.hessian_error,
+            },
+        )
+        artifact_ids.append(hessian_artifact.id)
 
     output_ports: dict[str, str] = {}
     output_is_regular = output_xyz_path.is_file() and not output_xyz_path.is_symlink()
@@ -428,6 +517,7 @@ def _execute_prepared_attempt(
                 },
             )
             artifact_ids.append(candidate.id)
+
         elif (
             not outcome.success
             and not facts.output_xyz_exists
@@ -451,6 +541,9 @@ def _execute_prepared_attempt(
             )
             artifact_ids.append(candidate.id)
 
+    if operation == "Freq" and outcome.success and hessian_artifact is not None:
+        output_ports["hessian"] = hessian_artifact.id
+
     status = "succeeded" if outcome.success else _result_status(process_facts.status)
     observed = facts.final_energy
     diagnostics = {
@@ -462,6 +555,7 @@ def _execute_prepared_attempt(
             "geometry": str(attempt_dir / "geometry.xyz"),
             "stdout": str(stdout_path),
             "stderr": str(stderr_path),
+            "hessian": str(hessian_path),
         },
         "facts": facts.to_dict(),
         "process": process_facts.to_dict(),
@@ -475,14 +569,59 @@ def _execute_prepared_attempt(
         },
     }
     values: dict[str, Any] = {}
-    if outcome.success and observed is not None and observed.value is not None:
-        key = "sp_electronic_energy" if operation == "SP" else "opt_final_electronic_energy"
-        values[key] = {
-            "value": observed.value,
-            "unit": "Eh",
-            "token": observed.token,
-            "source_line": observed.line,
-        }
+    if outcome.success:
+        values.update(_electronic_energy_value(operation, observed))
+    scientific_checks: dict[str, ScientificCheckResult] = {}
+    if operation == "Freq":
+        section = facts.frequency_section
+        modes = (
+            []
+            if section is None
+            else [
+                {"index": mode.index, "value": mode.value, "unit": mode.unit}
+                for mode in section.modes
+            ]
+        )
+        if outcome.success and section is not None:
+            values["vibrational_frequencies"] = {
+                "modes": modes,
+                "unit": "cm^-1",
+                "scaling_factor": section.scaling_factor,
+                "scaling_applied": section.scaling_applied,
+                "complete": section.complete,
+            }
+            frequency_status = "passed"
+            frequency_reason = None
+        else:
+            frequency_status = "unverified"
+            frequency_reason = (
+                section.error
+                if section is not None and section.error
+                else "frequency success checks did not pass"
+            )
+        scientific_checks["frequency_complete"] = ScientificCheckResult(
+            status=frequency_status,
+            input_geometry_sha256=expected_geometry_sha,
+            conditions={
+                "mode_count": len(modes),
+                "expected_mode_count": 3 * geometry.atom_count,
+                "hessian_valid": facts.hessian_valid is True,
+                "scaling_factor": None if section is None else section.scaling_factor,
+                "scaling_applied": False if section is None else section.scaling_applied,
+            },
+            reason=frequency_reason,
+        )
+        scientific_checks["local_minimum_supported"] = _local_minimum_check(
+            config,
+            run,
+            step,
+            geometry_artifact,
+            geometry,
+            parameters,
+            section,
+            outcome.success,
+            expected_geometry_sha,
+        )
     attempt_record.update(
         {
             "phase": "finished",
@@ -501,6 +640,7 @@ def _execute_prepared_attempt(
         status=status,
         values=values,
         checks=outcome.checks,
+        scientific_checks=scientific_checks,
         diagnostics=diagnostics,
         artifact_ids=artifact_ids,
         output_ports=output_ports,
@@ -838,6 +978,201 @@ def _failure_reason(category: str | None, facts: Any, process: ProcessFacts) -> 
     return process.stop_reason or category
 
 
+def _local_minimum_check(
+    config: AppConfig,
+    run: Run,
+    frequency_step: Step,
+    geometry_artifact: Any,
+    geometry: ParsedGeometry,
+    parameters: OrcaParameters,
+    section: Any,
+    frequency_success: bool,
+    geometry_sha256: str,
+) -> ScientificCheckResult:
+    conditions: dict[str, Any] = {
+        "input_geometry_sha256": geometry_sha256,
+        "mode_count": 0 if section is None else len(section.modes),
+        "mode_sign_rule": (
+            "vibrational modes after classified external zero modes must be nonnegative"
+        ),
+        "verified_optimized_geometry": False,
+    }
+    if section is not None:
+        conditions["scaling_factor"] = section.scaling_factor
+        conditions["scaling_applied"] = section.scaling_applied
+    if not frequency_success or section is None or not section.complete:
+        return ScientificCheckResult(
+            status="unverified",
+            input_geometry_sha256=geometry_sha256,
+            conditions=conditions,
+            reason="complete frequency modes and a matching Hessian were not verified",
+        )
+    if not _is_current_optimized_geometry(config, run, geometry_artifact, parameters):
+        return ScientificCheckResult(
+            status="unverified",
+            input_geometry_sha256=geometry_sha256,
+            conditions=conditions,
+            reason=(
+                "the frequency input is not a current successful optimized_geometry from this Run"
+            ),
+        )
+    conditions["verified_optimized_geometry"] = True
+    external_mode_count = _external_mode_count(geometry)
+    if external_mode_count is None or external_mode_count >= len(section.modes):
+        return ScientificCheckResult(
+            status="unverified",
+            input_geometry_sha256=geometry_sha256,
+            conditions=conditions,
+            reason="this geometry has no supported vibrational-mode classification",
+        )
+    external_modes = section.modes[:external_mode_count]
+    external_mode_limit = 1.0
+    conditions.update(
+        {
+            "external_mode_count": external_mode_count,
+            "external_mode_indices": [mode.index for mode in external_modes],
+            "external_mode_values_cm1": [mode.value for mode in external_modes],
+            "external_mode_tolerance_cm1": external_mode_limit,
+        }
+    )
+    if any(abs(mode.value) > external_mode_limit for mode in external_modes):
+        return ScientificCheckResult(
+            status="unverified",
+            input_geometry_sha256=geometry_sha256,
+            conditions=conditions,
+            reason=(
+                "the leading ORCA translation/rotation modes do not match the supported "
+                "near-zero layout"
+            ),
+        )
+    vibrational_modes = section.modes[external_mode_count:]
+    negative = [mode for mode in vibrational_modes if mode.value < 0.0]
+    conditions["vibrational_mode_indices"] = [mode.index for mode in vibrational_modes]
+    conditions["negative_mode_indices"] = [mode.index for mode in negative]
+    if negative:
+        values = ", ".join(f"{mode.value:g} cm^-1" for mode in negative[:6])
+        suffix = " …" if len(negative) > 6 else ""
+        return ScientificCheckResult(
+            status="not_met",
+            input_geometry_sha256=geometry_sha256,
+            conditions=conditions,
+            reason=f"negative frequencies were observed: {values}{suffix}",
+        )
+    return ScientificCheckResult(
+        status="passed",
+        input_geometry_sha256=geometry_sha256,
+        conditions=conditions,
+        reason=(
+            "all classified vibrational modes are nonnegative for the verified optimized "
+            "input geometry; "
+            "this does not establish a global minimum"
+        ),
+    )
+
+
+def _electronic_energy_value(
+    operation: str, observed: EnergyObservation | None
+) -> dict[str, dict[str, Any]]:
+    """Expose energy only under the operation's declared, scientifically precise field."""
+
+    key = {
+        "Opt": "opt_final_electronic_energy",
+        "SP": "sp_electronic_energy",
+    }.get(operation)
+    if key is None or observed is None or observed.value is None:
+        return {}
+    return {
+        key: {
+            "value": observed.value,
+            "unit": "Eh",
+            "token": observed.token,
+            "source_line": observed.line,
+        }
+    }
+
+
+def _external_mode_count(geometry: ParsedGeometry) -> int | None:
+    """Classify ORCA's leading rigid-body modes from molecular geometry."""
+
+    if geometry.atom_count <= 0:
+        return None
+    if geometry.atom_count == 1:
+        return 3
+    if geometry.atom_count == 2:
+        return 5
+
+    origin = geometry.coordinates[0]
+    vectors = [
+        tuple(coordinate[axis] - origin[axis] for axis in range(3))
+        for coordinate in geometry.coordinates[1:]
+    ]
+    reference = max(vectors, key=lambda vector: sum(value * value for value in vector))
+    reference_norm = math.sqrt(sum(value * value for value in reference))
+    if reference_norm <= 1e-8:
+        return None
+    max_cross_norm = 0.0
+    for vector in vectors:
+        cross = (
+            reference[1] * vector[2] - reference[2] * vector[1],
+            reference[2] * vector[0] - reference[0] * vector[2],
+            reference[0] * vector[1] - reference[1] * vector[0],
+        )
+        max_cross_norm = max(max_cross_norm, math.sqrt(sum(value * value for value in cross)))
+    return 5 if max_cross_norm <= 1e-6 * reference_norm**2 else 6
+
+
+def _is_current_optimized_geometry(
+    config: AppConfig,
+    run: Run,
+    artifact: Any,
+    parameters: OrcaParameters,
+) -> bool:
+    if (
+        artifact.role != "optimized_geometry"
+        or artifact.run_id != run.id
+        or not isinstance(artifact.step_id, str)
+        or artifact.attempt is None
+    ):
+        return False
+    source_step = next((item for item in run.plan.steps if item.id == artifact.step_id), None)
+    if source_step is None or source_step.tool != "optimize_geometry":
+        return False
+    for field in ("method_profile", "environment", "charge", "multiplicity"):
+        if source_step.parameters.get(field) != getattr(parameters, field, None):
+            return False
+    relative = run.current_results.get(source_step.id)
+    if not isinstance(relative, str):
+        return False
+    root = run_directory(config.data_root_path, run.id).resolve()
+    result_path = (root / relative).resolve()
+    if root not in result_path.parents or result_path.name != "result.json":
+        return False
+    try:
+        result = Result.model_validate(
+            json.loads(result_path.read_text(encoding="utf-8")), strict=True
+        )
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if (
+        result.run_id != run.id
+        or result.step_id != source_step.id
+        or result.status != "succeeded"
+        or result.attempt != artifact.attempt
+        or result.step_fingerprint != _step_fingerprint(source_step)
+        or result.output_ports.get("optimized_geometry") != artifact.id
+        or artifact.id not in result.artifact_ids
+    ):
+        return False
+    return any(
+        item.get("step_id") == source_step.id
+        and item.get("attempt") == result.attempt
+        and item.get("phase") == "finished"
+        and item.get("status") == "succeeded"
+        and artifact.id in item.get("artifact_ids", [])
+        for item in run.attempts
+    )
+
+
 def _lock_failure_facts(message: str) -> ProcessFacts:
     return ProcessFacts(
         status="failed",
@@ -849,10 +1184,12 @@ def _lock_failure_facts(message: str) -> ProcessFacts:
 
 
 __all__ = [
+    "FrequencyParameters",
     "OptimizeParameters",
     "OrcaParameters",
     "SinglePointParameters",
     "execute_orca_step",
+    "make_frequency_tool",
     "make_optimize_tool",
     "make_single_point_tool",
 ]

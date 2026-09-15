@@ -17,6 +17,9 @@ class CheckOutcome:
 
 
 def evaluate_success(facts: AttemptFacts, *, operation: str) -> CheckOutcome:
+    if operation not in {"SP", "Opt", "Freq"}:
+        raise ValueError(f"unsupported ORCA operation: {operation}")
+
     final_energy = facts.final_energy
     checks: dict[str, Any] = {
         "runner_succeeded": facts.runner_status == "succeeded",
@@ -24,15 +27,24 @@ def evaluate_success(facts: AttemptFacts, *, operation: str) -> CheckOutcome:
         "process_tree_empty": facts.process_tree_empty is True,
         "normal_termination": facts.normal_termination is True,
         "stdout_valid_utf8": facts.stdout_valid_utf8,
+        "stdout_within_size_limit": not facts.stdout_size_exceeded,
+        "stderr_within_size_limit": not facts.stderr_size_exceeded,
         "scf_converged": facts.scf_converged is True,
-        "final_energy_selected": final_energy is not None and facts.final_energy_error is None,
-        "finite_final_energy": (
-            final_energy is not None
-            and final_energy.value is not None
-            and math.isfinite(final_energy.value)
-        ),
         "input_hashes_match": facts.input_hashes_match,
     }
+    if operation != "Freq":
+        checks.update(
+            {
+                "final_energy_selected": (
+                    final_energy is not None and facts.final_energy_error is None
+                ),
+                "finite_final_energy": (
+                    final_energy is not None
+                    and final_energy.value is not None
+                    and math.isfinite(final_energy.value)
+                ),
+            }
+        )
     if operation == "Opt":
         checks.update(
             {
@@ -40,6 +52,25 @@ def evaluate_success(facts: AttemptFacts, *, operation: str) -> CheckOutcome:
                 "output_geometry_present": facts.output_geometry is not None,
                 "stdout_geometry_present": facts.stdout_geometry is not None,
                 "geometry_consistent": facts.geometry_consistent is True,
+            }
+        )
+    elif operation == "Freq":
+        frequency_section = facts.frequency_section
+        modes = () if frequency_section is None else frequency_section.modes
+        expected_indices = list(range(facts.hessian_dimension or 0))
+        checks.update(
+            {
+                "frequency_section_complete": (
+                    frequency_section is not None and frequency_section.complete
+                ),
+                "frequency_values_finite": bool(modes)
+                and all(math.isfinite(mode.value) for mode in modes),
+                "frequency_mode_indices_match_hessian": (
+                    facts.hessian_dimension is not None
+                    and [mode.index for mode in modes] == expected_indices
+                ),
+                "hessian_present": facts.hessian_present,
+                "hessian_valid": facts.hessian_valid is True,
             }
         )
     required = list(checks.values())
@@ -55,7 +86,18 @@ def _failure_category(facts: AttemptFacts, operation: str, checks: dict[str, Any
         return "input_integrity_error"
     if not checks["process_tree_empty"]:
         return "cleanup_unconfirmed"
-    if facts.final_energy_error is not None or not checks["stdout_valid_utf8"]:
+    if not checks["stdout_within_size_limit"] or not checks["stderr_within_size_limit"]:
+        return "resource_limit"
+    if not checks["stdout_valid_utf8"] or (
+        operation != "Freq" and facts.final_energy_error is not None
+    ):
+        return "invalid_output"
+    if operation == "Freq" and (
+        not checks["frequency_section_complete"]
+        or not checks["hessian_present"]
+        or not checks["hessian_valid"]
+        or not checks["frequency_mode_indices_match_hessian"]
+    ):
         return "invalid_output"
     if not checks["scf_converged"]:
         return "scf_not_converged"

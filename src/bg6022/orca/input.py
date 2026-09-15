@@ -22,7 +22,7 @@ class OrcaInputSpec:
 
 def render_input(spec: OrcaInputSpec) -> bytes:
     profile = get_profile(spec.method_profile)
-    if spec.operation not in {"SP", "Opt"}:
+    if spec.operation not in profile.supported_operations:
         raise ValueError(f"unsupported ORCA operation: {spec.operation}")
     if spec.environment not in profile.supported_environments:
         raise ValueError(
@@ -42,7 +42,7 @@ def render_input(spec: OrcaInputSpec) -> bytes:
         raise ValueError("multiplicity, cores, and maxcore_mb must be positive")
     _validate_iteration("scf_maxiter", spec.scf_maxiter)
     _validate_iteration("geom_maxiter", spec.geom_maxiter)
-    if spec.operation == "SP" and spec.geom_maxiter is not None:
+    if spec.operation != "Opt" and spec.geom_maxiter is not None:
         raise ValueError("geom_maxiter is only valid for optimize_geometry")
     lines = [
         f"! {profile.orca_keyword} TightSCF {spec.operation}",

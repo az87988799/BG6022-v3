@@ -15,6 +15,7 @@ class MethodProfile:
     orca_keyword: str
     supported_environments: frozenset[str]
     supported_elements: frozenset[str]
+    supported_operations: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ R2SCAN3C = MethodProfile(
     orca_keyword="r2SCAN-3c",
     supported_environments=frozenset({"gas"}),
     supported_elements=SUPPORTED_ELEMENTS,
+    supported_operations=frozenset({"SP", "Opt", "Freq"}),
 )
 
 PROFILES = {R2SCAN3C.name: R2SCAN3C}

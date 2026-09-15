@@ -48,10 +48,15 @@ def render_confirmation(preview: Mapping[str, Any]) -> str:
         task_phrase = f"进行{task}"
     if atom_count is not None:
         system = f"{system}（{_format_scalar(atom_count)} 个原子）"
-    lines = [f"准备对{system}{task_phrase}，采用 {method}。"]
-    target_line = _result_target_sentence(preview.get("result_targets"), request)
-    if target_line:
-        lines.append(target_line)
+    plan_steps = preview.get("plan_steps")
+    if isinstance(plan_steps, Sequence) and not isinstance(plan_steps, (str, bytes)) and plan_steps:
+        lines = [f"准备对{system}执行以下完整计算计划："]
+        lines.extend(_confirmation_step_line(step) for step in plan_steps)
+    else:
+        lines = [f"准备对{system}{task_phrase}，采用 {method}。"]
+        target_line = _result_target_sentence(preview.get("result_targets"), request)
+        if target_line:
+            lines.append(target_line)
 
     charge = parameters.get("charge")
     multiplicity = parameters.get("multiplicity")
@@ -417,6 +422,24 @@ def facts_from_result(
                 structure=structure,
             )
         )
+    for name, check in result.scientific_checks.items():
+        values.append(
+            _fact(
+                run=run,
+                result=result,
+                step=step,
+                name=name,
+                kind="check",
+                value={"status": check.status, "reason": check.reason},
+                expected_type="scientific_check",
+                result_property=None,
+                metadata={
+                    "label": name.replace("_", " "),
+                    "description": "程序根据已验证计算文件得出的科学目标检查",
+                },
+                structure=structure,
+            )
+        )
     return values
 
 
@@ -515,7 +538,7 @@ def _result_target_sentence(value: Any, request: Mapping[str, Any]) -> str:
         if isinstance(raw_targets, Sequence) and not isinstance(raw_targets, (str, bytes)):
             for target in raw_targets:
                 item = _mapping(target)
-                name = item.get("field") or item.get("port")
+                name = item.get("check") or item.get("field") or item.get("port")
                 if name:
                     label = str(name).replace("_", " ")
                     if label not in labels:
@@ -523,11 +546,118 @@ def _result_target_sentence(value: Any, request: Mapping[str, Any]) -> str:
     return f"结果目标：{'、'.join(labels)}。" if labels else ""
 
 
+def _confirmation_step_line(value: Any) -> str:
+    item = _mapping(value)
+    index = item.get("index")
+    ordinal = _format_scalar(index) if type(index) is int else "?"
+    tool = str(item.get("tool") or "未知工具")
+    tool_labels = {
+        "resolve_molecule": "解析分子",
+        "generate_geometry": "生成初始结构",
+        "optimize_geometry": "几何优化",
+        "frequency": "频率计算",
+        "single_point": "独立单点计算",
+    }
+    operation_names = {
+        "SP": "单点计算",
+        "Opt": "几何优化",
+        "Freq": "频率计算",
+    }
+    operations = item.get("operations")
+    operation_labels = (
+        [
+            operation_names.get(str(operation), str(operation))
+            for operation in operations
+            if isinstance(operations, list)
+        ]
+        if isinstance(operations, list)
+        else []
+    )
+    label = tool_labels.get(tool, tool)
+    if operation_labels and not all(operation == label for operation in operation_labels):
+        label = f"{label}（{'、'.join(operation_labels)}）"
+
+    parameters = _mapping(item.get("parameters"))
+    details: list[str] = []
+    if parameters.get("query"):
+        details.append(f"分子查询“{parameters['query']}”")
+    method_profile = parameters.get("method_profile")
+    if method_profile is not None:
+        details.append(f"方法 {_method_label(method_profile)}")
+    environment = parameters.get("environment")
+    if environment is not None:
+        details.append(_environment_label(environment))
+    if parameters.get("charge") is not None:
+        details.append(f"电荷 {_format_scalar(parameters['charge'])}")
+    if parameters.get("multiplicity") is not None:
+        details.append(f"多重度 {_format_scalar(parameters['multiplicity'])}")
+    for name, label_text in (("geom_maxiter", "几何迭代上限"), ("scf_maxiter", "SCF 迭代上限")):
+        if parameters.get(name) is not None:
+            details.append(f"{label_text} {_format_scalar(parameters[name])}")
+
+    inputs = item.get("inputs")
+    if isinstance(inputs, list):
+        for raw_input in inputs:
+            bound = _mapping(raw_input)
+            name = str(bound.get("name") or "输入")
+            if bound.get("source_step"):
+                details.append(f"{name}来自{bound['source_step']}.{bound.get('port') or '输出'}")
+            elif bound.get("history_geometry") is True:
+                details.append(f"{name}使用已验证的历史优化结构")
+            elif bound.get("artifact_role"):
+                details.append(f"{name}使用{_artifact_role_label(str(bound['artifact_role']))}")
+
+    checks = item.get("goal_checks")
+    if isinstance(checks, list):
+        for raw_check in checks:
+            check = _mapping(raw_check)
+            check_name = _check_label(str(check.get("check") or "科学检查"))
+            status = str(check.get("required_status") or "passed")
+            details.append(
+                f"须先满足{check.get('source_step', '前置步骤')}的{check_name}（{status}）"
+            )
+
+    targets = item.get("requested_results")
+    if isinstance(targets, list) and targets:
+        names = [
+            str(_mapping(target).get("label") or _mapping(target).get("name") or "结果")
+            for target in targets
+        ]
+        details.append(f"目标：{'、'.join(names)}")
+    suffix = f"；{'；'.join(details)}" if details else ""
+    return f"{ordinal}. {label}{suffix}。"
+
+
+def _artifact_role_label(value: str) -> str:
+    return {
+        "initial_geometry": "初始结构",
+        "input_geometry": "提供的结构",
+        "optimized_geometry": "已优化结构",
+        "restart_candidate": "受限修复候选结构",
+    }.get(value, value.replace("_", " "))
+
+
+def _check_label(value: str) -> str:
+    return {
+        "frequency_complete": "频率完整性检查",
+        "local_minimum_supported": "局部极小值检查",
+    }.get(value, value.replace("_", " "))
+
+
 def _fact_sentence(fact: Mapping[str, Any]) -> str:
     metadata = _mapping(fact.get("metadata"))
     label = str(metadata.get("label") or fact.get("name") or "结果")
     if fact.get("kind") == "port":
         return f"{label}已生成并通过校验，可作为后续计算的结构输入。"
+    if fact.get("kind") == "check":
+        value = _mapping(fact.get("value"))
+        status = value.get("status")
+        status_label = {"passed": "通过", "not_met": "未满足", "unverified": "未能验证"}.get(
+            str(status), "未知"
+        )
+        reason = _string_or_none(value.get("reason"))
+        suffix = f"；{reason}" if reason else ""
+        return f"{label}{status_label}{suffix}。"
     value, unit = _display_value(fact.get("value"), fact.get("expected_type"))
     return f"{label}为 **{value}{unit}**。"
 
@@ -562,6 +692,25 @@ def _budget_stop_reason(pending_data: Mapping[str, Any]) -> str | None:
 
 
 def _display_value(value: Any, expected_type: str | None) -> tuple[str, str]:
+    if expected_type == "frequency" and isinstance(value, Mapping):
+        modes = value.get("modes")
+        if not isinstance(modes, list):
+            return "不可用", ""
+        rendered: list[str] = []
+        for mode in modes:
+            item = _mapping(mode)
+            index, number = item.get("index"), item.get("value")
+            if type(index) is not int or type(number) not in {int, float}:
+                continue
+            if not math.isfinite(float(number)):
+                continue
+            rendered.append(f"{index}: {_format_scalar(number)}")
+        text = ", ".join(rendered)
+        if value.get("scaling_factor") is not None:
+            factor = _format_scalar(value.get("scaling_factor"))
+            applied = "已应用" if value.get("scaling_applied") else "未应用"
+            text += f"；缩放因子 {factor}（{applied}）"
+        return text or "不可用", " cm⁻¹"
     if isinstance(value, Mapping) and "value" in value:
         token = value.get("token")
         raw = token if isinstance(token, str) and token.strip() else value.get("value")

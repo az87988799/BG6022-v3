@@ -161,6 +161,56 @@ def test_unconfirmed_residual_cleanup_stays_interrupted_and_guard_is_retained(
     assert execution_guard_path(data_root).exists()
 
 
+def test_cancel_request_stops_process_tree_and_clears_execution_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "orca.exe"
+    executable.write_bytes(b"test executable placeholder")
+    attempt_dir = tmp_path / "attempt"
+    attempt_dir.mkdir()
+    (attempt_dir / "input.inp").write_text("! offline cancellation test\n", encoding="utf-8")
+    (attempt_dir / "geometry.xyz").write_text("1\nH\nH 0 0 0\n", encoding="utf-8")
+    data_root = tmp_path / "data"
+    execution_id = "execution_cancelled"
+    write_execution_guard(data_root, {"execution_id": execution_id, "phase": "started"})
+    harness = _ProbeHarness(
+        monkeypatch,
+        returncode=None,
+        output=b"",
+        job_mode="residual",
+    )
+
+    class CancelAfterSpawn:
+        calls = 0
+
+        def is_set(self) -> bool:
+            self.calls += 1
+            return self.calls >= 2
+
+    facts = runner.run_orca(
+        executable=executable,
+        attempt_dir=attempt_dir,
+        resources=runner.RunnerResources(
+            cores=4,
+            memory_mb=1024,
+            output_limit_bytes=1024 * 1024,
+            workdir_limit_bytes=1024 * 1024,
+        ),
+        cancel=CancelAfterSpawn(),
+        deadline=runner.time.monotonic() + 10,
+        data_root=data_root,
+        execution_id=execution_id,
+    )
+
+    assert facts.status == "cancelled"
+    assert facts.stop_reason == "cancel_requested"
+    assert facts.stop_request_sent is True
+    assert facts.process_tree_empty is True
+    assert facts.stop_confirmed is True
+    assert harness.job.terminate_calls == 1
+    assert not execution_guard_path(data_root).exists()
+
+
 class _ProbeHarness:
     def __init__(
         self,

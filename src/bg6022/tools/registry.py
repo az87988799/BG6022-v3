@@ -9,7 +9,7 @@ from typing import Any
 from bg6022.config import AppConfig
 from bg6022.models import Plan, ResultTarget, Tool
 from bg6022.tools.molecule import make_generate_geometry_tool
-from bg6022.tools.orca import make_optimize_tool, make_single_point_tool
+from bg6022.tools.orca import make_frequency_tool, make_optimize_tool, make_single_point_tool
 from bg6022.tools.pubchem import make_resolve_molecule_tool
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
@@ -92,6 +92,35 @@ class ToolRegistry:
                             f"{reference.step_id}.{reference.port}"
                         )
                     dependencies[step.id].add(reference.step_id)
+            for requirement in step.goal_checks:
+                if requirement.source_step_id == step.id:
+                    raise ValueError(f"step {step.id} cannot require its own scientific check")
+                source = step_by_id.get(requirement.source_step_id)
+                if source is None:
+                    raise ValueError(
+                        f"step {step.id} goal check references unknown step "
+                        f"{requirement.source_step_id}"
+                    )
+                source_tool = self.get(source.tool)
+                if requirement.check not in source_tool.scientific_checks:
+                    raise ValueError(
+                        f"step {step.id} references undeclared scientific check "
+                        f"{requirement.source_step_id}.{requirement.check}"
+                    )
+                if requirement.check == "local_minimum_supported":
+                    source_geometry = source.inputs.get("geometry")
+                    dependent_geometry = step.inputs.get("geometry")
+                    if (
+                        source_tool.name != "frequency"
+                        or source_geometry is None
+                        or dependent_geometry is None
+                        or source_geometry != dependent_geometry
+                    ):
+                        raise ValueError(
+                            f"step {step.id} must use the same geometry checked by "
+                            f"{source.id}.local_minimum_supported"
+                        )
+                dependencies[step.id].add(requirement.source_step_id)
 
         ordered = _topological_order(plan.steps, dependencies)
         plan = _normalize_legacy_targets(plan, ordered, self)
@@ -108,6 +137,7 @@ def build_registry(config: AppConfig | None = None) -> ToolRegistry:
             make_generate_geometry_tool(config),
             make_single_point_tool(config),
             make_optimize_tool(config),
+            make_frequency_tool(config),
         ]
     )
 
@@ -148,9 +178,13 @@ def _validate_requested_results(
                 producers.setdefault(("field", field), []).append(step.id)
         for port in tool.output_ports:
             producers.setdefault(("port", port), []).append(step.id)
+        for check in tool.scientific_checks:
+            producers.setdefault(("check", check), []).append(step.id)
     for target in targets:
-        kind = "port" if target.port is not None else "field"
-        name = target.port or target.field
+        kind = (
+            "check" if target.check is not None else "port" if target.port is not None else "field"
+        )
+        name = target.check or target.port or target.field
         assert name is not None
         matches = producers.get((kind, name), [])
         if target.step_id is not None:
