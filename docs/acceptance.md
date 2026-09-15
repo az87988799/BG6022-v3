@@ -63,6 +63,12 @@ and run the live DeepSeek/PubChem/ORCA sequence described in
 [`docs/evidence/M1-agent-evidence.md`](evidence/M1-agent-evidence.md) before
 M1 is recorded as complete.
 
+The 2026-09-15 parameter/query repair follow-up was pushed as
+`09ccd60d9b9456a33fa55019dc93e3158458c80a`; its offline suite passed (104
+passed, 3 live tests deselected). The local DeepSeek credential is unavailable,
+so this follow-up adds no real Agent/ORCA acceptance evidence and does not
+change M1's pending status.
+
 ## Recorded real runs
 
 The local configuration used ORCA `E:\orca\orca.exe`, Program Version 6.1.1,

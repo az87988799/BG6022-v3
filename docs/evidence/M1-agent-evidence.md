@@ -65,3 +65,33 @@ The required acceptance sequence is:
 
 Until that sequence is reviewed and accepted by the user, M1 remains
 “implementation complete; live acceptance pending”.
+
+## 2026-09-15 parameter/query repair follow-up
+
+Implementation commit: `09ccd60d9b9456a33fa55019dc93e3158458c80a` (pushed to
+`codex/v3-m1-agent`). The q/M intake now keeps per-turn `absent`, `set`,
+`ambiguous`, and `invalid` states, checks model candidate quotes against the
+current user text and complete value token, and sends invalid/ambiguous claims
+to clarification without changing a pending Request. Regression cases include
+`charge 0`, triplet selection, `charge 0 -> +1`, rejecting `1.5`, `1e2`,
+booleans and non-positive multiplicity, discarding model-only q/M, preserving
+the omitted field, and stopping a conflicting update against a waiting Run.
+
+Saved-result queries now bind a program-generated `subject_ref` to a
+machine-readable property. Tool property mappings are validated against
+declared result fields/ports. Coverage uses `(subject_ref, property)` only;
+presentation labels and descriptions are not used to classify a scientific
+fact. Regression cases cover “这个结构的能量是多少？”, energy plus geometry,
+missing zero-point energy, cross-task non-substitution, unsupported-property
+evidence, and a structure mentioned only as the query subject.
+
+Offline validation against this commit: `104 passed, 3 deselected` with live
+ORCA/LLM/PubChem tests excluded; Ruff check and format check passed,
+`compileall` passed, and `uv build` succeeded. The resource baseline was not
+changed: 4 cores, 1024 MB total, `%maxcore 192`, concurrency 1.
+
+Environment check on 2026-09-15: the effective local config names
+`DEEPSEEK_API_KEY`, and that environment variable is unset. An ORCA executable
+path is configured, but no LLM, PubChem, or ORCA acceptance sequence was
+attempted for this follow-up. No L1/L2 live evidence is added here; M1 remains
+pending user review and acceptance.
