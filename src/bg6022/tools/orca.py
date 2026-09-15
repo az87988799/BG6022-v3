@@ -556,6 +556,8 @@ def _check_execution_contract(config: AppConfig, run: Run, step: Step) -> None:
 def _reconstruct_repair_plan(config: AppConfig, run: Run, accepted_plan: Plan) -> Plan:
     """Derive the current Plan from recorded repair facts, not trusted hashes."""
 
+    from bg6022.tools.registry import build_registry
+
     snapshot = run.accepted_snapshot
     try:
         start = int(snapshot.get("repair_record_start", 0))
@@ -564,6 +566,7 @@ def _reconstruct_repair_plan(config: AppConfig, run: Run, accepted_plan: Plan) -
     if start < 0 or start > len(run.repair_records):
         raise ValueError("accepted repair record start is outside the Run history")
     plan = accepted_plan
+    registry = build_registry(config)
     for record in run.repair_records[start:]:
         if record.get("validated") is not True:
             raise ValueError("repair chain contains an unvalidated record")
@@ -643,9 +646,16 @@ def _reconstruct_repair_plan(config: AppConfig, run: Run, accepted_plan: Plan) -
         plan = Plan.model_validate(
             {
                 **plan.model_dump(mode="python"),
-                "revision": plan.revision + 1,
                 "steps": [replacement if item.id == step.id else item for item in plan.steps],
             },
+            strict=True,
+        )
+        # The repair removes the failed Step's dependency on its previous
+        # geometry producer. Reproduce the Agent's canonical topological order
+        # before checking the recorded derived-Plan fingerprint.
+        plan = registry.validate_plan(plan)
+        plan = Plan.model_validate(
+            {**plan.model_dump(mode="python"), "revision": plan.revision + 1},
             strict=True,
         )
         if record.get("derived_plan_sha256") != _plan_fingerprint(plan):

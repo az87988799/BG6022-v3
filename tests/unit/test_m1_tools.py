@@ -262,13 +262,28 @@ def test_restart_rule_requires_evidence_and_validated_candidate(tmp_path: Path) 
 def test_agent_repair_continues_same_run_after_failed_opt(tmp_path: Path, monkeypatch) -> None:
     config = _config(tmp_path)
     registry = build_registry(config)
-    xyz = tmp_path / "water.xyz"
-    xyz.write_bytes(b"3\nwater\nO 0 0 0\nH 0 1 0\nH 0 -1 0\n")
-    request = Request(id="request_opt", description="optimize", source="chat")
+    request = Request(
+        id="request_opt",
+        description="optimize water",
+        source="chat",
+        operation="Opt",
+        requested_results=[ResultTarget(field="energy")],
+        explicit_parameters={"charge": 0, "multiplicity": 1},
+    )
     plan = Plan(
         id="plan_opt",
         request_id=request.id,
         steps=[
+            Step(
+                id="molecule",
+                tool="resolve_molecule",
+                parameters={"query": "O", "input_kind": "smiles"},
+            ),
+            Step(
+                id="geometry",
+                tool="generate_geometry",
+                inputs={"molecule": InputReference(step_id="molecule", port="molecule")},
+            ),
             Step(
                 id="opt",
                 tool="optimize_geometry",
@@ -279,8 +294,8 @@ def test_agent_repair_continues_same_run_after_failed_opt(tmp_path: Path, monkey
                     "multiplicity": 1,
                     "geom_maxiter": 1,
                 },
-                inputs={"geometry": InputReference(artifact_id="__input_geometry__")},
-            )
+                inputs={"geometry": InputReference(step_id="geometry", port="geometry")},
+            ),
         ],
         requested_results=[
             ResultTarget(step_id="opt", field="opt_final_electronic_energy"),
@@ -367,11 +382,20 @@ def test_agent_repair_continues_same_run_after_failed_opt(tmp_path: Path, monkey
                 ],
             )
 
-    run, result = Agent(config, registry, llm=FakeRepairClient()).execute_plan(
-        request, plan, xyz_path=xyz, execute=True
-    )
+    agent = Agent(config, registry, llm=FakeRepairClient())
+    run = agent._create_chat_run(request, registry.validate_plan(plan))
+    run_id = run.id
+    preview = agent.advance(run)
+    assert preview is not None and preview.step_id == "geometry"
+    assert run.status == "waiting"
+    assert run.waiting_for == "confirmation"
+    response = agent.confirm(run)
+    assert response.run is not None and response.run.id == run_id
+    run, result = response.run, response.result
     assert calls == 2
     assert run.status == "succeeded"
+    assert run.id == run_id
+    assert result is not None
     assert result.status == "succeeded"
     assert run.extra_orca_executions == 1
     assert len(run.repair_records) == 1

@@ -168,13 +168,15 @@ def inspect_attempt(
     opt_failure = bool(
         re.search(
             r"OPTIMIZATION\s+(?:DID\s+NOT\s+CONVERGE|FAILED)|"
-            r"MAX(?:IMUM)?\s+NUMBER\s+OF\s+OPTIMIZATION\s+STEPS",
+            r"MAX(?:IMUM)?\s+NUMBER\s+OF\s+(?:GEOMETRY\s+)?OPTIMIZATION\s+"
+            r"(?:STEPS?|CYCLES?)",
             stdout_text,
             re.I,
         )
     )
     opt_limit_match = re.search(
-        r"MAX(?:IMUM)?\s+NUMBER\s+OF\s+(?:OPTIMIZATION\s+STEPS|GEOMETRY\s+OPTIMIZATION\s+STEPS)"
+        r"MAX(?:IMUM)?\s+NUMBER\s+OF\s+(?:GEOMETRY\s+)?OPTIMIZATION\s+"
+        r"(?:STEPS?|CYCLES?)"
         r"|(?:GEOM|OPTIMIZATION).*?(?:MAXITER|ITERATION\s+LIMIT).*?(?:REACHED|EXCEEDED|LIMIT)",
         stdout_text,
         re.I,

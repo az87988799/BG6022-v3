@@ -510,17 +510,18 @@ def _semantic_target(target: ResultTarget, request: Request) -> tuple[str, str |
     if target.port is not None:
         return "port", target.port
     name = target.field
-    if name == "geometry" and request.operation == "Opt":
+    if name in {"geometry", "molecular_geometry"} and request.operation == "Opt":
         return "port", "optimized_geometry"
     aliases = {
         "optimized_geometry": ("port", "optimized_geometry"),
         "geometry": ("port", "geometry"),
+        "molecular_geometry": ("port", "geometry"),
         "sp_energy": ("field", "sp_electronic_energy"),
         "opt_energy": ("field", "opt_final_electronic_energy"),
     }
     if name in aliases:
         return aliases[name]
-    if name == "energy":
+    if name in {"energy", "electronic_energy"}:
         if request.operation == "SP":
             return "field", "sp_electronic_energy"
         if request.operation == "Opt":

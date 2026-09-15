@@ -91,6 +91,40 @@ def test_failed_opt_keeps_a_consistent_restart_candidate_geometry() -> None:
     assert facts.geometry_consistent is True
 
 
+def test_orca_maximum_geometry_cycles_are_recognized_as_iteration_limit() -> None:
+    initial = parse_xyz_bytes(b"1\nhydrogen\nH 0 0 0\n")
+    stdout = (
+        b"Program Version 6.1.1\n"
+        b"Geometry optimization settings:\n"
+        b"Max. no of cycles        MaxIter  .... 1\n"
+        b"* GEOMETRY OPTIMIZATION CYCLE 1 *\n"
+        b"SCF CONVERGED AFTER 1 CYCLES\n"
+        b"FINAL SINGLE POINT ENERGY -1.000000000000\n"
+        b"The optimization has not yet converged - more geometry cycles are needed\n"
+        b"The optimization did not converge but reached the maximum number of\n"
+        b"optimization cycles.\n"
+        b"****ORCA TERMINATED NORMALLY****\n"
+        b"TOTAL RUN TIME: 0 days 0 hours 0 minutes 1 seconds 0 msec\n"
+    )
+
+    facts = inspect_attempt(
+        operation="Opt",
+        stdout=stdout,
+        stderr=b"",
+        exit_code=0,
+        runner_status="succeeded",
+        stop_reason="normal_exit",
+        input_geometry=initial,
+        process_tree_empty=True,
+        input_hashes_match=True,
+    )
+
+    assert facts.error_category == "opt_not_converged"
+    assert facts.opt_iteration_limit_reached is True
+    assert facts.last_opt_cycle == 1
+    assert facts.effective_geom_maxiter == 1
+
+
 @pytest.mark.parametrize("token", ["NaN", "Inf", "-76.1garbage", "-76.1E+", "1e999"])
 def test_bad_last_energy_never_falls_back_to_an_older_cycle(token: str) -> None:
     initial = parse_xyz_bytes(b"1\nhydrogen\nH 0 0 0\n")

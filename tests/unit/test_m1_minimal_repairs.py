@@ -387,6 +387,86 @@ def test_request_target_and_operation_cannot_be_dropped() -> None:
         validate_request_plan(request, preparation_only, registry)
 
 
+@pytest.mark.parametrize(
+    ("operation", "tool", "result_field"),
+    [
+        ("SP", "single_point", "sp_electronic_energy"),
+        ("Opt", "optimize_geometry", "opt_final_electronic_energy"),
+    ],
+)
+def test_electronic_energy_target_matches_operation_result(
+    operation: str, tool: str, result_field: str
+) -> None:
+    registry = build_registry()
+    request = Request(
+        id=f"request_{operation.casefold()}",
+        description=f"{operation} electronic energy",
+        operation=operation,
+        requested_results=[ResultTarget(field="electronic_energy")],
+    )
+    science_step = Step(
+        id="science",
+        tool=tool,
+        parameters={"method_profile": "r2scan3c", "environment": "gas"},
+        inputs={"geometry": InputReference(step_id="geometry", port="geometry")},
+    )
+    plan = Plan(
+        id=f"plan_{operation.casefold()}",
+        request_id=request.id,
+        steps=[
+            Step(
+                id="molecule",
+                tool="resolve_molecule",
+                parameters={"query": "O", "input_kind": "smiles"},
+            ),
+            Step(
+                id="geometry",
+                tool="generate_geometry",
+                inputs={"molecule": InputReference(step_id="molecule", port="molecule")},
+            ),
+            science_step,
+        ],
+        requested_results=[ResultTarget(step_id="science", field=result_field)],
+    )
+
+    validate_request_plan(request, plan, registry)
+
+
+def test_molecular_geometry_target_matches_opt_result_port() -> None:
+    registry = build_registry()
+    request = Request(
+        id="request_opt_geometry_alias",
+        description="Opt molecular geometry",
+        operation="Opt",
+        requested_results=[ResultTarget(field="molecular_geometry")],
+    )
+    plan = Plan(
+        id="plan_opt_geometry_alias",
+        request_id=request.id,
+        steps=[
+            Step(
+                id="molecule",
+                tool="resolve_molecule",
+                parameters={"query": "O", "input_kind": "smiles"},
+            ),
+            Step(
+                id="geometry",
+                tool="generate_geometry",
+                inputs={"molecule": InputReference(step_id="molecule", port="molecule")},
+            ),
+            Step(
+                id="opt",
+                tool="optimize_geometry",
+                parameters={"method_profile": "r2scan3c", "environment": "gas"},
+                inputs={"geometry": InputReference(step_id="geometry", port="geometry")},
+            ),
+        ],
+        requested_results=[ResultTarget(step_id="opt", port="optimized_geometry")],
+    )
+
+    validate_request_plan(request, plan, registry)
+
+
 def test_opt_geometry_target_means_optimized_geometry_not_initial_geometry(
     tmp_path: Path,
 ) -> None:
