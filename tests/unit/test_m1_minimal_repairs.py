@@ -11,10 +11,12 @@ from bg6022.models import InputReference, Plan, Request, Result, ResultTarget, R
 from bg6022.orca.parser import inspect_attempt
 from bg6022.orca.profiles import resolve_parameters
 from bg6022.planner import (
+    ElectronicStateCandidate,
     PlanProposal,
     PlanStepProposal,
     PlanTargetProposal,
     filter_user_explicit_parameters,
+    normalize_user_explicit_parameters,
     proposal_to_plan,
     validate_request_plan,
 )
@@ -152,6 +154,85 @@ def test_negated_or_conflicting_spin_words_do_not_become_parameters() -> None:
     assert filter_user_explicit_parameters("这个分子不是中性的", {"charge": 0}) == {}
     assert filter_user_explicit_parameters("不是三重态", {"multiplicity": 3}) == {}
     assert filter_user_explicit_parameters("单重态还是三重态？", {"multiplicity": 1}) == {}
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("明确设电荷为0", {"charge": 0}),
+        ("明确使用三重态", {"multiplicity": 3}),
+        ("把电荷从0改为+1", {"charge": 1}),
+        ("不要用单重态，使用三重态", {"multiplicity": 3}),
+    ],
+)
+def test_parameter_normalization_preserves_the_current_affirmative_value(
+    message: str, expected: dict[str, int]
+) -> None:
+    result = normalize_user_explicit_parameters(
+        message,
+        {"charge": -1, "multiplicity": 1},
+        [
+            ElectronicStateCandidate(field="charge", raw_value="+1", evidence=message),
+        ]
+        if "电荷从0改为+1" in message
+        else [],
+    )
+
+    assert result.explicit_parameters == expected
+    for field, value in expected.items():
+        assert result.states[field].status == "set"
+        assert result.states[field].value == value
+
+
+@pytest.mark.parametrize(
+    ("message", "field"),
+    [
+        ("多重度设为1.5", "multiplicity"),
+        ("电荷设为1e2", "charge"),
+        ("多重度设为true", "multiplicity"),
+        ("多重度设为0", "multiplicity"),
+    ],
+)
+def test_invalid_electronic_state_is_not_coerced_or_dropped_as_absent(
+    message: str, field: str
+) -> None:
+    result = normalize_user_explicit_parameters(message, {field: 1})
+
+    assert result.states[field].status == "invalid"
+    assert field not in result.explicit_parameters
+    assert field in result.clarification_fields
+
+
+def test_model_qm_candidates_need_exact_user_evidence_and_omitted_fields_stay_absent() -> None:
+    result = normalize_user_explicit_parameters(
+        "优化水",
+        {"charge": 0, "multiplicity": 1, "method_profile": "r2scan3c"},
+        [ElectronicStateCandidate(field="charge", raw_value="0", evidence="优化水")],
+    )
+
+    assert result.explicit_parameters == {"method_profile": "r2scan3c"}
+    assert result.states["charge"].status == "absent"
+    assert result.states["multiplicity"].status == "absent"
+
+
+def test_one_field_parameter_update_does_not_erase_other_effective_values() -> None:
+    result = normalize_user_explicit_parameters(
+        "把电荷从0改为+1",
+        {"charge": 0, "multiplicity": 2},
+    )
+    current = {"charge": 0, "multiplicity": 2, "method_profile": "r2scan3c"}
+    updated = {**current, **result.explicit_parameters}
+
+    assert result.explicit_parameters == {"charge": 1}
+    assert updated == {"charge": 1, "multiplicity": 2, "method_profile": "r2scan3c"}
+
+
+def test_conflicting_parameter_statements_require_clarification() -> None:
+    result = normalize_user_explicit_parameters("多重度为1或3", {"multiplicity": 1})
+
+    assert result.states["multiplicity"].status == "ambiguous"
+    assert result.clarification_fields == ("multiplicity",)
+    assert "multiplicity" not in result.explicit_parameters
 
 
 def test_request_target_and_operation_cannot_be_dropped() -> None:

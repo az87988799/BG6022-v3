@@ -144,10 +144,10 @@ def test_result_and_repeat_confirmation_are_property_scoped_natural_language(
 
 def test_clarification_and_missing_property_do_not_dump_internal_data() -> None:
     clarification = render_clarification(
-        {"status": "clarify", "clarification": "请说明要查询哪个任务。", "refs": []}
+        {"status": "clarify", "clarification": "请说明要查询哪个任务。", "targets": []}
     )
     unavailable = render_clarification(
-        {"status": "unavailable", "missing_description": "零点能", "refs": []}
+        {"status": "unavailable", "missing_description": "零点能", "targets": []}
     )
     assert "哪个任务" in clarification
     assert "当前可查询范围内" in unavailable
@@ -155,8 +155,10 @@ def test_clarification_and_missing_property_do_not_dump_internal_data() -> None:
     assert "{" not in clarification + unavailable
 
 
-def test_multiple_requested_properties_can_be_covered_by_multiple_facts() -> None:
+def test_structured_property_targets_cover_multiple_facts_for_one_task() -> None:
     energy = {
+        "subject_ref": "t1",
+        "result_property": "electronic_energy",
         "name": "opt_final_electronic_energy",
         "kind": "field",
         "expected_type": "Eh",
@@ -167,6 +169,8 @@ def test_multiple_requested_properties_can_be_covered_by_multiple_facts() -> Non
         },
     }
     geometry = {
+        "subject_ref": "t1",
+        "result_property": "molecular_geometry",
         "name": "optimized_geometry",
         "kind": "port",
         "expected_type": "molecular_geometry",
@@ -174,13 +178,44 @@ def test_multiple_requested_properties_can_be_covered_by_multiple_facts() -> Non
         "metadata": {"label": "优化后的结构", "description": "已通过收敛检查"},
     }
 
-    selected, covered = select_facts_for_question("给我优化后的能量和结构", [energy, geometry])
+    targets = [
+        {"subject_ref": "t1", "property": "electronic_energy"},
+        {"subject_ref": "t1", "property": "molecular_geometry"},
+    ]
+    selected, covered = select_facts_for_question(targets, [energy, geometry])
     assert covered
     assert selected == [energy, geometry]
 
-    selected, covered = select_facts_for_question("给我优化后的能量和结构", [energy])
+    selected, covered = select_facts_for_question(targets, [energy])
     assert not covered
     assert selected == [energy]
+
+
+def test_structured_targets_cannot_be_covered_by_a_different_task() -> None:
+    expected = {
+        "subject_ref": "t1",
+        "result_property": "molecular_geometry",
+        "name": "optimized_geometry",
+        "kind": "port",
+        "expected_type": "molecular_geometry",
+        "value": {"artifact_id": "private-artifact-id"},
+    }
+    other_task_energy = {
+        "subject_ref": "t2",
+        "result_property": "electronic_energy",
+        "name": "opt_final_electronic_energy",
+        "kind": "field",
+        "expected_type": "Eh",
+        "value": {"value": -76.4, "unit": "Eh", "token": "-76.4"},
+    }
+
+    selected, covered = select_facts_for_question(
+        [{"subject_ref": "t1", "property": "electronic_energy"}],
+        [expected, other_task_energy],
+    )
+
+    assert not covered
+    assert selected == []
 
 
 def test_multi_task_result_context_identifies_each_request() -> None:

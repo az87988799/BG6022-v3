@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from bg6022.models import InputReference, Plan, Request, Step
+from bg6022.models import InputReference, Plan, Request, Step, Tool
 from bg6022.tools.registry import build_registry, describe_tools
 
 
@@ -14,6 +14,28 @@ def test_m1_tools_are_public() -> None:
         "single_point",
         "optimize_geometry",
     }
+
+
+def test_orca_result_properties_are_declared_as_machine_readable_contracts() -> None:
+    registry = build_registry()
+
+    assert registry.get("single_point").result_properties == {
+        "sp_electronic_energy": "electronic_energy"
+    }
+    assert registry.get("optimize_geometry").result_properties == {
+        "opt_final_electronic_energy": "electronic_energy",
+        "optimized_geometry": "molecular_geometry",
+    }
+
+
+def test_result_property_cannot_describe_an_undeclared_output() -> None:
+    with pytest.raises(ValueError, match="undeclared keys"):
+        Tool(
+            name="measurement",
+            description="Test measurement tool.",
+            results={"energy": "Eh"},
+            result_properties={"free_energy": "electronic_energy"},
+        )
 
 
 def test_input_reference_rejects_arbitrary_path_shape() -> None:

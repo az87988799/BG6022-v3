@@ -316,42 +316,51 @@ def context_answer(
     *,
     registry: ToolRegistry | None = None,
     facts: Sequence[Mapping[str, Any]] | None = None,
+    targets: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
-    """Compatibility helper for deterministic, property-scoped answers."""
+    """Render facts selected by structured property targets, never by prose labels."""
 
     if facts is not None:
         return render_selected_facts(facts)
     if run is None or result is None:
         return "当前可查询范围内没有找到所问结果。这不表示该计算从未进行过。"
+    if not targets:
+        return "请先明确所需的科学性质；我不会从结果展示文案猜测查询目标。"
     candidates = facts_from_result(run, result, registry)
-    selected, covered = select_facts_for_question(question, candidates)
+    selected, covered = select_facts_for_question(targets, candidates)
     if not covered:
         return "本次任务尚未得到所问性质；已保存的其他性质不能替代它。"
     return render_selected_facts(selected)
 
 
-def fact_matches_question(question: str, fact: Mapping[str, Any]) -> bool:
-    """Check a selected fact against broad property semantics, not a field name."""
+def fact_matches_question(target: Mapping[str, Any], fact: Mapping[str, Any]) -> bool:
+    """Match one structured (subject, property) target to one verified fact."""
 
-    return _question_matches_fact(question, fact)
+    return target.get("subject_ref") == fact.get("subject_ref") and target.get(
+        "property"
+    ) == fact.get("result_property")
 
 
 def select_facts_for_question(
-    question: str, facts: Sequence[Mapping[str, Any]]
+    targets: Sequence[Mapping[str, Any]], facts: Sequence[Mapping[str, Any]]
 ) -> tuple[list[Mapping[str, Any]], bool]:
-    """Select relevant facts and check coverage across the whole selected set."""
+    """Match each requested property only within its explicitly selected task."""
 
-    requested = _property_terms(question)
-    if not requested:
-        return list(facts), True
+    if not targets:
+        return [], False
     selected: list[Mapping[str, Any]] = []
-    covered: set[str] = set()
+    covered: set[tuple[Any, Any]] = set()
+    requested: set[tuple[Any, Any]] = set()
+    for target in targets:
+        identity = (target.get("subject_ref"), target.get("property"))
+        if not all(isinstance(value, str) and value for value in identity):
+            return [], False
+        requested.add(identity)
     for fact in facts:
-        terms = _fact_property_terms(fact)
-        matched = terms & requested
-        if matched:
+        identity = (fact.get("subject_ref"), fact.get("result_property"))
+        if identity in requested:
             selected.append(fact)
-            covered.update(matched)
+            covered.add(identity)
     return selected, requested <= covered
 
 
@@ -384,6 +393,7 @@ def facts_from_result(
                 kind="field",
                 value=value,
                 expected_type=(tool.results.get(name) if tool is not None else None),
+                result_property=(tool.result_properties.get(name) if tool is not None else None),
                 metadata=metadata,
                 structure=structure,
             )
@@ -402,6 +412,7 @@ def facts_from_result(
                 kind="port",
                 value={"artifact_id": artifact_id},
                 expected_type=(tool.output_ports.get(name) if tool is not None else None),
+                result_property=(tool.result_properties.get(name) if tool is not None else None),
                 metadata=metadata,
                 structure=structure,
             )
@@ -418,12 +429,15 @@ def _fact(
     kind: str,
     value: Any,
     expected_type: str | None,
+    result_property: str | None,
     metadata: Mapping[str, str],
     structure: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     params = _mapping(step.parameters) if step is not None else {}
+    task_key = f"{run.id}:{result.step_id}"
     return {
-        "task_key": f"{run.id}:{result.step_id}",
+        "task_key": task_key,
+        "subject_ref": task_key,
         "task_description": run.request.description,
         "task_created_at": run.created_at,
         "system": _system_label(structure, run.request.description)
@@ -439,6 +453,7 @@ def _fact(
         "kind": kind,
         "value": value,
         "expected_type": expected_type,
+        "result_property": result_property,
         "metadata": dict(metadata),
     }
 
@@ -567,62 +582,6 @@ def _render_failed_result(result: Result) -> str:
     category = diagnostics.get("category") or "unknown_failure"
     reason = diagnostics.get("reason") or "没有得到已验证的科学结果"
     return f"本次计算未成功完成（{category}）：{reason}。"
-
-
-def _question_matches_fact(question: str, fact: Mapping[str, Any]) -> bool:
-    requested = _property_terms(question)
-    return not requested or requested <= _fact_property_terms(fact)
-
-
-def _fact_property_terms(fact: Mapping[str, Any]) -> set[str]:
-    metadata = _mapping(fact.get("metadata"))
-    identity = " ".join(
-        str(value).casefold() for value in (fact.get("name"), metadata.get("label")) if value
-    )
-    description = str(metadata.get("description") or "").casefold()
-    terms = _property_terms(identity)
-    description_terms = _property_terms(description)
-    description_terms.discard("geometry")
-    terms.update(description_terms)
-    if fact.get("kind") == "port" and fact.get("expected_type") == "molecular_geometry":
-        terms.add("geometry")
-    else:
-        terms.discard("geometry")
-    if "zero_point" in terms and any(
-        phrase in f"{identity} {description}"
-        for phrase in (
-            "不含零点",
-            "不包含零点",
-            "does not include zero-point",
-            "not include zero-point",
-        )
-    ):
-        terms.discard("zero_point")
-    if "free_energy" in terms and any(
-        phrase in f"{identity} {description}"
-        for phrase in ("不含自由能", "不包含自由能", "not free energy", "without free energy")
-    ):
-        terms.discard("free_energy")
-    return terms
-
-
-def _property_terms(text: str) -> set[str]:
-    value = text.casefold()
-    terms: set[str] = set()
-    if any(token in value for token in ("能量", "电子能", "energy", "electronic")):
-        terms.add("energy")
-    if any(token in value for token in ("零点能", "零点", "zero-point", "zero point", "zpe")):
-        terms.add("zero_point")
-    if any(token in value for token in ("自由能", "free energy", "free_energy")):
-        terms.add("free_energy")
-    if any(token in value for token in ("频率", "振动频率", "frequency", "frequencies")):
-        terms.add("frequency")
-    geometry_text = value.replace("电子结构", "")
-    if any(token in geometry_text for token in ("几何", "结构", "geometry", "structure")):
-        terms.add("geometry")
-    if any(token in value for token in ("原子数", "atom count", "atom_count", "number of atoms")):
-        terms.add("atom_count")
-    return terms
 
 
 def _system_label(structure: Mapping[str, Any], description: Any) -> str:

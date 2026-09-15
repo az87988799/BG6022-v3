@@ -11,7 +11,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator
 
 from bg6022.config import AppConfig, validate_execution_environment
-from bg6022.models import InputReference, Plan, Result, Run, Step, Tool
+from bg6022.models import InputReference, Plan, Result, ResultProperty, Run, Step, Tool
 from bg6022.orca.checks import evaluate_success
 from bg6022.orca.input import OrcaInputSpec, render_input
 from bg6022.orca.parser import inspect_attempt
@@ -74,6 +74,7 @@ def make_single_point_tool(config: AppConfig | None = None) -> Tool:
         parameter_model=SinglePointParameters,
         output_ports={},
         results={"sp_electronic_energy": "Eh"},
+        result_properties={"sp_electronic_energy": "electronic_energy"},
         result_metadata={
             "sp_electronic_energy": {
                 "label": "单点电子能",
@@ -95,6 +96,10 @@ def make_optimize_tool(config: AppConfig | None = None) -> Tool:
         parameter_model=OptimizeParameters,
         output_ports={"optimized_geometry": "molecular_geometry"},
         results={"opt_final_electronic_energy": "Eh", "optimized_geometry": "molecular_geometry"},
+        result_properties={
+            "opt_final_electronic_energy": "electronic_energy",
+            "optimized_geometry": "molecular_geometry",
+        },
         result_metadata={
             "opt_final_electronic_energy": {
                 "label": "优化后的电子能",
@@ -119,6 +124,7 @@ def _make_tool(
     parameter_model: type[OrcaParameters],
     output_ports: dict[str, str],
     results: dict[str, str],
+    result_properties: dict[str, ResultProperty],
     result_metadata: dict[str, dict[str, str]],
 ) -> Tool:
     def execute(step: Step, run: Run, cancel: Event) -> Result:
@@ -142,6 +148,7 @@ def _make_tool(
         input_ports={"geometry": "molecular_geometry"},
         output_ports=output_ports,
         results=results,
+        result_properties=result_properties,
         result_metadata=result_metadata,
         success_conditions=[
             "normal ORCA termination",

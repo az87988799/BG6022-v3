@@ -5,6 +5,7 @@ from pathlib import Path
 
 from bg6022.agent import Agent
 from bg6022.config import load_config
+from bg6022.models import Plan, Request, Run, Step
 from bg6022.planner import (
     InputBindingProposal,
     IntakeOutput,
@@ -12,6 +13,7 @@ from bg6022.planner import (
     PlanStepProposal,
     PlanTargetProposal,
 )
+from bg6022.session import create_run, load_run, save_run, save_session, utc_now
 from bg6022.tools.registry import build_registry
 
 
@@ -134,3 +136,100 @@ def test_planner_receives_local_validation_feedback_for_one_bounded_revision(
     feedback = planner.plan_contexts[1]["validation_feedback"]
     assert isinstance(feedback, str)
     assert "unknown step key" in feedback
+
+
+def test_invalid_parameter_intake_does_not_create_a_run(tmp_path: Path) -> None:
+    class InvalidParameterIntake:
+        calls = 0
+
+        def complete_json(self, *_args, **_kwargs):
+            self.calls += 1
+            return {
+                "intent": "chemistry_compute",
+                "operation": "Opt",
+                "molecule_query": "water",
+                "molecule_input_kind": "name",
+                "explicit_parameters": {"multiplicity": 1.5},
+            }
+
+    config = _config(tmp_path)
+    client = InvalidParameterIntake()
+    agent = Agent(config, build_registry(config), llm=client)
+
+    response = agent.handle_message("优化水，多重度设为1.5")
+
+    assert "不是受支持的整数值" in response.text
+    assert response.run is None
+    assert agent._session["active_run_id"] is None
+    assert client.calls == 1
+
+
+def test_ambiguous_parameter_cannot_mutate_a_waiting_request(tmp_path: Path) -> None:
+    class AmbiguousParameterIntake:
+        def complete_json(self, *_args, **_kwargs):
+            return {
+                "intent": "chemistry_compute",
+                "operation": "Opt",
+                "explicit_parameters": {"multiplicity": 3},
+            }
+
+    config = _config(tmp_path)
+    session_id = "session_parameter_guard"
+    request = Request(
+        id="request_pending",
+        description="pending water Opt",
+        operation="Opt",
+        explicit_parameters={"charge": 0, "multiplicity": 1},
+    )
+    step = Step(
+        id="opt",
+        tool="optimize_geometry",
+        parameters={
+            "method_profile": "r2scan3c",
+            "environment": "gas",
+            "charge": 0,
+            "multiplicity": 1,
+        },
+    )
+    run = Run(
+        id="run_pending",
+        request=request,
+        plan=Plan(id="plan_pending", request_id=request.id, steps=[step]),
+        resources=config.resources,
+        status="waiting",
+        waiting_for="confirmation",
+        session_id=session_id,
+        pending_data={"step_id": step.id, "parameters": dict(step.parameters)},
+        created_at=utc_now(),
+        updated_at=utc_now(),
+    )
+    create_run(config.data_root_path, run)
+    save_run(config.data_root_path, run)
+    save_session(
+        config.data_root_path,
+        session_id,
+        {
+            "session_id": session_id,
+            "active_run_id": run.id,
+            "recent_messages": [],
+            "recent_results": [],
+            "pending_prompt": None,
+        },
+    )
+    agent = Agent(
+        config,
+        build_registry(config),
+        llm=AmbiguousParameterIntake(),
+        session_id=session_id,
+    )
+
+    response = agent.handle_message("多重度为1或3")
+    persisted = load_run(config.data_root_path, run.id)
+
+    assert "存在冲突" in response.text
+    assert response.run is not None and response.run.status == "waiting"
+    assert persisted.status == "waiting"
+    assert persisted.waiting_for == "confirmation"
+    assert persisted.request == request
+    assert persisted.plan == run.plan
+    assert persisted.attempt_counts == {}

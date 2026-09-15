@@ -32,6 +32,7 @@ def _result_tool() -> Tool:
         name="measure",
         description="Return a verified scalar measurement.",
         results={"energy": "Eh"},
+        result_properties={"energy": "electronic_energy"},
         result_metadata={
             "energy": {
                 "label": "测试电子能",
@@ -93,25 +94,45 @@ def _save_scalar_run(
 
 
 class SelectingClient:
-    def __init__(self, *, choose_description: str | None = None, ref: str | None = None):
+    def __init__(
+        self,
+        *,
+        choose_description: str | None = None,
+        ref: str | None = None,
+        target_property: str = "electronic_energy",
+        evidence: str = "能量",
+    ):
         self.choose_description = choose_description
         self.ref = ref
+        self.target_property = target_property
+        self.evidence = evidence
         self.catalog: list[dict[str, object]] = []
 
     def complete_json(self, messages, _schema, **_kwargs):
         payload = json.loads(messages[-1]["content"])
         self.catalog = payload["result_catalog"]
-        ref = self.ref
+        subject_ref = self.ref
         if self.choose_description is not None:
             item = next(
                 item
                 for item in self.catalog
                 if item["task"]["description"] == self.choose_description
             )
-            ref = item["ref"]
+            subject_ref = item["subject_ref"]
+        if subject_ref is None:
+            subject_ref = self.catalog[0]["subject_ref"]
         return {
             "intent": "context_query",
-            "query_selection": {"status": "selected", "refs": [ref or "r1"]},
+            "query_selection": {
+                "status": "selected",
+                "targets": [
+                    {
+                        "subject_ref": subject_ref,
+                        "property": self.target_property,
+                        "evidence": self.evidence,
+                    }
+                ],
+            },
         }
 
 
@@ -138,9 +159,9 @@ def test_query_reloads_the_saved_result_after_agent_recreation(tmp_path: Path) -
         },
     )
 
-    client = SelectingClient(ref="r1")
+    client = SelectingClient(ref="t1")
     agent = Agent(config, registry, llm=client, session_id="session_query")
-    response = agent.handle_message("最后的能量是多少？")
+    response = agent.handle_message("这个结构的能量是多少？")
 
     assert response.result is not None
     assert response.result.values["energy"]["token"] == "-76.418938720831"
@@ -155,15 +176,123 @@ def test_query_selection_cannot_use_a_reference_outside_this_round() -> None:
         def complete_json(self, *_args, **_kwargs):
             return {
                 "intent": "context_query",
-                "query_selection": {"status": "selected", "refs": ["r999"]},
+                "query_selection": {
+                    "status": "selected",
+                    "targets": [
+                        {
+                            "subject_ref": "t999",
+                            "property": "electronic_energy",
+                            "evidence": "energy",
+                        }
+                    ],
+                },
             }
 
     with pytest.raises(ValueError, match="outside this catalog"):
         intake_message(
             InvalidClient(),
             "what is the energy?",
-            result_catalog=[{"ref": "r1", "result": {"label": "energy"}}],
+            result_catalog=[{"subject_ref": "t1", "result": {"property": "electronic_energy"}}],
         )
+
+
+def test_query_property_must_match_the_user_cited_property_phrase() -> None:
+    class MismatchedPropertyClient:
+        def complete_json(self, *_args, **_kwargs):
+            return {
+                "intent": "context_query",
+                "query_selection": {
+                    "status": "selected",
+                    "targets": [
+                        {
+                            "subject_ref": "t1",
+                            "property": "electronic_energy",
+                            "evidence": "零点能",
+                        }
+                    ],
+                },
+            }
+
+    intake = intake_message(
+        MismatchedPropertyClient(),
+        "零点能是多少？",
+        result_catalog=[
+            {
+                "subject_ref": "t1",
+                "result": {"property": "electronic_energy"},
+            }
+        ],
+    )
+
+    assert intake.query_selection is not None
+    assert intake.query_selection.status == "clarify"
+    assert intake.query_selection.targets == []
+
+
+def test_structure_as_query_subject_is_not_a_geometry_output_request() -> None:
+    class ConfusedSubjectClient:
+        def complete_json(self, *_args, **_kwargs):
+            return {
+                "intent": "context_query",
+                "query_selection": {
+                    "status": "selected",
+                    "targets": [
+                        {
+                            "subject_ref": "t1",
+                            "property": "molecular_geometry",
+                            "evidence": "这个结构",
+                        }
+                    ],
+                },
+            }
+
+    intake = intake_message(
+        ConfusedSubjectClient(),
+        "这个结构的能量是多少？",
+        result_catalog=[
+            {
+                "subject_ref": "t1",
+                "result": {"property": "electronic_energy"},
+            }
+        ],
+    )
+
+    assert intake.query_selection is not None
+    assert intake.query_selection.status == "clarify"
+    assert intake.query_selection.targets == []
+
+
+def test_generic_energy_phrase_cannot_stand_in_for_free_energy() -> None:
+    class GenericEnergyClient:
+        def complete_json(self, *_args, **_kwargs):
+            return {
+                "intent": "context_query",
+                "query_selection": {
+                    "status": "selected",
+                    "targets": [
+                        {
+                            "subject_ref": "t1",
+                            "property": "electronic_energy",
+                            "evidence": "energy",
+                        }
+                    ],
+                },
+            }
+
+    intake = intake_message(
+        GenericEnergyClient(),
+        "What is the free energy?",
+        result_catalog=[
+            {
+                "subject_ref": "t1",
+                "result": {"property": "electronic_energy"},
+            }
+        ],
+    )
+
+    assert intake.query_selection is not None
+    assert intake.query_selection.status == "clarify"
+    assert intake.query_selection.targets == []
 
 
 def test_selected_electronic_energy_cannot_answer_a_missing_zero_point_property(
@@ -193,7 +322,7 @@ def test_selected_electronic_energy_cannot_answer_a_missing_zero_point_property(
     response = Agent(
         config,
         registry,
-        llm=SelectingClient(ref="r1"),
+        llm=SelectingClient(ref="t1", target_property="zero_point_energy", evidence="零点能"),
         session_id="session_property_scope",
     ).handle_message("零点能是多少？")
 

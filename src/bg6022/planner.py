@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import (
@@ -17,12 +18,32 @@ from pydantic import (
 )
 
 from bg6022.llm import LlmClient
-from bg6022.models import InputReference, Plan, Request, ResultTarget, Step
+from bg6022.models import InputReference, Plan, Request, ResultProperty, ResultTarget, Step
 from bg6022.tools.registry import ToolRegistry
 
 Intent = Literal["chemistry_compute", "chemistry_qa", "daily_qa", "context_query"]
 Operation = Literal["SP", "Opt"]
 QuerySelectionStatus = Literal["selected", "clarify", "unavailable"]
+ElectronicStateField = Literal["charge", "multiplicity"]
+ElectronicStateStatus = Literal["absent", "set", "ambiguous", "invalid"]
+
+
+class ElectronicStateCandidate(BaseModel):
+    """Untrusted model extraction accompanied by an exact quote from this turn."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    field: ElectronicStateField
+    raw_value: StrictStr
+    evidence: StrictStr
+
+
+class QueryTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    subject_ref: StrictStr
+    property: ResultProperty
+    evidence: StrictStr
 
 
 class QuerySelection(BaseModel):
@@ -36,26 +57,47 @@ class QuerySelection(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     status: QuerySelectionStatus
-    refs: list[StrictStr] = Field(default_factory=list)
+    targets: list[QueryTarget] = Field(default_factory=list)
     clarification: StrictStr | None = None
     missing_description: StrictStr | None = None
 
-    @field_validator("refs")
+    @field_validator("targets")
     @classmethod
-    def _bounded_refs(cls, value: list[str]) -> list[str]:
+    def _bounded_targets(cls, value: list[QueryTarget]) -> list[QueryTarget]:
         if len(value) > 3:
-            raise ValueError("query selection may contain at most three references")
-        if len(set(value)) != len(value):
-            raise ValueError("query selection references must be unique")
+            raise ValueError("query selection may contain at most three targets")
+        identities = [(item.subject_ref, item.property) for item in value]
+        if len(set(identities)) != len(identities):
+            raise ValueError("query targets must be unique per subject and property")
         return value
 
     @model_validator(mode="after")
     def _status_matches_refs(self) -> QuerySelection:
-        if self.status == "selected" and not self.refs:
-            raise ValueError("selected query result must contain at least one reference")
-        if self.status != "selected" and self.refs:
-            raise ValueError("clarify/unavailable query results cannot contain references")
+        if self.status == "selected" and not self.targets:
+            raise ValueError("selected query result must contain at least one target")
+        if self.status != "selected" and self.targets:
+            raise ValueError("clarify/unavailable query results cannot contain targets")
         return self
+
+
+@dataclass(frozen=True)
+class ElectronicStateInput:
+    status: ElectronicStateStatus
+    value: int | None = None
+    evidence: str | None = None
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
+class ParameterNormalization:
+    explicit_parameters: dict[str, Any]
+    states: dict[str, ElectronicStateInput]
+
+    @property
+    def clarification_fields(self) -> tuple[str, ...]:
+        return tuple(
+            name for name, state in self.states.items() if state.status in {"ambiguous", "invalid"}
+        )
 
 
 class IntakeOutput(BaseModel):
@@ -67,6 +109,7 @@ class IntakeOutput(BaseModel):
     molecule_query: StrictStr | None = None
     molecule_input_kind: Literal["name", "cas", "cid", "smiles"] | None = None
     explicit_parameters: dict[str, Any] = Field(default_factory=dict)
+    electronic_state_candidates: list[ElectronicStateCandidate] = Field(default_factory=list)
     structure_input: dict[str, Any] = Field(default_factory=dict)
     requested_results: list[str] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
@@ -74,7 +117,9 @@ class IntakeOutput(BaseModel):
 
     @model_validator(mode="after")
     def _intent_fields(self) -> IntakeOutput:
-        if self.intent == "context_query" and self.explicit_parameters:
+        if self.intent == "context_query" and (
+            self.explicit_parameters or self.electronic_state_candidates
+        ):
             raise ValueError("context_query cannot contain a parameter patch")
         if self.intent == "context_query" and self.query_selection is None:
             raise ValueError("context_query must contain query_selection")
@@ -166,9 +211,9 @@ def intake_message(
     prompt = load_prompt("intake")
     catalog = [dict(item) for item in (result_catalog or [])]
     candidate_refs = tuple(
-        str(item["ref"])
+        str(item["subject_ref"])
         for item in catalog
-        if isinstance(item, Mapping) and isinstance(item.get("ref"), str)
+        if isinstance(item, Mapping) and isinstance(item.get("subject_ref"), str)
     )
     schema = _intake_schema(candidate_refs)
     value = client.complete_json(
@@ -194,12 +239,13 @@ def intake_message(
             "molecule_input_kind": "name",
             "structure_input": {},
             "explicit_parameters": {},
+            "electronic_state_candidates": [],
             "requested_results": ["energy"],
             "missing_fields": [],
         },
         cancel=cancel,
     )
-    return _coerce_intake_output(value, schema, candidate_refs)
+    return _coerce_intake_output(value, schema, candidate_refs, message=message)
 
 
 def plan_message(
@@ -343,15 +389,29 @@ def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) 
     return plan
 
 
-def request_from_intake(message: str, intake: IntakeOutput, *, request_id: str) -> Request:
+def request_from_intake(
+    message: str,
+    intake: IntakeOutput,
+    *,
+    request_id: str,
+    normalized_parameters: ParameterNormalization | None = None,
+) -> Request:
     if any(key in intake.structure_input for key in {"path", "local_path", "file"}):
         raise ValueError("model intake cannot authorize a local file path")
+    normalized = normalized_parameters or normalize_user_explicit_parameters(
+        message, intake.explicit_parameters, intake.electronic_state_candidates
+    )
+    if normalized.clarification_fields:
+        raise ValueError(
+            "electronic-state parameters need clarification: "
+            + ", ".join(normalized.clarification_fields)
+        )
     return Request(
         id=request_id,
         description=message,
         original_text=message,
         requested_results=[ResultTarget(field=value) for value in intake.requested_results],
-        explicit_parameters=filter_user_explicit_parameters(message, intake.explicit_parameters),
+        explicit_parameters=dict(normalized.explicit_parameters),
         structure_input=dict(intake.structure_input),
         source="chat",
         operation=intake.operation,
@@ -360,23 +420,61 @@ def request_from_intake(message: str, intake: IntakeOutput, *, request_id: str) 
 
 
 def filter_user_explicit_parameters(message: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep q/M only when stated, parsing explicit values from the user text.
+    """Compatibility projection of the one authoritative parameter normalizer."""
 
-    Method and iteration options are ordinary planner hints and remain
-    available for later deterministic validation.  Charge and multiplicity
-    are different: a model's guessed values must never become scientific
-    evidence merely because they appeared in an intake JSON object. Explicit
-    text is parsed locally and takes precedence over a conflicting extraction.
+    return normalize_user_explicit_parameters(message, parameters).explicit_parameters
+
+
+def normalize_user_explicit_parameters(
+    message: str,
+    parameters: Mapping[str, Any],
+    candidates: list[ElectronicStateCandidate] | tuple[ElectronicStateCandidate, ...] = (),
+) -> ParameterNormalization:
+    """Normalize one intake turn, retaining absent/ambiguous/invalid q/M states.
+
+    Model values are suggestions only.  A q/M claim can enter the patch only
+    when the user's own message contains one unambiguous, syntactically valid
+    statement.  Candidate quotes are accepted as provenance only when they
+    are exact substrings and independently parse to the same field/value.
     """
 
-    filtered = dict(parameters)
+    patch = {
+        name: value for name, value in parameters.items() if name not in {"charge", "multiplicity"}
+    }
+    states: dict[str, ElectronicStateInput] = {}
     for name in ("charge", "multiplicity"):
-        stated_value = _explicit_electronic_state_value(message, name)
-        if stated_value is not None:
-            filtered[name] = stated_value
-        elif name in filtered and not _message_declares_parameter(message, name, filtered[name]):
-            filtered.pop(name)
-    return filtered
+        state = _parse_electronic_state(message, name)
+        verified_evidence = _verified_candidate_evidence(message, name, state, candidates)
+        if verified_evidence is not None and state.status == "set":
+            state = ElectronicStateInput(
+                status="set", value=state.value, evidence=verified_evidence
+            )
+        states[name] = state
+        if state.status == "set":
+            patch[name] = state.value
+    return ParameterNormalization(explicit_parameters=patch, states=states)
+
+
+def electronic_state_clarification(normalized: ParameterNormalization) -> str:
+    """Return a concise clarification for q/M statements that cannot be applied."""
+
+    labels = {"charge": "总电荷", "multiplicity": "自旋多重度"}
+    invalid = [
+        name
+        for name in normalized.clarification_fields
+        if normalized.states[name].status == "invalid"
+    ]
+    if invalid:
+        names = "、".join(labels[name] for name in invalid)
+        return (
+            f"本轮指定的{names}不是受支持的整数值；我没有改写成其他数值，"
+            "也没有更新或启动计算。请给出明确的整数。"
+        )
+    names = "、".join(labels[name] for name in normalized.clarification_fields)
+    return (
+        f"本轮关于{names}的表达存在冲突、否定或歧义；我没有更新或启动计算。"
+        "请明确给出要采用的整数值。"
+    )
 
 
 def _request_target_matches(
@@ -430,56 +528,201 @@ def _semantic_target(target: ResultTarget, request: Request) -> tuple[str, str |
     return "field", name
 
 
-def _message_declares_parameter(message: str, name: str, value: Any) -> bool:
-    return type(value) is int and _explicit_electronic_state_value(message, name) == value
+_STATE_TOKEN = (
+    r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|"
+    r"true|false|null|none|nan|infinity|inf|"
+    r"负[零〇一二两三四五六七八九十]|正[零〇一二两三四五六七八九十]|"
+    r"[零〇一二两三四五六七八九十]"
+)
+_STATE_TOKEN_RE = re.compile(
+    rf"(?<![A-Za-z0-9_.])(?P<token>{_STATE_TOKEN})(?![A-Za-z0-9_.])",
+    re.IGNORECASE,
+)
+_STATE_LABELS = {
+    "charge": r"(?:总电荷|电荷|(?<![A-Za-z])charge(?![A-Za-z])|(?<![A-Za-z0-9])q(?![A-Za-z0-9]))",
+    "multiplicity": (
+        r"(?:自旋多重度|多重度|(?<![A-Za-z])spin\s*multiplicity(?![A-Za-z])|"
+        r"(?<![A-Za-z])multiplicity(?![A-Za-z])|(?<![A-Za-z])mult(?![A-Za-z])|"
+        r"(?<![A-Za-z0-9])M(?![A-Za-z0-9])|自旋)"
+    ),
+}
+_ANY_STATE_LABEL_RE = re.compile(
+    rf"(?:{_STATE_LABELS['charge']}|{_STATE_LABELS['multiplicity']})", re.IGNORECASE
+)
+_CORRECTION_TARGET_RE = re.compile(
+    rf"(?:改\s*(?:为|成)|变为|change(?:d)?\s+to|switch\s+to|then\s+to|to|->|→)\s*({_STATE_TOKEN})",
+    re.IGNORECASE,
+)
 
 
-def _explicit_electronic_state_value(message: str, name: str) -> int | None:
-    """Extract only direct q/M statements; Chinese phrases need no word boundary."""
-
+def _parse_electronic_state(message: str, name: str) -> ElectronicStateInput:
+    if name not in _STATE_LABELS:
+        raise ValueError(f"unsupported electronic-state field: {name}")
     values: set[int] = set()
-    if name == "charge":
-        patterns_with_values = [(r"中性|(?<![A-Za-z])neutral(?![A-Za-z])", 0)]
-        labels = r"(?:总电荷|电荷|(?<![A-Za-z])charge(?![A-Za-z])|(?<![A-Za-z])q(?![A-Za-z]))"
-    elif name == "multiplicity":
-        patterns_with_values = [(r"单重态|singlet", 1), (r"三重态|triplet", 3)]
-        labels = (
-            r"(?:自旋多重度|多重度|(?<![A-Za-z])spin\s*multiplicity(?![A-Za-z])|"
-            r"(?<![A-Za-z])multiplicity(?![A-Za-z])|(?<![A-Za-z])mult(?![A-Za-z])|"
-            r"(?<![A-Za-z])M(?![A-Za-z])|自旋)"
-        )
-    else:
-        return None
+    invalid: list[str] = []
+    ambiguous = False
+    mentioned = False
+    evidence: str | None = None
 
-    for pattern, value in patterns_with_values:
-        for match in re.finditer(pattern, message, re.IGNORECASE):
-            if not _is_negated_statement(message, match.start()):
-                values.add(value)
-
-    number = (
-        r"([+-]?\d+|负[零〇一二两三四五六七八九十]|正[零〇一二两三四五六七八九十]|"
-        r"[零〇一二两三四五六七八九十])"
+    phrase_values = (
+        [(r"中性|(?<![A-Za-z])neutral(?![A-Za-z])", 0)]
+        if name == "charge"
+        else [
+            (r"单重态|(?<![A-Za-z])singlet(?![A-Za-z])", 1),
+            (r"三重态|(?<![A-Za-z])triplet(?![A-Za-z])", 3),
+        ]
     )
-    assignment = r"\s*(?:(?:is|为|是|设为|设置为|设成|设置成)\s*|=\s*|:\s*)?"
-    patterns = (
-        rf"{labels}{assignment}{number}(?!\d)",
-        rf"(?<!\d){number}\s*{labels}",
-    )
-    for pattern in patterns:
+    for pattern, value in phrase_values:
         for match in re.finditer(pattern, message, re.IGNORECASE):
+            mentioned = True
+            phrase = match.group(0)
             if _is_negated_statement(message, match.start()):
                 continue
-            value = _parse_signed_integer(match.group(1))
-            if value is not None:
-                values.add(value)
-    return next(iter(values)) if len(values) == 1 else None
+            values.add(value)
+            evidence = evidence or phrase
+
+    all_labels = list(_ANY_STATE_LABEL_RE.finditer(message))
+    for label_index, label in enumerate(all_labels):
+        field = next(
+            (
+                candidate
+                for candidate, pattern in _STATE_LABELS.items()
+                if re.fullmatch(pattern, label.group(0), re.IGNORECASE)
+            ),
+            None,
+        )
+        if field != name:
+            continue
+        mentioned = True
+        if _is_negated_statement(message, label.start()):
+            continue
+        start = label.end()
+        end = len(message)
+        if label_index + 1 < len(all_labels):
+            end = min(end, all_labels[label_index + 1].start())
+        sentence_break = re.search(r"[\n。！？?!;；]", message[start:end])
+        if sentence_break is not None:
+            end = start + sentence_break.start()
+        segment = message[start:end]
+        tokens = list(_STATE_TOKEN_RE.finditer(segment))
+        if not tokens:
+            prior_breaks = [
+                message.rfind(mark, 0, label.start()) + 1
+                for mark in ("\n", "。", "！", "？", "!", "?", ";", "；", ",", "，")
+            ]
+            local_prefix = message[max(prior_breaks) : label.start()]
+            segment_has_value_phrase = any(
+                re.search(pattern, local_prefix + segment, re.IGNORECASE) is not None
+                for pattern, _value in phrase_values
+            )
+            if not segment_has_value_phrase:
+                ambiguous = True
+            continue
+
+        chosen_tokens = tokens
+        if len(tokens) > 1:
+            targets = list(_CORRECTION_TARGET_RE.finditer(segment))
+            if len(targets) == 1:
+                target_start = targets[0].start(1)
+                chosen_tokens = [token for token in tokens if token.start() >= target_start]
+            if len(chosen_tokens) != 1:
+                ambiguous = True
+                continue
+
+        token = chosen_tokens[0].group("token")
+        parsed = _parse_signed_integer(token)
+        if parsed is None or (name == "multiplicity" and parsed <= 0):
+            invalid.append(token)
+            continue
+        if _is_negated_statement(segment, chosen_tokens[0].start()):
+            continue
+        values.add(parsed)
+        evidence = evidence or segment.strip()
+
+    if invalid:
+        return ElectronicStateInput(status="invalid", evidence=evidence, detail=", ".join(invalid))
+    if len(values) > 1 or ambiguous:
+        return ElectronicStateInput(status="ambiguous", evidence=evidence)
+    if len(values) == 1:
+        return ElectronicStateInput(status="set", value=next(iter(values)), evidence=evidence)
+    if mentioned:
+        return ElectronicStateInput(status="ambiguous", evidence=evidence)
+    return ElectronicStateInput(status="absent")
+
+
+def _verified_candidate_evidence(
+    message: str,
+    name: str,
+    state: ElectronicStateInput,
+    candidates: list[ElectronicStateCandidate] | tuple[ElectronicStateCandidate, ...],
+) -> str | None:
+    if state.status != "set" or state.value is None:
+        return None
+    for candidate in candidates:
+        if candidate.field != name or not candidate.evidence or candidate.evidence not in message:
+            continue
+        cited_state = _parse_electronic_state(candidate.evidence, name)
+        candidate_value = _parse_signed_integer(candidate.raw_value.strip())
+        if candidate_value is None:
+            phrase_values = (
+                [(r"中性|neutral", 0)]
+                if name == "charge"
+                else [
+                    (r"单重态|singlet", 1),
+                    (r"三重态|triplet", 3),
+                ]
+            )
+            candidate_value = next(
+                (
+                    value
+                    for pattern, value in phrase_values
+                    if re.fullmatch(pattern, candidate.raw_value.strip(), re.IGNORECASE)
+                ),
+                None,
+            )
+        raw_matches_evidence = _candidate_raw_value_matches_evidence(
+            candidate.raw_value.strip(), candidate.evidence
+        )
+        if (
+            cited_state.status == "set"
+            and cited_state.value == state.value == candidate_value
+            and raw_matches_evidence
+        ):
+            return candidate.evidence
+    return None
+
+
+def _candidate_raw_value_matches_evidence(raw_value: str, evidence: str) -> bool:
+    if re.fullmatch(_STATE_TOKEN, raw_value, re.IGNORECASE):
+        return (
+            re.search(
+                rf"(?<![A-Za-z0-9_.]){re.escape(raw_value)}(?![A-Za-z0-9_.])",
+                evidence,
+                re.IGNORECASE,
+            )
+            is not None
+        )
+    return (
+        re.search(
+            r"单重态|三重态|singlet|triplet|neutral|中性",
+            raw_value,
+            re.IGNORECASE,
+        )
+        is not None
+        and raw_value.casefold() in evidence.casefold()
+    )
 
 
 def _is_negated_statement(message: str, start: int) -> bool:
-    prefix = message[max(0, start - 8) : start]
+    prefix = message[max(0, start - 16) : start]
     return (
         re.search(
-            r"(?:不是|并非|非|不|not(?:\s+(?:a|the))?|non[-\s]?)\s*$",
+            r"(?:不要(?:用|使用|采用|设为|设置为|看|给|把|将|提供|展示|返回|输出)?|"
+            r"不用|不采用|不使用|不需要|不想要|不含|并非|不是|非|不|"
+            r"do\s+not(?:\s+(?:use|set|choose|include|request|give|provide|show|return|want|need|me|the|a|an))*|"
+            r"don't(?:\s+(?:use|set|choose|include|want|need|give|provide|show|return|me|the|a|an))*|"
+            r"not(?:\s+(?:a|the|use|an|want|need|request|include))?|"
+            r"without|excluding|exclude|non[-\s]?)\s*$",
             prefix,
             re.IGNORECASE,
         )
@@ -545,7 +788,7 @@ def _bounded_context(context: Mapping[str, Any] | None) -> Mapping[str, Any]:
 
 
 def _intake_schema(candidate_refs: tuple[str, ...]) -> type[BaseModel]:
-    """Build the local candidate-constrained schema for one intake round."""
+    """Build the local subject-reference-constrained schema for one intake round."""
 
     if not candidate_refs:
         # Keep the base type for the empty-catalog case so existing lightweight
@@ -555,17 +798,17 @@ def _intake_schema(candidate_refs: tuple[str, ...]) -> type[BaseModel]:
 
     allowed = frozenset(candidate_refs)
 
-    def _refs_are_candidates(value: list[str]) -> list[str]:
-        unknown = sorted(set(value) - allowed)
+    def _targets_are_candidates(value: list[QueryTarget]) -> list[QueryTarget]:
+        unknown = sorted({target.subject_ref for target in value} - allowed)
         if unknown:
-            raise ValueError(f"query selection references are outside this catalog: {unknown}")
+            raise ValueError(f"query subject references are outside this catalog: {unknown}")
         return value
 
-    refs_validator = field_validator("refs")(_refs_are_candidates)
+    targets_validator = field_validator("targets")(_targets_are_candidates)
     selection_model = create_model(
         "QuerySelectionForCatalog",
         __base__=QuerySelection,
-        __validators__={"_refs_are_candidates": refs_validator},
+        __validators__={"_targets_are_candidates": targets_validator},
     )
     return create_model(
         "IntakeOutputForCatalog",
@@ -575,7 +818,11 @@ def _intake_schema(candidate_refs: tuple[str, ...]) -> type[BaseModel]:
 
 
 def _coerce_intake_output(
-    value: Any, schema: type[BaseModel], candidate_refs: tuple[str, ...]
+    value: Any,
+    schema: type[BaseModel],
+    candidate_refs: tuple[str, ...],
+    *,
+    message: str,
 ) -> IntakeOutput:
     payload = value.model_dump(mode="python") if isinstance(value, BaseModel) else value
     try:
@@ -584,24 +831,141 @@ def _coerce_intake_output(
         raise ValueError(f"intake output failed local validation: {error}") from error
     if not isinstance(output, IntakeOutput):
         raise ValueError("intake output has an unexpected model type")
-    _validate_query_selection(output, candidate_refs)
-    return output
+    return _validate_query_selection(output, candidate_refs, message=message)
 
 
-def _validate_query_selection(output: IntakeOutput, candidate_refs: tuple[str, ...]) -> None:
+def _validate_query_selection(
+    output: IntakeOutput, candidate_refs: tuple[str, ...], *, message: str
+) -> IntakeOutput:
     selection = output.query_selection
     if output.intent != "context_query":
         if selection is not None:
             raise ValueError("non-query intake output cannot select saved results")
-        return
+        return output
     if selection is None:
         raise ValueError("context_query must contain query_selection")
     candidate_set = set(candidate_refs)
-    unknown = sorted(set(selection.refs) - candidate_set)
+    unknown = sorted({target.subject_ref for target in selection.targets} - candidate_set)
     if unknown:
-        raise ValueError(f"query selection references are outside this catalog: {unknown}")
+        raise ValueError(f"query subject references are outside this catalog: {unknown}")
     if not candidate_set and selection.status == "selected":
         raise ValueError("cannot select a result from an empty catalog")
+    if selection.status == "selected" and any(
+        not _query_property_evidence_matches(target.property, target.evidence, message)
+        for target in selection.targets
+    ):
+        replacement = QuerySelection(
+            status="clarify",
+            clarification="请明确说明要查询的科学量；我不会用其他性质的结果代替。",
+        )
+        return output.model_copy(update={"query_selection": replacement})
+    return output
+
+
+def _query_property_evidence_matches(property_name: str, evidence: str, message: str) -> bool:
+    if not evidence or evidence not in message:
+        return False
+    text = evidence.casefold().replace("电子结构", "")
+    if property_name == "electronic_energy":
+        specific = (
+            "零点",
+            "zero-point",
+            "zero point",
+            "zpe",
+            "自由能",
+            "free energy",
+            "free_energy",
+        )
+        if any(token in text for token in specific):
+            return False
+        return _electronic_energy_evidence_matches(evidence, message)
+    if property_name == "molecular_geometry":
+        return _has_affirmed_property_phrase(
+            ("结构", "几何", "geometry", "structure"), evidence, message
+        ) and _geometry_output_requested(evidence)
+    if property_name == "zero_point_energy":
+        return _has_affirmed_property_phrase(
+            ("零点", "zero-point", "zero point", "zpe"), evidence, message
+        )
+    if property_name == "free_energy":
+        return _has_affirmed_property_phrase(
+            ("自由能", "free energy", "free_energy"), evidence, message
+        )
+    if property_name == "frequency":
+        return _has_affirmed_property_phrase(
+            ("频率", "frequency", "frequencies"), evidence, message
+        )
+    if property_name == "atom_count":
+        return _has_affirmed_property_phrase(
+            ("原子数", "atom count", "number of atoms"), evidence, message
+        )
+    return False
+
+
+def _has_affirmed_property_phrase(phrases: tuple[str, ...], evidence: str, message: str) -> bool:
+    for phrase in phrases:
+        for phrase_match in re.finditer(re.escape(phrase), evidence, re.IGNORECASE):
+            for evidence_match in re.finditer(re.escape(evidence), message, re.IGNORECASE):
+                position = evidence_match.start() + phrase_match.start()
+                if not _is_negated_statement(message, position):
+                    return True
+    return False
+
+
+def _electronic_energy_evidence_matches(evidence: str, message: str) -> bool:
+    for phrase in ("能量", "电子能", "electronic energy", "energy"):
+        for phrase_match in re.finditer(re.escape(phrase), evidence, re.IGNORECASE):
+            for evidence_match in re.finditer(re.escape(evidence), message, re.IGNORECASE):
+                position = evidence_match.start() + phrase_match.start()
+                if _is_negated_statement(message, position):
+                    continue
+                prefix = message[max(0, position - 24) : position]
+                if phrase.casefold() == "energy" and re.search(
+                    r"(?:zero[-\s]?point|free)\s*$", prefix, re.IGNORECASE
+                ):
+                    continue
+                return True
+    return False
+
+
+def _geometry_output_requested(evidence: str) -> bool:
+    """Separate a structure mentioned as the subject from a requested output."""
+
+    other_property = (
+        r"电子能|能量|zero[-\s]?point|zpe|自由能|free\s+energy|频率|frequency|原子数|atom\s+count"
+    )
+    action_before = (
+        r"给我|给出|输出|提供|返回|展示|显示|列出|(?<!不)需要|想要|希望|要求|"
+        r"(?<!不)(?:同时|也|还)?要|查看|看看|show|return|output|provide|give|"
+        r"include|need|want|display|list|fetch"
+    )
+    action_after = (
+        r"给我|给出|输出|提供|返回|展示|显示|列出|也要|还要|同时要|要看|看看|"
+        r"show|return|output|provide|give|include|need|want|display|list|fetch"
+    )
+    geometry = r"结构|几何|geometry|structure"
+    joint = re.search(
+        rf"(?:{other_property}).{{0,8}}(?:和|及|以及|、|and|&)\s*(?:{geometry})|"
+        rf"(?:{geometry}).{{0,8}}(?:和|及|以及|、|and|&)\s*(?:{other_property})",
+        evidence,
+        re.IGNORECASE,
+    )
+    if joint is not None and re.search(action_before, evidence, re.IGNORECASE):
+        return True
+    for match in re.finditer(geometry, evidence, re.IGNORECASE):
+        prefix = evidence[: match.start()]
+        suffix = evidence[match.end() :]
+        followed_by_property = re.match(
+            rf"(?:的|['’]s\s+).{{0,8}}(?:{other_property})", suffix, re.IGNORECASE
+        )
+        has_action_before = re.search(action_before, prefix[-32:], re.IGNORECASE) is not None
+        has_other_property_before = re.search(other_property, prefix, re.IGNORECASE) is not None
+        has_action_after = re.search(action_after, suffix[:24], re.IGNORECASE) is not None
+        if (has_action_before and not has_other_property_before and not followed_by_property) or (
+            has_action_after and not followed_by_property
+        ):
+            return True
+    return False
 
 
 def _json_context(value: Mapping[str, Any]) -> str:
@@ -614,10 +978,16 @@ __all__ = [
     "InputBindingProposal",
     "IntakeOutput",
     "QuerySelection",
+    "QueryTarget",
     "PlanProposal",
     "PlanStepProposal",
     "PlanTargetProposal",
+    "ElectronicStateCandidate",
+    "ElectronicStateInput",
+    "ParameterNormalization",
     "filter_user_explicit_parameters",
+    "normalize_user_explicit_parameters",
+    "electronic_state_clarification",
     "intake_message",
     "load_prompt",
     "plan_message",

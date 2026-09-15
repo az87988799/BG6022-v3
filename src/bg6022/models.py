@@ -227,6 +227,14 @@ class Run(StrictModel):
 
 
 ExecuteFunction = Callable[[Step, Run, Any], Result]
+ResultProperty = Literal[
+    "electronic_energy",
+    "molecular_geometry",
+    "zero_point_energy",
+    "free_energy",
+    "frequency",
+    "atom_count",
+]
 
 
 class Tool(StrictModel):
@@ -238,6 +246,7 @@ class Tool(StrictModel):
     input_ports: dict[str, str] = Field(default_factory=dict)
     output_ports: dict[str, str] = Field(default_factory=dict)
     results: dict[str, str] = Field(default_factory=dict)
+    result_properties: dict[str, ResultProperty] = Field(default_factory=dict)
     result_metadata: dict[str, dict[str, str]] = Field(default_factory=dict)
     success_conditions: list[str] = Field(default_factory=list)
     repair_capabilities: list[str] = Field(default_factory=list)
@@ -253,15 +262,17 @@ class Tool(StrictModel):
     )
 
     @model_validator(mode="after")
-    def _validate_result_metadata(self) -> Tool:
-        """Keep presentation metadata attached to the Tool result contract.
+    def _validate_result_contract(self) -> Tool:
+        """Keep presentation and semantic metadata attached to declared outputs.
 
-        Result metadata is descriptive only.  The executable result contract
-        remains ``results``/``output_ports``; metadata can neither add a new
-        result nor silently describe a field that the Tool cannot produce.
+        Presentation metadata is descriptive only. Result-property identifiers
+        are machine-readable; neither mapping can add an undeclared result.
         """
 
         declared = set(self.results) | set(self.output_ports)
+        undeclared_properties = sorted(set(self.result_properties) - declared)
+        if undeclared_properties:
+            raise ValueError(f"result properties have undeclared keys: {undeclared_properties}")
         unknown = sorted(set(self.result_metadata) - declared)
         if unknown:
             raise ValueError(f"result metadata has undeclared keys: {unknown}")

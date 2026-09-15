@@ -128,6 +128,7 @@ def make_generate_geometry_tool(config: AppConfig | None = None) -> Tool:
         input_ports={"molecule": "molecule"},
         output_ports={"geometry": "molecular_geometry"},
         results={"geometry_atom_count": "integer"},
+        result_properties={"geometry": "molecular_geometry", "geometry_atom_count": "atom_count"},
         success_conditions=["RDKit structure rebuilt", "XYZ parsed and atom order preserved"],
         repair_capabilities=[],
         requires_compute_permission=False,

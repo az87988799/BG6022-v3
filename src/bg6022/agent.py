@@ -28,8 +28,9 @@ from .orca.profiles import get_profile, resolve_parameters
 from .orca.repair_rules import applicable_repairs, applicable_scf_repair
 from .planner import (
     QuerySelection,
-    filter_user_explicit_parameters,
+    electronic_state_clarification,
     intake_message,
+    normalize_user_explicit_parameters,
     plan_message,
     proposal_to_plan,
     request_from_intake,
@@ -81,7 +82,7 @@ class Agent:
         self.llm = llm if llm is not None else LlmClient(config)
         self.session_id = session_id or new_id("session")
         self._cancel_events: dict[str, Event] = {}
-        self._query_bindings: dict[str, dict[str, Any]] = {}
+        self._query_bindings: dict[tuple[str, str], dict[str, Any]] = {}
         self._request_sequence = 0
         self._active_request: tuple[int, Event] | None = None
         try:
@@ -191,7 +192,25 @@ class Agent:
             self._ensure_request_active(request_token, request_cancel)
 
             current = self._coerce_run(None)
-            explicit_parameters = filter_user_explicit_parameters(text, intake.explicit_parameters)
+            normalized_parameters = normalize_user_explicit_parameters(
+                text,
+                intake.explicit_parameters,
+                intake.electronic_state_candidates,
+            )
+            explicit_parameters = normalized_parameters.explicit_parameters
+            if normalized_parameters.clarification_fields and (
+                intake.intent == "chemistry_compute"
+                or (
+                    current is not None
+                    and current.status == "waiting"
+                    and current.waiting_for in {"clarification", "confirmation"}
+                )
+            ):
+                response = AgentResponse(
+                    electronic_state_clarification(normalized_parameters), run=current
+                )
+                self._append_message("assistant", response.text)
+                return response
             if (
                 current is not None
                 and current.status == "waiting"
@@ -243,7 +262,12 @@ class Agent:
                     cancel=request_cancel,
                 )
 
-            request = request_from_intake(text, intake, request_id=new_id("request"))
+            request = request_from_intake(
+                text,
+                intake,
+                request_id=new_id("request"),
+                normalized_parameters=normalized_parameters,
+            )
             self._ensure_request_active(request_token, request_cancel)
             plan = None
             validation_feedback = None
@@ -1353,11 +1377,23 @@ class Agent:
         """Build short, public references for valid facts in this session.
 
         The catalog deliberately contains no Run IDs, paths, hashes, or
-        numeric values.  Those details stay in ``_query_bindings`` and are
-        re-read from disk after the model selects a short reference.
+        numeric values. Facts are grouped under program-generated subject
+        references, while their declared properties remain machine-readable.
         """
 
         self._query_bindings = {}
+        subject_refs: dict[str, str] = {}
+
+        def _subject_ref(run: Run, step: Step) -> str | None:
+            task_key = f"{run.id}:{step.id}"
+            if task_key in subject_refs:
+                return subject_refs[task_key]
+            if len(subject_refs) >= 3:
+                return None
+            ref = f"t{len(subject_refs) + 1}"
+            subject_refs[task_key] = ref
+            return ref
+
         active_run_id = self._session.get("active_run_id")
         indexed_ids: list[str] = []
         if isinstance(active_run_id, str) and active_run_id:
@@ -1395,10 +1431,13 @@ class Agent:
                 for name, expected_type in tool.results.items():
                     if name in tool.output_ports or name not in result.values:
                         continue
+                    property_name = tool.result_properties.get(name)
+                    subject_ref = _subject_ref(run, step)
+                    if property_name is None or subject_ref is None:
+                        continue
                     value = result.values[name]
                     if not _query_value_is_compatible(value, expected_type):
                         continue
-                    ref = f"r{len(catalog) + 1}"
                     binding = {
                         "session_id": self.session_id,
                         "run_id": run.id,
@@ -1408,25 +1447,30 @@ class Agent:
                         "step_fingerprint": _step_fingerprint(step),
                         "kind": "field",
                         "name": name,
+                        "property": property_name,
                     }
-                    self._query_bindings[ref] = binding
+                    self._query_bindings[(subject_ref, property_name)] = binding
                     catalog.append(
                         self._public_query_entry(
-                            ref,
+                            subject_ref,
                             run,
                             step,
                             tool,
                             name=name,
                             kind="field",
                             expected_type=expected_type,
+                            property_name=property_name,
                             structure=structure,
                         )
                     )
                 for name, expected_type in tool.output_ports.items():
+                    property_name = tool.result_properties.get(name)
+                    subject_ref = _subject_ref(run, step)
+                    if property_name is None or subject_ref is None:
+                        continue
                     artifact = self._query_port_artifact(run, step, result, name, expected_type)
                     if artifact is None:
                         continue
-                    ref = f"r{len(catalog) + 1}"
                     binding = {
                         "session_id": self.session_id,
                         "run_id": run.id,
@@ -1437,17 +1481,19 @@ class Agent:
                         "kind": "port",
                         "name": name,
                         "artifact_id": artifact.id,
+                        "property": property_name,
                     }
-                    self._query_bindings[ref] = binding
+                    self._query_bindings[(subject_ref, property_name)] = binding
                     catalog.append(
                         self._public_query_entry(
-                            ref,
+                            subject_ref,
                             run,
                             step,
                             tool,
                             name=name,
                             kind="port",
                             expected_type=expected_type,
+                            property_name=property_name,
                             structure=structure,
                         )
                     )
@@ -1455,7 +1501,7 @@ class Agent:
 
     def _public_query_entry(
         self,
-        ref: str,
+        subject_ref: str,
         run: Run,
         step: Step,
         tool: Any,
@@ -1463,13 +1509,14 @@ class Agent:
         name: str,
         kind: str,
         expected_type: str,
+        property_name: str,
         structure: dict[str, Any],
     ) -> dict[str, Any]:
         metadata = dict(tool.result_metadata.get(name, {}))
         metadata.setdefault("label", name.replace("_", " "))
         metadata.setdefault("description", tool.description)
         item = {
-            "ref": ref,
+            "subject_ref": subject_ref,
             "active_task": run.id == self._session.get("active_run_id"),
             "task": {
                 "description": run.request.description,
@@ -1489,6 +1536,7 @@ class Agent:
             "result": {
                 "name": name,
                 "kind": kind,
+                "property": property_name,
                 "label": metadata["label"],
                 "description": metadata["description"],
                 "unit": expected_type if kind == "field" else None,
@@ -1499,20 +1547,16 @@ class Agent:
         }
         return item
 
-    def _load_query_fact(self, binding: Mapping[str, Any] | str) -> dict[str, Any] | None:
+    def _load_query_fact(self, subject_ref: str, property_name: str) -> dict[str, Any] | None:
         """Reload one private catalog binding and verify it has not changed."""
 
-        if isinstance(binding, str):
-            resolved = self._query_bindings.get(binding)
-        elif isinstance(binding, Mapping) and isinstance(binding.get("ref"), str):
-            resolved = self._query_bindings.get(str(binding["ref"]))
-        else:
-            resolved = (
-                binding if any(item is binding for item in self._query_bindings.values()) else None
-            )
+        resolved = self._query_bindings.get((subject_ref, property_name))
         if resolved is None:
             return None
-        if resolved.get("session_id") != self.session_id:
+        if (
+            resolved.get("session_id") != self.session_id
+            or resolved.get("property") != property_name
+        ):
             return None
         run_id = resolved.get("run_id")
         if not isinstance(run_id, str):
@@ -1546,7 +1590,7 @@ class Agent:
         if not isinstance(name, str) or kind not in {"field", "port"}:
             return None
         expected_type = tool.results.get(name) if kind == "field" else tool.output_ports.get(name)
-        if not isinstance(expected_type, str):
+        if not isinstance(expected_type, str) or tool.result_properties.get(name) != property_name:
             return None
         value: Any
         if kind == "field":
@@ -1566,6 +1610,7 @@ class Agent:
         metadata.setdefault("description", tool.description)
         return {
             "task_key": f"{run.id}:{step.id}",
+            "subject_ref": subject_ref,
             "task_description": run.request.description,
             "task_created_at": run.created_at,
             "system": _query_system_label(structure),
@@ -1581,6 +1626,7 @@ class Agent:
             "kind": kind,
             "value": value,
             "expected_type": expected_type,
+            "result_property": property_name,
             "metadata": metadata,
         }
 
@@ -1872,25 +1918,26 @@ class Agent:
             return response
 
         catalog_refs = {
-            str(item.get("ref"))
+            str(item.get("subject_ref"))
             for item in catalog
-            if isinstance(item, Mapping) and isinstance(item.get("ref"), str)
+            if isinstance(item, Mapping) and isinstance(item.get("subject_ref"), str)
         }
-        if any(ref not in catalog_refs for ref in selection.refs):
+        if any(target.subject_ref not in catalog_refs for target in selection.targets):
             text = render_clarification({"binding_invalid": True})
             response = AgentResponse(text)
             self._append_message("assistant", text)
             return response
         selected_facts: list[dict[str, Any]] = []
-        for reference in selection.refs:
-            fact = self._load_query_fact(reference)
+        for target in selection.targets:
+            fact = self._load_query_fact(target.subject_ref, target.property)
             if fact is None:
-                text = render_clarification({"binding_invalid": True})
+                text = "所选任务尚未得到所问性质；已保存的其他性质不能替代它。"
                 response = AgentResponse(text)
                 self._append_message("assistant", text)
                 return response
             selected_facts.append(fact)
-        facts, covered = select_facts_for_question(question, selected_facts)
+        targets = [target.model_dump(mode="python") for target in selection.targets]
+        facts, covered = select_facts_for_question(targets, selected_facts)
         if not covered:
             text = "本次任务尚未得到所问性质；已保存的其他性质不能替代它。"
             response = AgentResponse(text)
