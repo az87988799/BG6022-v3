@@ -185,7 +185,9 @@ record user acceptance. The verified baseline is branch `codex/v3-m1-agent` at
 
 ## M2 status
 
-M2 implementation, offline O1–O8 validation, and real R1–R4 evidence are
-prepared for review. M2 remains pending the user's acceptance; see
+M2's pre-fix implementation has offline O1–O8 and real R1–R4 baseline evidence.
+The 2026-09-16 root-cause repairs now pass 224 offline tests, but fresh real
+Agent/ORCA entry recertification on the repair candidate remains outstanding.
+M2 remains pending the user's acceptance; see
 [`docs/milestones/M2.md`](milestones/M2.md) and
 [`docs/evidence/M2-composition-evidence.md`](evidence/M2-composition-evidence.md).

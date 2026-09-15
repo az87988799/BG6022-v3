@@ -1,23 +1,26 @@
 # M2 composition evidence index
 
-**Status:** implementation and validation are ready for review; **user
-acceptance is pending**. This record distinguishes offline/simulated evidence
-from actual DeepSeek, PubChem/RDKit, and ORCA Runs.
+**Status:** the 2026-09-16 root-cause fixes are implemented and offline-verified;
+fresh post-fix real-entry recertification and **user acceptance are pending**.
+This record distinguishes the pre-fix DeepSeek, PubChem/RDKit, and ORCA Runs
+from the post-fix offline evidence.
 
 ## Candidate and environment
 
 | Field | Observed value | Status |
 |---|---|---|
-| Branch | `codex/v3-m2-implementation` | pushed to `origin` |
-| Code commits | `e7e300a227973a815c6213f1a4a36996fa3f96f7` (M2 implementation) and `9da71b0d8adae70a812a00704eb6544911d53e1b` (standalone Freq Agent regression) | pushed |
-| Evidence commits | `dd0ee54eb0d6b4fed714b73a065f0505b18ff0e1` (M1/M2 records) and `03a421438af09154b567d0c49d7c50c2aacc0b30` (CI result) | pushed |
+| Branch | `codex/v3-m2-implementation` at `f6547f76315c27cd72a2899db279fe90799abdcc` | pushed to `origin` |
+| Pre-fix baseline code commits | `e7e300a227973a815c6213f1a4a36996fa3f96f7` (M2 implementation) and `9da71b0d8adae70a812a00704eb6544911d53e1b` (standalone Freq Agent regression) | pushed; historical baseline |
+| Pre-fix evidence commits | `dd0ee54eb0d6b4fed714b73a065f0505b18ff0e1` (M1/M2 records) and `03a421438af09154b567d0c49d7c50c2aacc0b30` (CI result) | pushed; historical baseline |
+| Root-cause repair candidate | `f6547f76315c27cd72a2899db279fe90799abdcc` | pushed; offline-verified; fresh real-entry recertification pending |
 | Python / OS | Python 3.11.4 / Windows 10 build 26200 | observed |
 | ORCA | `E:\orca\orca.exe`, Program Version 6.1.1 | observed in Run records |
 | Method and scope | r2SCAN-3c, gas phase, neutral singlet H2O and C2H6O | exercised |
 | Active real-compute budget | 4 cores / 1024 MB total / `%maxcore 192` / concurrency 1 | active project instruction |
-| Run/input agreement | All four current-candidate Runs snapshot 4/1024/192/1; each generated ORCA input has `nprocs 4` and `%maxcore 192` | verified |
-| Local offline validation | `ruff check src tests`; `ruff format --check src tests`; `python -m compileall -q src start_chat.py tests`; `pytest -q -m "not live_llm and not live_pubchem and not live_orca"` → 182 passed, 3 deselected; `uv build` | passed |
-| GitHub Actions | [offline run 34994186571](https://github.com/az87988799/BG6022-v3/actions/runs/34994186571), tested commit `9da71b0d8adae70a812a00704eb6544911d53e1b` | passed |
+| Run/input agreement | All four historical pre-fix Agent Runs snapshot 4/1024/192/1; each generated ORCA input has `nprocs 4` and `%maxcore 192` | verified for those Runs |
+| Pre-fix local offline validation | `ruff check src tests`; `ruff format --check src tests`; `python -m compileall -q src start_chat.py tests`; `pytest -q -m "not live_llm and not live_pubchem and not live_orca"` → 182 passed, 3 deselected; `uv build` | passed on pre-fix baseline |
+| Pre-fix GitHub Actions | [offline run 34994186571](https://github.com/az87988799/BG6022-v3/actions/runs/34994186571), tested commit `9da71b0d8adae70a812a00704eb6544911d53e1b` | passed on baseline |
+| Post-fix GitHub Actions | [offline run 35007233667](https://github.com/az87988799/BG6022-v3/actions/runs/35007233667), tested commit `f6547f76315c27cd72a2899db279fe90799abdcc` | passed |
 | User acceptance | M2 acceptance owner and date | pending user review |
 
 Evidence root: `E:\BG6022-v3-data\m2_final_candidate_20260915_freqfix`.
@@ -47,15 +50,36 @@ the next section.
 | O7 | cumulative science-attempt/extra-call budget, expired active-time, and `test_cancel_request_stops_process_tree_and_clears_execution_guard` | limits are cumulative; cancellation stops the process tree and clears its guard | passed |
 | O8 | `test_energy_results_keep_opt_sp_and_frequency_categories_distinct`, plan target/operation tests, invalid-reference tests | no unsupported result or energy substitution can be reported as success | passed |
 
-## Real current-candidate Runs
+## Post-fix root-cause regression evidence
+
+On the repair candidate, `pytest -q -rs` passed **224 tests, with 3 skipped**
+(the opt-in live PubChem, DeepSeek, and ORCA tests are disabled by default).
+`ruff check .`, `ruff format --check .`, `python -m compileall -q src
+start_chat.py tests`, and `git diff --check` passed. The new regressions cover
+Tool-derived target catalogs and Intake gating, ambiguous energy targets,
+geometry-source binding, bounded empty-response correction and diagnostics,
+per-Tool parameter scope and atomic edits, preparation failure state, and
+history-query routing. These tests use local fixtures and mocked HTTP; they do
+not count as live model or ORCA evidence.
+
+Fresh live Agent/ORCA entry scenarios from the repair plan have not been run on
+this candidate. The local Windows environment lacks `uv`, and a local `pip
+wheel` fallback could not run because it lacks `bdist_wheel`; GitHub Actions did
+run `uv build` successfully on this commit.
+
+## Historical real Runs (pre-root-cause fix)
+
+The Runs in this section were created before the root-cause repair candidate.
+They remain valid records of their actual Tool executions, but they do not
+verify post-fix Intake/Planner behavior. Fresh real-entry recertification is
+still required before M2 acceptance review.
 
 R1 and R3 use fresh live DeepSeek plans. R2 and R4 replay a previously
-successful, real DeepSeek-generated Plan through the current candidate after
-current validation; the current Agent copied and verified R2's history input,
-and the current Agent executed R4's full ORCA chain. R4 repair selection used a
-live DeepSeek call during the current-candidate Run. This distinction is
-intentional: unsuccessful fresh R2/R4 intake attempts are retained but are not
-represented as successful planner calls.
+successful, real DeepSeek-generated Plan through the then-current pre-fix
+candidate; its Agent copied and verified R2's history input and executed R4's
+full ORCA chain. R4 repair selection used a live DeepSeek call during that
+pre-fix Run. This distinction is intentional: unsuccessful fresh R2/R4 intake
+attempts are retained but are not represented as successful planner calls.
 The standalone Freq-on-supplied-XYZ path is covered by offline Plan and Agent
 validation, plus the production Tool Run recorded below; it is not a separate
 R1–R4 live Agent Run.
@@ -106,8 +130,10 @@ the offline Freq-only Agent test and does not replace any R1–R4 Agent scenario
 
 | Item | Status |
 |---|---|
-| M2 implementation and offline/live verification | ready for review |
-| Candidate code commits | `e7e300a227973a815c6213f1a4a36996fa3f96f7`, `9da71b0d8adae70a812a00704eb6544911d53e1b` (pushed) |
+| Pre-fix M2 implementation and offline/live evidence | historical baseline; not post-fix recertification |
+| Root-cause repair candidate commit | `f6547f76315c27cd72a2899db279fe90799abdcc` (pushed) |
+| Post-fix offline verification | 224 passed, 3 skipped; lint, format, compile, package build, and diff checks passed; GitHub Actions passed |
+| Post-fix fresh real-entry recertification | pending |
 | Evidence commits | `dd0ee54eb0d6b4fed714b73a065f0505b18ff0e1`, `03a421438af09154b567d0c49d7c50c2aacc0b30` (pushed) |
 | M2 user acceptance owner and date | pending user review |
 | M1 user acceptance | remains separately pending |
