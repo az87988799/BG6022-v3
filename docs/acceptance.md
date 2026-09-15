@@ -56,10 +56,9 @@ count as the two required four-core real calculations.
 
 ## M1 implementation status
 
-M1 code is present on the M1 implementation branch and has offline regression
-coverage, but it is not marked accepted. Real Agent-path L1/L2 DeepSeek/PubChem/
-ORCA evidence was collected on 2026-09-15; the user must review the pushed
-commit and evidence described in
+M1 implementation and evidence have been verified, but M1 is not marked
+accepted. Real Agent-path L1/L2 DeepSeek/PubChem/ORCA evidence was collected on
+2026-09-15; the user must review the pushed commit and evidence described in
 [`docs/milestones/M1.md`](milestones/M1.md) and
 [`docs/evidence/M1-agent-evidence.md`](evidence/M1-agent-evidence.md) before
 M1 is recorded as complete.
@@ -166,3 +165,27 @@ LLM-selected repair record, and both ORCA attempts. Earlier non-passing live
 attempts in the same isolated evidence root are retained but are not counted as
 acceptance: `run_87598d747ff8468088159f395ad0bba8` exposed the ORCA “maximum
 number of optimization cycles” parser gap, and `run_af02fdbc9b9d4887a093d21dfe8cecbe` exposed repair-Plan topological-order replay. Both defects are fixed and covered by regression tests.
+
+## 2026-09-15 M1 verification record
+
+This record documents verification evidence for the M1 baseline; it does not
+record user acceptance. The verified baseline is branch `codex/v3-m1-agent` at
+`7cfd814d9ee64672b92d0a4301c2b079a97f6b1c`.
+
+| Check | Evidence | Status |
+|---|---|---|
+| GitHub Actions | `offline` workflow run `34969764361` completed successfully | passed |
+| Local offline validation | `119 passed, 3 live tests deselected`; Ruff lint and format, `compileall`, and `uv build` passed | passed |
+| Chat entry point | With an isolated temporary data root, the chat command reached its interactive prompt and `/exit` returned code 0 | passed |
+| ORCA installation | `E:\\orca\\orca.exe` exists; recorded run outputs identify ORCA 6.1.1 | verified |
+| L1 artifact integrity | For water Run `run_fee3692d4fa34244b4f68452062cb2e2`, every artifact's size and SHA-256 match its raw `run.json` index; the optimization succeeded, energy and geometry checks passed, and resources agree at 4 cores / 1024 MB / `%maxcore 192` / concurrency 1 | passed |
+| L2 artifact integrity and repair | For ethanol Run `run_24854da4f43346cabe67a730bfa00891`, every artifact's size and SHA-256 match its raw `run.json` index. Attempt 1 with `geom_maxiter=1` failed without success outputs or values and retained a hashed `restart_candidate`; the bounded restart changed only `geom_maxiter` to 100; attempt 2 succeeded and `current_results` binds to attempt 2. Resources agree at 4 cores / 1024 MB / `%maxcore 192` / concurrency 1 | passed |
+| M1 acceptance | Evidence has been verified, but the user has not accepted M1 | awaiting user acceptance |
+| Resource baseline | The master plan's 2048 MB / `%maxcore 384` is superseded for current work by the user's active project instructions: 1024 MB / `%maxcore 192`; Run snapshots and generated inputs agree | verified; M1 acceptance remains pending |
+
+## M2 status
+
+M2 implementation, offline O1–O8 validation, and real R1–R4 evidence are
+prepared for review. M2 remains pending the user's acceptance; see
+[`docs/milestones/M2.md`](milestones/M2.md) and
+[`docs/evidence/M2-composition-evidence.md`](evidence/M2-composition-evidence.md).
