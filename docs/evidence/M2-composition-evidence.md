@@ -134,7 +134,7 @@ the offline Freq-only Agent test and does not replace any R1–R4 Agent scenario
 | Root-cause repair candidate commit | `f6547f76315c27cd72a2899db279fe90799abdcc` (pushed) |
 | Post-fix offline verification | 224 passed, 3 skipped; lint, format, compile, package build, and diff checks passed; GitHub Actions passed |
 | Post-fix fresh real-entry recertification | completed; see [`M2-postfix-live-recertification.md`](M2-postfix-live-recertification.md); awaiting user acceptance |
-| Evidence commits | `dd0ee54eb0d6b4fed714b73a065f0505b18ff0e1`, `03a421438af09154b567d0c49d7c50c2aacc0b30` (pushed) |
+| Evidence commits | `dd0ee54eb0d6b4fed714b73a065f0505b18ff0e1`, `03a421438af09154b567d0c49d7c50c2aacc0b30`, `e7b33d74d1e59f045ec66dbabcf2865bcdb0cda7` (post-fix live recertification; pushed) |
 | M2 user acceptance owner and date | pending user review |
 | M1 user acceptance | remains separately pending |
 
