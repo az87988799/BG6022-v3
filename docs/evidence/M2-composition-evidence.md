@@ -9,15 +9,15 @@ from actual DeepSeek, PubChem/RDKit, and ORCA Runs.
 | Field | Observed value | Status |
 |---|---|---|
 | Branch | `codex/v3-m2-implementation` | pushed to `origin` |
-| Code commit | `e7e300a227973a815c6213f1a4a36996fa3f96f7` (`Implement M2 frequency and plan composition`) | pushed |
-| Evidence commit | `dd0ee54eb0d6b4fed714b73a065f0505b18ff0e1` (`Record M1 review and M2 evidence`) | pushed |
+| Code commits | `e7e300a227973a815c6213f1a4a36996fa3f96f7` (M2 implementation) and `9da71b0d8adae70a812a00704eb6544911d53e1b` (standalone Freq Agent regression) | pushed |
+| Evidence commits | `dd0ee54eb0d6b4fed714b73a065f0505b18ff0e1` (M1/M2 records) and `03a421438af09154b567d0c49d7c50c2aacc0b30` (CI result) | pushed |
 | Python / OS | Python 3.11.4 / Windows 10 build 26200 | observed |
 | ORCA | `E:\orca\orca.exe`, Program Version 6.1.1 | observed in Run records |
 | Method and scope | r2SCAN-3c, gas phase, neutral singlet H2O and C2H6O | exercised |
 | Active real-compute budget | 4 cores / 1024 MB total / `%maxcore 192` / concurrency 1 | active project instruction |
 | Run/input agreement | All four current-candidate Runs snapshot 4/1024/192/1; each generated ORCA input has `nprocs 4` and `%maxcore 192` | verified |
-| Local offline validation | `ruff check src tests`; `ruff format --check src tests`; `python -m compileall -q src start_chat.py tests`; `pytest -q -m "not live_llm and not live_pubchem and not live_orca"` → 181 passed, 3 deselected; `uv build` | passed |
-| GitHub Actions | [offline run 34993113284](https://github.com/az87988799/BG6022-v3/actions/runs/34993113284), tested commit `dd0ee54eb0d6b4fed714b73a065f0505b18ff0e1` | passed |
+| Local offline validation | `ruff check src tests`; `ruff format --check src tests`; `python -m compileall -q src start_chat.py tests`; `pytest -q -m "not live_llm and not live_pubchem and not live_orca"` → 182 passed, 3 deselected; `uv build` | passed |
+| GitHub Actions | [offline run 34994186571](https://github.com/az87988799/BG6022-v3/actions/runs/34994186571), tested commit `9da71b0d8adae70a812a00704eb6544911d53e1b` | passed |
 | User acceptance | M2 acceptance owner and date | pending user review |
 
 Evidence root: `E:\BG6022-v3-data\m2_final_candidate_20260915_freqfix`.
@@ -38,7 +38,7 @@ the next section.
 
 | ID | Evidence | Result | Status |
 |---|---|---|---|
-| O1 | `tests/unit/test_plan_composition.py`: Opt, SP, Opt/Freq, Opt/Freq/SP, and Freq-only on a supplied XYZ; requested-operation/result/check coverage | no omitted/extra operation; standalone Freq needs no Opt/local-minimum claim; SP and Opt energy categories remain distinct | passed |
+| O1 | `tests/unit/test_plan_composition.py` and `test_chat_freq_only_request_runs_on_supplied_xyz_without_preparation`: Opt, SP, Opt/Freq, Opt/Freq/SP, and Freq-only on supplied XYZ; request-to-confirmation runtime coverage | no omitted/extra operation; standalone Freq binds the user XYZ without Opt/preparation and makes no local-minimum claim; SP and Opt energy categories remain distinct | passed |
 | O2 | `tests/unit/test_frequency_parser.py`, `tests/unit/test_frequency_support.py`: complete/truncated output, missing Hessian, dimensional checks, `.hess` frequency count/value/scaling comparison | incomplete or mismatched evidence cannot succeed | passed |
 | O3 | `test_parses_orca_imaginary_mode_annotation_without_losing_negative_sign`, unsupported-layout tests, and local-minimum tests | preserve negative signs; unsupported layouts remain incomplete/unverified; frequency completion is separate from local-minimum support | passed |
 | O4 | `test_history_geometry_is_verified_copied_and_bound_to_the_new_run`, invalid binding parameterization, `test_model_cannot_choose_between_multiple_history_geometries` | source role/attempt/hash are verified; altered, fabricated, missing, and ambiguous references stop before ORCA | passed |
@@ -56,8 +56,9 @@ and the current Agent executed R4's full ORCA chain. R4 repair selection used a
 live DeepSeek call during the current-candidate Run. This distinction is
 intentional: unsuccessful fresh R2/R4 intake attempts are retained but are not
 represented as successful planner calls.
-The standalone Freq-on-supplied-XYZ path is covered by offline Plan validation
-and standalone input-generation tests; it is not a separate R1–R4 live Run.
+The standalone Freq-on-supplied-XYZ path is covered by offline Plan and Agent
+validation, plus the production Tool Run recorded below; it is not a separate
+R1–R4 live Agent Run.
 
 | ID | Run and saved evidence | Observed result | Status |
 |---|---|---|---|
@@ -72,6 +73,19 @@ files were replayed with the final parser, which verified Hessian/stdout frequen
 and scale agreement. Earlier successful live R3/R4 raw evidence was also replayed
 with the final parser; the current-candidate R3/R4 Runs supersede it for candidate
 evidence.
+
+An additional standalone Tool run covers the supplied-XYZ Freq path: Run
+`run_1ce81c9b55a540028d1980f39beb12fb` used `examples/water.xyz` with the
+production `run-tool frequency` command and an isolated data root at
+`E:\BG6022-v3-data\m2_freq_only_smoke_20260916`. Its Run contains only the
+`frequency` Tool and binds input geometry artifact
+`artifact_63702fd5535741fb9d71f4ab8e793ca1`. ORCA returned 9/9 finite modes
+(six external modes printed as zero, plus 1638.86, 3525.78, and 3684.07 cm⁻¹);
+the frequency section, Hessian, Hessian/stdout mode matching, SCF convergence,
+input hashes, normal termination, and process cleanup checks passed. The Run
+and input agree at 4 cores / 1024 MB / `%maxcore 192` / concurrency 1. No
+`local_minimum_supported` claim was requested. This real Tool check complements
+the offline Freq-only Agent test and does not replace any R1–R4 Agent scenario.
 
 ### Non-passing live attempts retained, not counted
 
@@ -93,8 +107,8 @@ evidence.
 | Item | Status |
 |---|---|
 | M2 implementation and offline/live verification | ready for review |
-| Candidate code commit | pending commit |
-| Evidence commit / pushed branch head | pending commit and push |
+| Candidate code commits | `e7e300a227973a815c6213f1a4a36996fa3f96f7`, `9da71b0d8adae70a812a00704eb6544911d53e1b` (pushed) |
+| Evidence commits | `dd0ee54eb0d6b4fed714b73a065f0505b18ff0e1`, `03a421438af09154b567d0c49d7c50c2aacc0b30` (pushed) |
 | M2 user acceptance owner and date | pending user review |
 | M1 user acceptance | remains separately pending |
 
