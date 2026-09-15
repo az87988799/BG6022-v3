@@ -98,3 +98,40 @@ The local configuration used ORCA `E:\orca\orca.exe`, Program Version 6.1.1,
 
 The initial geometry SHA-256 for both successful runs and their attempt copies
 is `c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2`.
+
+## 2026-09-15 M1 acceptance-review follow-up
+
+Review `BG6022_v3_M1_Acceptance_Review_ba840e1.md` identified two regressions.
+Code commit `8d1eb24ed706e38007007bec319d2507bb803b33` fixes both: q/M values
+are now extracted only from a value expression bound to that field, and an
+explicit unchanged statement cannot inherit an iteration-count number. Query
+history now retains six distinct Runs (active plus up to five earlier Runs),
+allocates references only for valid declared properties, prioritizes requested
+Plan results, and keeps Step identity. The candidate catalog is bounded at 24
+facts; the existing three-target per-query limit remains separate.
+
+Offline validation on this commit: `115 passed, 3 live tests deselected`; Ruff
+lint/format, `compileall`, `git diff --check`, and `uv build` passed. New
+regressions include a full Agent parameter-continuation path whose actual
+RDKit-generated water geometry retains charge 0/multiplicity 1 in the Request,
+Opt Step and confirmation preview after changing only `geom_maxiter`; two
+complete three-step stored Runs for current/history/comparison queries; bounded
+distinct-Run retention; non-substitution across tasks; and distinct Opt/SP
+Step subjects.
+
+Live subchecks were run separately from L1/L2:
+
+| Check | Evidence | Status |
+|---|---|---|
+| PubChem | `tests/live/test_m1_live.py -m live_pubchem`; real water CID 962 and ethanol CID 702 | passed |
+| ORCA SP | Run `run_dd5c92654c9b4db89b64af5d2846bc78`; `-76.417246084177 Eh`; ORCA 6.1.1 | passed |
+| ORCA Opt | Run `run_855cc60f6a8a4b538473be3db704e4f5`; `-76.418938721015 Eh`; convergence and geometry checks | passed |
+| Budget and cleanup | Both Runs record 4 cores / 1024 MB / MaxCore 192 / concurrency 1, matching `%pal nprocs 4` and `%maxcore 192`; both have `process_tree_empty=true` | passed |
+| ORCA probe | `doctor --probe-orca`; version 6.1.1, expected missing-input exit 2, clean process tree | passed |
+| Natural-language L1/L2 | No DeepSeek request was made; `DEEPSEEK_API_KEY` is unset in this environment | pending |
+
+The ORCA runs above used the direct Tool command in the live test, not the
+DeepSeek Agent path. They do not satisfy L1 or L2. Full live evidence details
+and raw paths are recorded in
+[`docs/evidence/M1-agent-evidence.md`](evidence/M1-agent-evidence.md). M1
+remains pending the real-LLM L1/L2 sequence and the user's explicit acceptance.

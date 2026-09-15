@@ -95,3 +95,89 @@ Environment check on 2026-09-15: the effective local config names
 path is configured, but no LLM, PubChem, or ORCA acceptance sequence was
 attempted for this follow-up. No L1/L2 live evidence is added here; M1 remains
 pending user review and acceptance.
+
+## 2026-09-15 acceptance-review repair and live subchecks
+
+The review `BG6022_v3_M1_Acceptance_Review_ba840e1.md` reproduced two defects:
+
+- F1: a q/M label could absorb an unrelated `geom_maxiter` value, including in
+  a real Agent continuation and its pending confirmation preview.
+- F2: per-Step summaries and a three-subject cap could remove the earlier Run
+  from a query catalog built for a normal three-Step molecule/geometry/Opt task.
+
+Implementation commit: `8d1eb24ed706e38007007bec319d2507bb803b33`.
+
+F1 now accepts only a locally bound q/M assignment or correction target. An
+explicit unchanged statement adds no q/M patch, while unbound/ambiguous and
+invalid numeric values continue to require clarification. Regression coverage
+uses the actual Agent path with fake intake/Plan responses and real RDKit SMILES
+resolution/geometry generation: initial `charge=0, multiplicity=1`, followed by
+only `geom_maxiter=2`, leaves those electronic-state values unchanged in the
+saved Request, Opt Step, and confirmation preview. No ORCA run is started by
+that test.
+
+F2 now retains the active Run and up to five earlier distinct Runs, refreshing
+one summary per Run as its Steps complete. Query catalog capacity is 24 facts,
+independent of the three-target model selection bound. It prioritizes the
+Plan-requested final results, assigns a subject reference only after verifying
+a declared property and valid value/artifact, and continues to key facts by
+Run plus Step. Regressions use two complete three-Step stored Runs and verify
+current energy, historical energy, two-task comparison, missing-property
+non-substitution, distinct Opt/SP energy subjects, and bounded recent-Run
+retention. Existing stale-fingerprint and cross-session rejection tests still
+pass.
+
+Validation on the implementation commit:
+
+```text
+pytest -m "not live_orca and not live_llm and not live_pubchem" -q
+115 passed, 3 deselected
+ruff check src tests: passed
+ruff format --check src tests: passed
+compileall src start_chat.py: passed
+uv build: passed
+```
+
+### Separate live subchecks (not L1/L2)
+
+Environment: Windows 10 build 26200, Python 3.11.4, RDKit 2026.03.6, ORCA
+6.1.1 at `E:\orca\orca.exe`. The effective `config.toml` resource snapshot
+was 4 cores, 1024 MB total memory, `%maxcore 192`, one concurrent job,
+1200-second attempt timeout, and 3600-second Run active-time timeout. Both
+saved Run snapshots and generated inputs agree: `%pal` / `nprocs 4` and
+`%maxcore 192`. The shared initial water geometry SHA-256 was
+`2f3fc0920badedd03f4b70848df37f5159646ccfcd5f18d0a4e3c87d68ac899a`.
+
+- PubChem: `pytest tests/live/test_m1_live.py -m live_pubchem
+  --run-live-pubchem --enable-socket --orca-config config.toml -q -s` passed
+  (`1 passed, 1 deselected`), verifying live water CID 962 and ethanol CID 702.
+- Direct ORCA subcheck:
+  `pytest tests/live/test_real_orca.py --run-live-orca --orca-config config.toml
+  -q -s` passed (`1 passed`). This test executes direct `single_point` and
+  `optimize_geometry` Tools; it does not call the Agent/DeepSeek path.
+- SP Run `run_dd5c92654c9b4db89b64af5d2846bc78` succeeded with
+  `sp_electronic_energy = -76.417246084177 Eh`. Checks included SCF convergence,
+  normal termination, zero exit code, matching input hashes, selected finite
+  energy, `process_tree_empty=true`, and confirmed cleanup.
+- Opt Run `run_855cc60f6a8a4b538473be3db704e4f5` succeeded with
+  `opt_final_electronic_energy = -76.418938721015 Eh`. Checks additionally
+  included optimization convergence, output geometry present, stdout geometry
+  present, and geometry consistency; `process_tree_empty=true`.
+- Both Runs and raw attempt files are retained under
+  `E:\BG6022-v3-data\runs\<run_id>\`. Inspect `run.json`,
+  `compute\attempt-01\result.json`, `input.inp`, `geometry.xyz`, `stdout.out`,
+  and `stderr.txt` for each Run. The Run IDs above identify the exact folders.
+- `python -m bg6022 --config config.toml doctor --probe-orca` returned
+  `ok=true`, version `6.1.1`, and the expected missing-input exit code 2; the
+  probe process tree was empty and confirmed stopped.
+
+### Remaining required live acceptance
+
+`DEEPSEEK_API_KEY` was checked by presence only and is unset; no secret value was
+read or transmitted. Consequently no real LLM call was possible. Required L1
+(real LLM Plan, real structure, confirmation and Agent-driven ORCA result) and
+L2 (actual `geom_maxiter=1` failure, real diagnostic/restart candidate, real
+LLM-selected allowed repair, same-Run successful retry) remain unrun. The
+controlled historical failure in the M0 records and the direct ORCA runs above
+do not substitute for L2. SCF iteration-increase repair also remains without
+live validation. M1 is not marked complete; user acceptance remains required.
