@@ -139,7 +139,7 @@ def render_result(
     if result.status != "succeeded":
         return _render_failed_result(result)
 
-    facts = _facts_from_result(run, result, registry, structure=structure)
+    facts = facts_from_result(run, result, registry, structure=structure)
     if not facts:
         return "计算已完成，但没有可安全呈现的已验证结果。"
     return render_selected_facts(facts)
@@ -161,25 +161,24 @@ def render_selected_facts(facts: Sequence[Mapping[str, Any]] | Mapping[str, Any]
         return "当前可查询范围内没有找到所问结果。这不表示该计算从未进行过。"
 
     lines: list[str] = []
-    task_keys: list[str] = []
+    groups: dict[str, list[Mapping[str, Any]]] = {}
     for fact in values:
         task_key = str(fact.get("task_key") or _system_label(fact, None))
-        if task_key not in task_keys:
-            task_keys.append(task_key)
+        groups.setdefault(task_key, []).append(fact)
         if fact.get("run_status") not in {None, "succeeded"}:
             notice = "该任务尚未全部完成；以下仅是其中已验证步骤的结果。"
             if notice not in lines:
                 lines.append(notice)
 
-    if len(task_keys) == 1:
-        context = _fact_context(values[0])
+    for group in groups.values():
+        context = _fact_context(group[0], include_task_identity=len(groups) > 1)
         if context:
-            lines.append(context)
-    for fact in values:
-        lines.append(_fact_sentence(fact))
-        caveat = _string_or_none(_mapping(fact.get("metadata")).get("caveat"))
-        if caveat:
-            lines.append(f"说明：{caveat}。")
+            lines.append(f"{context}：")
+        for fact in group:
+            lines.append(_fact_sentence(fact))
+            caveat = _string_or_none(_mapping(fact.get("metadata")).get("caveat"))
+            if caveat:
+                lines.append(f"说明：{caveat}。")
     return "\n".join(lines)
 
 
@@ -189,6 +188,9 @@ def render_run(
     registry: ToolRegistry | None = None,
     *,
     structure: Mapping[str, Any] | None = None,
+    partial_facts: Sequence[Mapping[str, Any]] = (),
+    repairs: Sequence[Mapping[str, Any]] = (),
+    incomplete_targets: Sequence[str] = (),
 ) -> str:
     if run.status == "waiting":
         if run.waiting_for == "confirmation":
@@ -199,19 +201,36 @@ def render_run(
     if run.status == "succeeded" and result is not None:
         return render_result(run, result, registry, structure=structure)
     if run.status == "failed":
-        reason = run.pending_data.get("reason") if run.pending_data else None
-        if not reason and result is not None and result.diagnostics:
-            reason = result.diagnostics.get("reason")
-        category = result.diagnostics.get("category") if result is not None else None
-        category_text = f"，{category}" if category else ""
-        suffix = f"原因：{reason}。" if reason else ""
-        if result is not None and result.status == "succeeded":
-            fact_text = render_result(run, result, registry, structure=structure)
-            return (
-                f"任务未全部完成（failed before all requested results）。{suffix}\n"
-                f"最后一个已验证步骤的结果仍可参考，但不能宣告整个任务成功。\n{fact_text}"
-            )
-        return f"任务已失败（failed{category_text}）。{suffix}".rstrip()
+        diagnostics = result.diagnostics if result is not None else {}
+        budget_reason = _budget_stop_reason(run.pending_data)
+        reason = (
+            (run.pending_data.get("reason") if run.pending_data else None)
+            or budget_reason
+            or (run.pending_data.get("repair_rejected") if run.pending_data else None)
+            or diagnostics.get("reason")
+        )
+        category = (
+            (run.pending_data.get("category") if run.pending_data else None)
+            or ("budget_exhausted" if budget_reason else None)
+            or diagnostics.get("category")
+        )
+        label = f"（{category}）" if category else ""
+        lines = [f"任务未全部完成{label}。"]
+        if incomplete_targets:
+            lines.append(f"尚未完成：{'、'.join(incomplete_targets)}。")
+        if repairs:
+            repair_text = [
+                text for item in repairs if (text := _repair_record_sentence(item)) is not None
+            ]
+            if repair_text:
+                lines.append(f"已尝试的修复：{'；'.join(repair_text)}。")
+        if reason:
+            lines.append(f"停止原因：{reason}。")
+        facts = list(partial_facts)
+        if facts:
+            lines.append("以下是仍然有效的已完成结果；它们不代表整个任务成功：")
+            lines.append(render_selected_facts(facts))
+        return "\n".join(lines)
     if run.status in {"cancelled", "interrupted"}:
         return f"任务已{_status_label(run.status)}（{run.status}）。未宣告整体科学成功。"
     if result is not None:
@@ -225,17 +244,36 @@ def render_already_finished(
     registry: ToolRegistry | None = None,
     *,
     structure: Mapping[str, Any] | None = None,
+    partial_facts: Sequence[Mapping[str, Any]] = (),
+    repairs: Sequence[Mapping[str, Any]] = (),
+    incomplete_targets: Sequence[str] = (),
 ) -> str:
     """Explain that confirmation is idempotent and show the existing result."""
 
     if result is None:
+        if run.status == "failed":
+            return "该计算已经结束，无需再次确认。\n" + render_run(
+                run,
+                result,
+                registry,
+                structure=structure,
+                partial_facts=partial_facts,
+                repairs=repairs,
+                incomplete_targets=incomplete_targets,
+            )
         return "该计算已经结束，无需再次确认。当前没有可呈现的结果。"
     if result.status == "succeeded" and run.status == "succeeded":
         return "该计算已经完成，无需再次确认。\n" + render_result(
             run, result, registry, structure=structure
         )
     return "该计算已经结束，无需再次确认。\n" + render_run(
-        run, result, registry, structure=structure
+        run,
+        result,
+        registry,
+        structure=structure,
+        partial_facts=partial_facts,
+        repairs=repairs,
+        incomplete_targets=incomplete_targets,
     )
 
 
@@ -285,9 +323,9 @@ def context_answer(
         return render_selected_facts(facts)
     if run is None or result is None:
         return "当前可查询范围内没有找到所问结果。这不表示该计算从未进行过。"
-    candidates = _facts_from_result(run, result, registry)
-    selected = [fact for fact in candidates if _question_matches_fact(question, fact)]
-    if not selected:
+    candidates = facts_from_result(run, result, registry)
+    selected, covered = select_facts_for_question(question, candidates)
+    if not covered:
         return "本次任务尚未得到所问性质；已保存的其他性质不能替代它。"
     return render_selected_facts(selected)
 
@@ -298,7 +336,26 @@ def fact_matches_question(question: str, fact: Mapping[str, Any]) -> bool:
     return _question_matches_fact(question, fact)
 
 
-def _facts_from_result(
+def select_facts_for_question(
+    question: str, facts: Sequence[Mapping[str, Any]]
+) -> tuple[list[Mapping[str, Any]], bool]:
+    """Select relevant facts and check coverage across the whole selected set."""
+
+    requested = _property_terms(question)
+    if not requested:
+        return list(facts), True
+    selected: list[Mapping[str, Any]] = []
+    covered: set[str] = set()
+    for fact in facts:
+        terms = _fact_property_terms(fact)
+        matched = terms & requested
+        if matched:
+            selected.append(fact)
+            covered.update(matched)
+    return selected, requested <= covered
+
+
+def facts_from_result(
     run: Run,
     result: Result,
     registry: ToolRegistry | None,
@@ -367,6 +424,8 @@ def _fact(
     params = _mapping(step.parameters) if step is not None else {}
     return {
         "task_key": f"{run.id}:{result.step_id}",
+        "task_description": run.request.description,
+        "task_created_at": run.created_at,
         "system": _system_label(structure, run.request.description)
         if structure is not None
         else None,
@@ -393,15 +452,33 @@ def _metadata(tool: Any, name: str) -> dict[str, str]:
     return metadata
 
 
-def _fact_context(fact: Mapping[str, Any]) -> str:
+def _fact_context(fact: Mapping[str, Any], *, include_task_identity: bool = False) -> str:
     system = _string_or_none(fact.get("system"))
     tool = fact.get("step_tool")
     operation = "优化" if tool == "optimize_geometry" else "单点" if tool == "single_point" else ""
     method = _method_label(fact.get("method_profile"))
-    if system and operation and method != "未指定方法":
-        return f"{system}{operation}结果（{method}）"
+    environment = _environment_label(fact.get("environment"))
+    details = [
+        value
+        for value in (
+            method if method != "未指定方法" else None,
+            environment if environment != "未指定环境" else None,
+        )
+        if value
+    ]
+    if include_task_identity:
+        description = _string_or_none(fact.get("task_description"))
+        if description:
+            compact = " ".join(description.split())
+            if len(compact) > 100:
+                compact = compact[:97].rstrip() + "..."
+            details.append(f"任务：{compact}")
+        created_at = _string_or_none(fact.get("task_created_at"))
+        if created_at:
+            details.append(f"创建于 {created_at[:16]}")
+    qualifier = f"（{'；'.join(details)}）" if details else ""
     if system and operation:
-        return f"{system}{operation}结果"
+        return f"{system}{operation}结果{qualifier}"
     if system:
         return f"{system}的已验证结果"
     return "已验证结果"
@@ -440,6 +517,35 @@ def _fact_sentence(fact: Mapping[str, Any]) -> str:
     return f"{label}为 **{value}{unit}**。"
 
 
+def _repair_record_sentence(record: Mapping[str, Any]) -> str | None:
+    action_labels = {
+        "restart_optimization": "从已校验的候选结构重启几何优化",
+        "increase_scf_maxiter": "提高 SCF 迭代上限",
+    }
+    action = record.get("action")
+    label = action_labels.get(str(action))
+    if label is None:
+        return None
+    patch = _mapping(record.get("parameter_patch"))
+    changes = [
+        f"{_PARAMETER_LABELS.get(str(name), str(name))}调整为 {_format_scalar(value)}"
+        for name, value in patch.items()
+    ]
+    attempt = record.get("failed_attempt")
+    suffix = f"（第 {_format_scalar(attempt)} 次失败后）" if attempt is not None else ""
+    detail = f"：{'、'.join(changes)}" if changes else ""
+    return f"{label}{detail}{suffix}"
+
+
+def _budget_stop_reason(pending_data: Mapping[str, Any]) -> str | None:
+    labels = {
+        "max_attempts_per_science_step": "该计算步骤已达到最大尝试次数",
+        "max_extra_orca_executions": "已达到额外 ORCA 执行预算",
+        "max_plan_revisions": "已达到最大计划修订次数",
+    }
+    return labels.get(str(pending_data.get("budget_exhausted")))
+
+
 def _display_value(value: Any, expected_type: str | None) -> tuple[str, str]:
     if isinstance(value, Mapping) and "value" in value:
         token = value.get("token")
@@ -464,23 +570,40 @@ def _render_failed_result(result: Result) -> str:
 
 
 def _question_matches_fact(question: str, fact: Mapping[str, Any]) -> bool:
+    requested = _property_terms(question)
+    return not requested or requested <= _fact_property_terms(fact)
+
+
+def _fact_property_terms(fact: Mapping[str, Any]) -> set[str]:
     metadata = _mapping(fact.get("metadata"))
-    haystack = " ".join(
-        str(value).casefold()
-        for value in (fact.get("name"), metadata.get("label"), metadata.get("description"))
-        if value
+    identity = " ".join(
+        str(value).casefold() for value in (fact.get("name"), metadata.get("label")) if value
     )
-    question_terms = _property_terms(question)
-    if not question_terms:
-        return True
-    fact_terms = _property_terms(haystack)
-    if "zero_point" in question_terms:
-        return "zero_point" in fact_terms and "不含零点" not in haystack
-    if "free_energy" in question_terms:
-        return "free_energy" in fact_terms
-    if "frequency" in question_terms:
-        return "frequency" in fact_terms
-    return question_terms.issubset(fact_terms)
+    description = str(metadata.get("description") or "").casefold()
+    terms = _property_terms(identity)
+    description_terms = _property_terms(description)
+    description_terms.discard("geometry")
+    terms.update(description_terms)
+    if fact.get("kind") == "port" and fact.get("expected_type") == "molecular_geometry":
+        terms.add("geometry")
+    else:
+        terms.discard("geometry")
+    if "zero_point" in terms and any(
+        phrase in f"{identity} {description}"
+        for phrase in (
+            "不含零点",
+            "不包含零点",
+            "does not include zero-point",
+            "not include zero-point",
+        )
+    ):
+        terms.discard("zero_point")
+    if "free_energy" in terms and any(
+        phrase in f"{identity} {description}"
+        for phrase in ("不含自由能", "不包含自由能", "not free energy", "without free energy")
+    ):
+        terms.discard("free_energy")
+    return terms
 
 
 def _property_terms(text: str) -> set[str]:
@@ -494,7 +617,8 @@ def _property_terms(text: str) -> set[str]:
         terms.add("free_energy")
     if any(token in value for token in ("频率", "振动频率", "frequency", "frequencies")):
         terms.add("frequency")
-    if any(token in value for token in ("几何", "结构", "geometry", "structure")):
+    geometry_text = value.replace("电子结构", "")
+    if any(token in geometry_text for token in ("几何", "结构", "geometry", "structure")):
         terms.add("geometry")
     if any(token in value for token in ("原子数", "atom count", "atom_count", "number of atoms")):
         terms.add("atom_count")
@@ -660,7 +784,9 @@ __all__ = [
     "render_already_finished",
     "render_clarification",
     "render_confirmation",
+    "facts_from_result",
     "render_result",
     "render_run",
     "render_selected_facts",
+    "select_facts_for_question",
 ]

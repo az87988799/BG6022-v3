@@ -12,17 +12,18 @@ from threading import Event
 from typing import Any
 
 from .answer import (
-    fact_matches_question,
+    facts_from_result,
     render_already_finished,
     render_clarification,
     render_confirmation,
     render_result,
     render_run,
     render_selected_facts,
+    select_facts_for_question,
 )
 from .config import AppConfig, validate_execution_environment
 from .llm import LlmClient, LlmError
-from .models import InputReference, Plan, Request, Result, Run, Step
+from .models import InputReference, Plan, Request, Result, Run, Step, Tool
 from .orca.profiles import get_profile, resolve_parameters
 from .orca.repair_rules import applicable_repairs, applicable_scf_repair
 from .planner import (
@@ -244,18 +245,38 @@ class Agent:
 
             request = request_from_intake(text, intake, request_id=new_id("request"))
             self._ensure_request_active(request_token, request_cancel)
-            proposal = plan_message(
-                self.llm,
-                request,
-                registry=self.registry,
-                context={
-                    "recent_messages": self._session.get("recent_messages", []),
-                    "recent_results": self._session.get("recent_results", []),
-                },
-                cancel=request_cancel,
-            )
-            self._ensure_request_active(request_token, request_cancel)
-            plan = proposal_to_plan(request, proposal, self.registry, plan_id=new_id("plan"))
+            plan = None
+            validation_feedback = None
+            max_revisions = int(self.config.repair.max_plan_revisions)
+            for revision in range(max_revisions + 1):
+                proposal = plan_message(
+                    self.llm,
+                    request,
+                    registry=self.registry,
+                    context={
+                        "recent_messages": self._session.get("recent_messages", []),
+                        "recent_results": self._session.get("recent_results", []),
+                    },
+                    validation_feedback=validation_feedback,
+                    cancel=request_cancel,
+                )
+                self._ensure_request_active(request_token, request_cancel)
+                try:
+                    plan = proposal_to_plan(
+                        request, proposal, self.registry, plan_id=new_id("plan")
+                    )
+                    break
+                except ValueError as error:
+                    if revision >= max_revisions:
+                        raise ValueError(
+                            f"Plan failed local validation after {revision} correction(s): {error}"
+                        ) from error
+                    validation_feedback = (
+                        "The previous candidate Plan was rejected by local validation. "
+                        f"Correct these issues without changing the Request: {error}"
+                    )
+            if plan is None:
+                raise ValueError("Planner did not produce a locally valid Plan")
             self._ensure_request_active(request_token, request_cancel)
             run = self._create_chat_run(request, plan)
             self._session["active_run_id"] = run.id
@@ -316,11 +337,17 @@ class Agent:
                 step = _next_ready_step(run)
                 if step is None:
                     run.status = "failed"
+                    run.pending_data = {
+                        "category": "plan_incomplete",
+                        "reason": (
+                            "No executable Step remains before requested results were satisfied"
+                        ),
+                    }
                     run.finish_active_interval()
                     save_run(self.config.data_root_path, run)
                     return last_result
                 tool = self.registry.get(step.tool)
-                if tool.requires_compute_permission:
+                if tool.parameter_preparation == "orca_electronic_state":
                     prepared_step = self._prepare_orca_step(run, step)
                     if prepared_step is None:
                         run.finish_active_interval()
@@ -344,7 +371,7 @@ class Agent:
                         run.artifact_index,
                         snapshot=run.accepted_snapshot,
                     )
-                if not self._reserve_attempt(run, step):
+                if not self._reserve_attempt(run, step, tool):
                     run.status = "failed"
                     run.finish_active_interval()
                     save_run(self.config.data_root_path, run)
@@ -353,8 +380,13 @@ class Agent:
                 save_run(self.config.data_root_path, run)
                 try:
                     result = tool.execute(step, run, cancel=cancel_event)
-                except (PermissionError, ValueError, OSError):
+                except (PermissionError, ValueError, OSError) as error:
                     run.status = "failed"
+                    run.pending_data = {
+                        "category": "execution_boundary",
+                        "reason": str(error),
+                        "step_id": step.id,
+                    }
                     run.finish_active_interval()
                     save_run(self.config.data_root_path, run)
                     raise
@@ -422,6 +454,7 @@ class Agent:
                     result,
                     self.registry,
                     structure=self._result_structure(current, result),
+                    **self._failure_render_context(current),
                 ),
                 run=current,
                 result=result,
@@ -446,10 +479,7 @@ class Agent:
             current.status = "failed"
             current.pending_data = {"category": "execution_boundary", "reason": str(error)}
             save_run(self.config.data_root_path, current)
-            return AgentResponse(
-                f"计算在 ORCA 执行边界被拒绝（execution boundary）：{error}",
-                run=current,
-            )
+            return self._response_for_run(current, self._latest_result(current))
         response = self._response_for_run(current, result)
         self._append_message("assistant", response.text)
         return response
@@ -509,6 +539,7 @@ class Agent:
                 result,
                 self.registry,
                 structure=self._result_structure(current, result),
+                **self._failure_render_context(current),
             ),
             run=current,
             result=result,
@@ -647,17 +678,19 @@ class Agent:
             science_steps = [
                 item
                 for item in run.plan.steps
-                if item.tool in {"single_point", "optimize_geometry"}
+                if self.registry.get(item.tool).parameter_preparation == "orca_electronic_state"
             ]
             step = science_steps[0] if len(science_steps) == 1 else None
         if step is None:
             return AgentResponse("等待中的任务没有可编辑的计算步骤。", run=run)
+        tool = self.registry.get(step.tool)
+        if tool.parameter_preparation != "orca_electronic_state":
+            return AgentResponse("该 Tool 不支持修改 ORCA 电荷或自旋参数。", run=run)
         merged = dict(step.parameters)
         merged.update(parameters)
         try:
-            tool = self.registry.get(step.tool)
             validated_partial = tool.validate_parameters(merged, allow_deferred=True)
-            if step.tool in {"single_point", "optimize_geometry"}:
+            if tool.execution_budget == "orca":
                 method_profile = validated_partial.get("method_profile")
                 environment = validated_partial.get("environment")
                 if method_profile is not None and environment is not None:
@@ -689,8 +722,9 @@ class Agent:
             )
             if not resolution.missing_fields:
                 effective = tool.validate_parameters(resolution.effective_parameters)
-                _validate_orca_profile(effective)
-                self._validate_candidate_electronic_state(run, replacement, effective)
+                if tool.execution_budget == "orca":
+                    _validate_orca_profile(effective)
+                    self._validate_candidate_electronic_state(run, replacement, effective)
             candidate_plan = _replace_step(run.plan, replacement)
             candidate_plan = Plan.model_validate(
                 {
@@ -855,8 +889,8 @@ class Agent:
         save_run(self.config.data_root_path, run)
         return True
 
-    def _reserve_attempt(self, run: Run, step: Step) -> bool:
-        if step.tool not in {"single_point", "optimize_geometry"}:
+    def _reserve_attempt(self, run: Run, step: Step, tool: Tool) -> bool:
+        if tool.execution_budget != "orca":
             return True
         origin = run.origin_step_map.get(step.id, step.origin_step_id or step.id)
         known_origin = step.id in run.origin_step_map or origin in run.origin_step_map.values()
@@ -905,7 +939,8 @@ class Agent:
                     target.model_dump(mode="json") for target in run.request.requested_results
                 ],
             },
-            "operation": "Opt" if step.tool == "optimize_geometry" else "SP",
+            "operation": run.request.operation
+            or {"optimize_geometry": "Opt", "single_point": "SP"}.get(step.tool, "Tool"),
             "step_id": step.id,
             "tool": step.tool,
             "parameters": dict(step.parameters),
@@ -1107,52 +1142,41 @@ class Agent:
         iteration_increase_allowed = _iteration_increase_allowed(run.request.description)
         scopes: dict[str, Any] = {}
         for step in run.plan.steps:
-            if step.tool == "optimize_geometry":
-                actions: dict[str, Any] = {}
+            capabilities = set(self.registry.get(step.tool).repair_capabilities)
+            mutable_parameters: list[str] = []
+            immutable_parameters = ["method_profile", "environment", "charge", "multiplicity"]
+            actions: dict[str, Any] = {}
+            if "restart_optimization" in capabilities:
+                mutable_parameters.append("geom_maxiter")
+                immutable_parameters.append("scf_maxiter")
                 if iteration_increase_allowed:
                     actions["restart_optimization"] = {
                         "fields": ["geom_maxiter"],
                         "maximum": 1000,
                         "maximum_is_program_cap": True,
                     }
-                scopes[step.id] = {
-                    "origin_step_id": run.origin_step_map.get(
-                        step.id, step.origin_step_id or step.id
-                    ),
-                    "mutable_parameters": ["geom_maxiter"],
-                    "immutable_parameters": [
-                        "method_profile",
-                        "environment",
-                        "charge",
-                        "multiplicity",
-                        "scf_maxiter",
-                    ],
-                    "geometry_rule": "only a program-validated restart_candidate from this Step",
-                    "actions": actions,
-                }
-            elif step.tool == "single_point":
-                actions = {}
+            if "increase_scf_maxiter" in capabilities:
+                mutable_parameters.append("scf_maxiter")
+                immutable_parameters.append("geom_maxiter")
                 if iteration_increase_allowed:
                     actions["increase_scf_maxiter"] = {
                         "fields": ["scf_maxiter"],
                         "maximum": 1000,
                         "maximum_is_program_cap": True,
                     }
-                scopes[step.id] = {
-                    "origin_step_id": run.origin_step_map.get(
-                        step.id, step.origin_step_id or step.id
-                    ),
-                    "mutable_parameters": ["scf_maxiter"],
-                    "immutable_parameters": [
-                        "method_profile",
-                        "environment",
-                        "charge",
-                        "multiplicity",
-                        "geom_maxiter",
-                    ],
-                    "geometry_rule": "retain the accepted geometry reference",
-                    "actions": actions,
-                }
+            if not capabilities.intersection({"restart_optimization", "increase_scf_maxiter"}):
+                continue
+            scopes[step.id] = {
+                "origin_step_id": run.origin_step_map.get(step.id, step.origin_step_id or step.id),
+                "mutable_parameters": mutable_parameters,
+                "immutable_parameters": immutable_parameters,
+                "geometry_rule": (
+                    "only a program-validated restart_candidate from this Step"
+                    if "restart_optimization" in capabilities
+                    else "retain the accepted geometry reference"
+                ),
+                "actions": actions,
+            }
         return {
             "version": 1,
             "iteration_increase_allowed": iteration_increase_allowed,
@@ -1258,7 +1282,13 @@ class Agent:
         structure = self._result_structure(run, result)
         if run.status in {"succeeded", "failed", "cancelled", "interrupted"}:
             return AgentResponse(
-                render_run(run, result, self.registry, structure=structure),
+                render_run(
+                    run,
+                    result,
+                    self.registry,
+                    structure=structure,
+                    **self._failure_render_context(run),
+                ),
                 run=run,
                 result=result,
             )
@@ -1536,11 +1566,14 @@ class Agent:
         metadata.setdefault("description", tool.description)
         return {
             "task_key": f"{run.id}:{step.id}",
+            "task_description": run.request.description,
+            "task_created_at": run.created_at,
             "system": _query_system_label(structure),
             "_run": run,
             "_result": result,
             "run_status": run.status,
             "result_status": result.status,
+            "step_id": step.id,
             "step_tool": step.tool,
             "method_profile": step.parameters.get("method_profile"),
             "environment": step.parameters.get("environment"),
@@ -1550,6 +1583,124 @@ class Agent:
             "expected_type": expected_type,
             "metadata": metadata,
         }
+
+    def _failure_render_context(self, run: Run) -> dict[str, Any]:
+        if run.status != "failed":
+            return {}
+        facts = self._current_run_facts(run)
+        return {
+            "partial_facts": facts,
+            "repairs": run.repair_records,
+            "incomplete_targets": self._incomplete_target_labels(run, facts),
+        }
+
+    def _current_run_facts(self, run: Run) -> list[dict[str, Any]]:
+        """Return only outputs still bound to current, verified successful attempts."""
+
+        facts: list[dict[str, Any]] = []
+        for step in run.plan.steps:
+            relative = run.current_results.get(step.id)
+            if not isinstance(relative, str):
+                continue
+            result = _load_bound_result(self.config.data_root_path, run, relative)
+            if result is None or not self._query_result_is_valid(run, step, result, relative):
+                continue
+            try:
+                tool = self.registry.get(step.tool)
+            except ValueError:
+                continue
+            structure = self._query_structure(run, step, result)
+            values = {
+                name: value
+                for name, expected_type in tool.results.items()
+                if name not in tool.output_ports
+                and (value := result.values.get(name)) is not None
+                and _query_value_is_compatible(value, expected_type)
+            }
+            ports = {
+                name: artifact.id
+                for name, expected_type in tool.output_ports.items()
+                if (artifact := self._query_port_artifact(run, step, result, name, expected_type))
+                is not None
+            }
+            safe_result = result.model_copy(update={"values": values, "output_ports": ports})
+            facts.extend(facts_from_result(run, safe_result, self.registry, structure=structure))
+        return facts
+
+    def _incomplete_target_labels(
+        self, run: Run, facts: list[dict[str, Any]] | None = None
+    ) -> list[str]:
+        facts = self._current_run_facts(run) if facts is None else facts
+        verified = {(fact.get("step_id"), fact.get("kind"), fact.get("name")) for fact in facts}
+        labels: list[str] = []
+        for target in run.plan.requested_results:
+            kind = "port" if target.port is not None else "field"
+            name = target.port or target.field
+            if name is None:
+                continue
+            if name == "energy":
+                name = {
+                    "SP": "sp_electronic_energy",
+                    "Opt": "opt_final_electronic_energy",
+                }.get(run.request.operation, name)
+            elif name == "geometry" and run.request.operation == "Opt":
+                kind, name = "port", "optimized_geometry"
+            else:
+                aliases = {
+                    "sp_energy": ("field", "sp_electronic_energy"),
+                    "opt_energy": ("field", "opt_final_electronic_energy"),
+                    "optimized_geometry": ("port", "optimized_geometry"),
+                }
+                kind, name = aliases.get(name, (kind, name))
+
+            producers = [
+                step
+                for step in run.plan.steps
+                if (
+                    name in self.registry.get(step.tool).output_ports
+                    if kind == "port"
+                    else name in self.registry.get(step.tool).results
+                    and name not in self.registry.get(step.tool).output_ports
+                )
+            ]
+            candidates = [
+                step for step in producers if target.step_id is None or target.step_id == step.id
+            ]
+            complete = any((step.id, kind, name) in verified for step in candidates)
+            if complete:
+                continue
+            label = {
+                "sp_electronic_energy": "单点电子能",
+                "opt_final_electronic_energy": "优化后的电子能",
+                "optimized_geometry": "优化后的几何",
+                "geometry": "初始几何",
+            }.get(name, name.replace("_", " "))
+            label_step = candidates[0] if candidates else producers[0] if producers else None
+            if label_step is not None:
+                label = (
+                    self.registry.get(label_step.tool)
+                    .result_metadata.get(name, {})
+                    .get("label", label)
+                )
+            if label not in labels:
+                labels.append(label)
+
+        if run.request.operation is not None:
+            expected_tool = {"SP": "single_point", "Opt": "optimize_geometry"}[
+                run.request.operation
+            ]
+            expected_steps = [step for step in run.plan.steps if step.tool == expected_tool]
+            operation_complete = bool(expected_steps) and all(
+                (relative := run.current_results.get(step.id)) is not None
+                and (result := _load_bound_result(self.config.data_root_path, run, relative))
+                is not None
+                and self._query_result_is_valid(run, step, result, relative)
+                for step in expected_steps
+            )
+            if not operation_complete:
+                operation_label = {"SP": "单点计算", "Opt": "几何优化"}[run.request.operation]
+                labels.insert(0, operation_label)
+        return list(dict.fromkeys(labels))
 
     def _query_result_is_valid(self, run: Run, step: Step, result: Result, relative: str) -> bool:
         if (
@@ -1730,7 +1881,7 @@ class Agent:
             response = AgentResponse(text)
             self._append_message("assistant", text)
             return response
-        facts: list[dict[str, Any]] = []
+        selected_facts: list[dict[str, Any]] = []
         for reference in selection.refs:
             fact = self._load_query_fact(reference)
             if fact is None:
@@ -1738,12 +1889,13 @@ class Agent:
                 response = AgentResponse(text)
                 self._append_message("assistant", text)
                 return response
-            if not fact_matches_question(question, fact):
-                text = "本次任务尚未得到所问性质；已保存的其他性质不能替代它。"
-                response = AgentResponse(text)
-                self._append_message("assistant", text)
-                return response
-            facts.append(fact)
+            selected_facts.append(fact)
+        facts, covered = select_facts_for_question(question, selected_facts)
+        if not covered:
+            text = "本次任务尚未得到所问性质；已保存的其他性质不能替代它。"
+            response = AgentResponse(text)
+            self._append_message("assistant", text)
+            return response
         text = render_selected_facts(facts)
         first = facts[0] if facts else {}
         run = first.get("_run")
@@ -1772,7 +1924,7 @@ def _normalize_explicit_plan(registry: ToolRegistry, plan: Plan) -> Plan:
         tool = registry.get(step.tool)
         if tool.requires_compute_permission:
             parameters = tool.validate_parameters(step.parameters)
-            if step.tool in {"single_point", "optimize_geometry"}:
+            if tool.execution_budget == "orca":
                 _validate_orca_profile(parameters)
             step = step.model_copy(update={"parameters": parameters})
         steps.append(step)
@@ -1862,6 +2014,26 @@ def _invalidate_current_results(run: Run, changed_step_id: str) -> None:
 
 
 def _requested_results_satisfied(data_root: str, run: Run, registry: ToolRegistry) -> bool:
+    if run.request.operation is not None:
+        required_tool = {
+            "SP": "single_point",
+            "Opt": "optimize_geometry",
+        }[run.request.operation]
+        required_steps = [step for step in run.plan.steps if step.tool == required_tool]
+        if not required_steps:
+            return False
+        for step in required_steps:
+            relative = run.current_results.get(step.id)
+            result = _load_bound_result(data_root, run, relative) if relative else None
+            if (
+                result is None
+                or result.run_id != run.id
+                or result.step_id != step.id
+                or result.attempt < 1
+                or result.status != "succeeded"
+                or result.step_fingerprint != _step_fingerprint(step)
+            ):
+                return False
     if run.plan.requested_results:
         for target in run.plan.requested_results:
             step_id = target.step_id

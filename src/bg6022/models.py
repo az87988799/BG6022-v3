@@ -242,6 +242,8 @@ class Tool(StrictModel):
     success_conditions: list[str] = Field(default_factory=list)
     repair_capabilities: list[str] = Field(default_factory=list)
     requires_compute_permission: bool = True
+    parameter_preparation: Literal["none", "orca_electronic_state"] = "none"
+    execution_budget: Literal["none", "orca"] = "none"
     deferred_parameters: list[str] = Field(default_factory=list)
     available: bool = True
     execute_function: ExecuteFunction | None = Field(default=None, exclude=True, repr=False)

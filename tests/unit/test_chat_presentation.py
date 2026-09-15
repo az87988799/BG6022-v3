@@ -8,6 +8,8 @@ from bg6022.answer import (
     render_clarification,
     render_confirmation,
     render_result,
+    render_selected_facts,
+    select_facts_for_question,
 )
 from bg6022.config import load_config
 from bg6022.models import InputReference, Plan, Request, Result, ResultTarget, Run, Step
@@ -151,3 +153,67 @@ def test_clarification_and_missing_property_do_not_dump_internal_data() -> None:
     assert "当前可查询范围内" in unavailable
     assert "从未进行过" in unavailable
     assert "{" not in clarification + unavailable
+
+
+def test_multiple_requested_properties_can_be_covered_by_multiple_facts() -> None:
+    energy = {
+        "name": "opt_final_electronic_energy",
+        "kind": "field",
+        "expected_type": "Eh",
+        "value": {"value": -76.4, "unit": "Eh", "token": "-76.4"},
+        "metadata": {
+            "label": "优化后的电子能",
+            "description": "几何优化末态的电子能，不含零点能和热校正",
+        },
+    }
+    geometry = {
+        "name": "optimized_geometry",
+        "kind": "port",
+        "expected_type": "molecular_geometry",
+        "value": {"artifact_id": "private-artifact-id"},
+        "metadata": {"label": "优化后的结构", "description": "已通过收敛检查"},
+    }
+
+    selected, covered = select_facts_for_question("给我优化后的能量和结构", [energy, geometry])
+    assert covered
+    assert selected == [energy, geometry]
+
+    selected, covered = select_facts_for_question("给我优化后的能量和结构", [energy])
+    assert not covered
+    assert selected == [energy]
+
+
+def test_multi_task_result_context_identifies_each_request() -> None:
+    common = {
+        "system": "水分子（H₂O）",
+        "step_tool": "optimize_geometry",
+        "method_profile": "r2scan3c",
+        "environment": "gas",
+        "kind": "field",
+        "expected_type": "Eh",
+        "name": "opt_final_electronic_energy",
+        "value": {"value": -76.4, "unit": "Eh", "token": "-76.4"},
+        "metadata": {"label": "优化后的电子能"},
+    }
+    facts = [
+        {
+            **common,
+            "task_key": "run-a:opt",
+            "task_description": "第一轮水分子优化",
+            "task_created_at": "2026-09-15T10:00:00+00:00",
+        },
+        {
+            **common,
+            "task_key": "run-b:opt",
+            "task_description": "第二轮水分子优化",
+            "task_created_at": "2026-09-15T11:00:00+00:00",
+        },
+    ]
+
+    text = render_selected_facts(facts)
+
+    assert "任务：第一轮水分子优化" in text
+    assert "任务：第二轮水分子优化" in text
+    assert "创建于 2026-09-15T10:00" in text
+    assert "创建于 2026-09-15T11:00" in text
+    assert "private-artifact-id" not in text

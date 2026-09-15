@@ -208,6 +208,7 @@ def plan_message(
     *,
     registry: ToolRegistry,
     context: Mapping[str, Any] | None = None,
+    validation_feedback: str | None = None,
     cancel: Any = None,
 ) -> PlanProposal:
     prompt = load_prompt("planner")
@@ -222,6 +223,7 @@ def plan_message(
                         "request": request.model_dump(mode="json"),
                         "tool_directory": directory,
                         "context": _bounded_context(context),
+                        "validation_feedback": validation_feedback,
                     }
                 ),
             },
@@ -358,17 +360,21 @@ def request_from_intake(message: str, intake: IntakeOutput, *, request_id: str) 
 
 
 def filter_user_explicit_parameters(message: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep model-extracted q/M only when the user actually stated them.
+    """Keep q/M only when stated, parsing explicit values from the user text.
 
     Method and iteration options are ordinary planner hints and remain
     available for later deterministic validation.  Charge and multiplicity
     are different: a model's guessed values must never become scientific
-    evidence merely because they appeared in an intake JSON object.
+    evidence merely because they appeared in an intake JSON object. Explicit
+    text is parsed locally and takes precedence over a conflicting extraction.
     """
 
     filtered = dict(parameters)
     for name in ("charge", "multiplicity"):
-        if name in filtered and not _message_declares_parameter(message, name, filtered[name]):
+        stated_value = _explicit_electronic_state_value(message, name)
+        if stated_value is not None:
+            filtered[name] = stated_value
+        elif name in filtered and not _message_declares_parameter(message, name, filtered[name]):
             filtered.pop(name)
     return filtered
 
@@ -406,6 +412,8 @@ def _semantic_target(target: ResultTarget, request: Request) -> tuple[str, str |
     if target.port is not None:
         return "port", target.port
     name = target.field
+    if name == "geometry" and request.operation == "Opt":
+        return "port", "optimized_geometry"
     aliases = {
         "optimized_geometry": ("port", "optimized_geometry"),
         "geometry": ("port", "geometry"),
@@ -423,26 +431,95 @@ def _semantic_target(target: ResultTarget, request: Request) -> tuple[str, str |
 
 
 def _message_declares_parameter(message: str, name: str, value: Any) -> bool:
-    if type(value) is not int:
-        return False
-    integer = rf"\+?{value}" if value >= 0 else rf"{value}"
+    return type(value) is int and _explicit_electronic_state_value(message, name) == value
+
+
+def _explicit_electronic_state_value(message: str, name: str) -> int | None:
+    """Extract only direct q/M statements; Chinese phrases need no word boundary."""
+
+    values: set[int] = set()
     if name == "charge":
-        patterns = [
-            rf"(?:\bcharge\b|\bq\b|电荷)\s*(?:is\s*|=\s*|:\s*|为\s*)?{integer}\b",
-            rf"{integer}\s*(?:\bcharge\b|\bq\b|电荷)",
-        ]
-        if value == 0:
-            patterns.append(r"\b(?:neutral|中性)\b")
+        patterns_with_values = [(r"中性|(?<![A-Za-z])neutral(?![A-Za-z])", 0)]
+        labels = r"(?:总电荷|电荷|(?<![A-Za-z])charge(?![A-Za-z])|(?<![A-Za-z])q(?![A-Za-z]))"
+    elif name == "multiplicity":
+        patterns_with_values = [(r"单重态|singlet", 1), (r"三重态|triplet", 3)]
+        labels = (
+            r"(?:自旋多重度|多重度|(?<![A-Za-z])spin\s*multiplicity(?![A-Za-z])|"
+            r"(?<![A-Za-z])multiplicity(?![A-Za-z])|(?<![A-Za-z])mult(?![A-Za-z])|"
+            r"(?<![A-Za-z])M(?![A-Za-z])|自旋)"
+        )
     else:
-        patterns = [
-            rf"(?:\bmultiplicity\b|\bspin\s*multiplicity\b|\bmult\b|\bM\b|多重度|自旋多重度|自旋)\s*(?:is\s*|=\s*|:\s*|为\s*)?{integer}\b",
-            rf"{integer}\s*(?:\bmultiplicity\b|\bmult\b|\bM\b|多重度|自旋多重度)",
-        ]
-        if value == 1:
-            patterns.append(r"\b(?:singlet|单重态)\b")
-        if value == 3:
-            patterns.append(r"\b(?:triplet|三重态)\b")
-    return any(re.search(pattern, message, flags=re.IGNORECASE) for pattern in patterns)
+        return None
+
+    for pattern, value in patterns_with_values:
+        for match in re.finditer(pattern, message, re.IGNORECASE):
+            if not _is_negated_statement(message, match.start()):
+                values.add(value)
+
+    number = (
+        r"([+-]?\d+|负[零〇一二两三四五六七八九十]|正[零〇一二两三四五六七八九十]|"
+        r"[零〇一二两三四五六七八九十])"
+    )
+    assignment = r"\s*(?:(?:is|为|是|设为|设置为|设成|设置成)\s*|=\s*|:\s*)?"
+    patterns = (
+        rf"{labels}{assignment}{number}(?!\d)",
+        rf"(?<!\d){number}\s*{labels}",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, message, re.IGNORECASE):
+            if _is_negated_statement(message, match.start()):
+                continue
+            value = _parse_signed_integer(match.group(1))
+            if value is not None:
+                values.add(value)
+    return next(iter(values)) if len(values) == 1 else None
+
+
+def _is_negated_statement(message: str, start: int) -> bool:
+    prefix = message[max(0, start - 8) : start]
+    return (
+        re.search(
+            r"(?:不是|并非|非|不|not(?:\s+(?:a|the))?|non[-\s]?)\s*$",
+            prefix,
+            re.IGNORECASE,
+        )
+        is not None
+    )
+
+
+def _parse_signed_integer(value: str) -> int | None:
+    if value.startswith("负"):
+        magnitude = _chinese_integer(value[1:])
+        return -magnitude if magnitude is not None else None
+    if value.startswith("正"):
+        return _chinese_integer(value[1:])
+    if value.isdecimal() or (value[:1] in {"+", "-"} and value[1:].isdecimal()):
+        return int(value)
+    return _chinese_integer(value)
+
+
+def _chinese_integer(value: str) -> int | None:
+    digits = {
+        "零": 0,
+        "〇": 0,
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+    }
+    if value == "十":
+        return 10
+    if value.startswith("十") and len(value) == 2 and value[1] in digits:
+        return 10 + digits[value[1]]
+    if value.endswith("十") and len(value) == 2 and value[0] in digits:
+        return digits[value[0]] * 10
+    return digits.get(value)
 
 
 def _step_id(index: int, key: str) -> str:

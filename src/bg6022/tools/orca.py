@@ -152,11 +152,11 @@ def _make_tool(
         ]
         + (["optimization convergence", "final geometry binding"] if operation == "Opt" else []),
         repair_capabilities=(
-            ["failed optimization may provide a restart-only candidate"]
-            if operation == "Opt"
-            else []
+            ["restart_optimization"] if operation == "Opt" else ["increase_scf_maxiter"]
         ),
         requires_compute_permission=True,
+        parameter_preparation="orca_electronic_state",
+        execution_budget="orca",
         deferred_parameters=["charge", "multiplicity"],
         execute_function=execute if config is not None else None,
     )

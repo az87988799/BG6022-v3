@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from bg6022.agent import Agent
@@ -73,6 +74,29 @@ class FakePlanner:
         )
 
 
+class RevisingPlanner(FakePlanner):
+    def __init__(self) -> None:
+        self.plan_contexts: list[dict[str, object]] = []
+
+    def complete_json(self, messages, schema, **kwargs):
+        if schema is IntakeOutput:
+            return super().complete_json(messages, schema, **kwargs)
+        context = json.loads(messages[-1]["content"])
+        self.plan_contexts.append(context)
+        proposal = super().complete_json(messages, schema, **kwargs)
+        if len(self.plan_contexts) == 1:
+            return proposal.model_copy(
+                update={
+                    "requested_results": [
+                        PlanTargetProposal(
+                            step_key="missing_step", field="opt_final_electronic_energy"
+                        )
+                    ]
+                }
+            )
+        return proposal
+
+
 def test_chat_prepares_then_waits_for_one_confirmation(tmp_path: Path) -> None:
     config = _config(tmp_path)
     agent = Agent(config, build_registry(config), llm=FakePlanner())
@@ -86,8 +110,27 @@ def test_chat_prepares_then_waits_for_one_confirmation(tmp_path: Path) -> None:
     repeated = agent.confirm(response.run)
     assert repeated.run is not None
     assert repeated.run.status == "failed"
-    assert "execution boundary" in repeated.text
+    assert "execution_boundary" in repeated.text
     again = agent.confirm(response.run)
     assert again.run is not None
     assert len(again.run.result_index) == 2
-    assert "failed before" in again.text
+    assert "仍然有效的已完成结果" in again.text
+    assert "尚未完成：几何优化" in again.text
+    assert "停止原因：" in again.text
+
+
+def test_planner_receives_local_validation_feedback_for_one_bounded_revision(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    planner = RevisingPlanner()
+    agent = Agent(config, build_registry(config), llm=planner)
+
+    response = agent.handle_message("optimize water")
+
+    assert response.run is not None
+    assert response.run.status == "waiting"
+    assert len(planner.plan_contexts) == 2
+    feedback = planner.plan_contexts[1]["validation_feedback"]
+    assert isinstance(feedback, str)
+    assert "unknown step key" in feedback
