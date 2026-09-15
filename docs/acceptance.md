@@ -57,17 +57,20 @@ count as the two required four-core real calculations.
 ## M1 implementation status
 
 M1 code is present on the M1 implementation branch and has offline regression
-coverage, but it is not marked accepted. The user must review the pushed commit
-and run the live DeepSeek/PubChem/ORCA sequence described in
+coverage, but it is not marked accepted. Real Agent-path L1/L2 DeepSeek/PubChem/
+ORCA evidence was collected on 2026-09-15; the user must review the pushed
+commit and evidence described in
 [`docs/milestones/M1.md`](milestones/M1.md) and
 [`docs/evidence/M1-agent-evidence.md`](evidence/M1-agent-evidence.md) before
 M1 is recorded as complete.
 
 The 2026-09-15 parameter/query repair follow-up was pushed as
 `09ccd60d9b9456a33fa55019dc93e3158458c80a`; its offline suite passed (104
-passed, 3 live tests deselected). The local DeepSeek credential is unavailable,
-so this follow-up adds no real Agent/ORCA acceptance evidence and does not
-change M1's pending status.
+passed, 3 live tests deselected). Its environment check observed that
+`DEEPSEEK_API_KEY` was absent from the directly launched Python process; it did
+not inspect `.env`. The project-root `.env` did contain the key, and the user's
+active chat was launched with `uv run --env-file .env`, which passes it to the
+application. The earlier “credential unavailable” conclusion was incorrect.
 
 ## Recorded real runs
 
@@ -128,10 +131,38 @@ Live subchecks were run separately from L1/L2:
 | ORCA Opt | Run `run_855cc60f6a8a4b538473be3db704e4f5`; `-76.418938721015 Eh`; convergence and geometry checks | passed |
 | Budget and cleanup | Both Runs record 4 cores / 1024 MB / MaxCore 192 / concurrency 1, matching `%pal nprocs 4` and `%maxcore 192`; both have `process_tree_empty=true` | passed |
 | ORCA probe | `doctor --probe-orca`; version 6.1.1, expected missing-input exit 2, clean process tree | passed |
-| Natural-language L1/L2 | No DeepSeek request was made; `DEEPSEEK_API_KEY` is unset in this environment | pending |
+| Natural-language L1/L2 | See the 2026-09-15 live Agent-path evidence below; real DeepSeek plans and ORCA runs passed | passed; awaiting user acceptance |
 
-The ORCA runs above used the direct Tool command in the live test, not the
-DeepSeek Agent path. They do not satisfy L1 or L2. Full live evidence details
-and raw paths are recorded in
+The ORCA runs in the preceding table used direct Tool commands and are separate
+from L1/L2. Full real-Agent evidence and raw paths are recorded in
 [`docs/evidence/M1-agent-evidence.md`](evidence/M1-agent-evidence.md). M1
-remains pending the real-LLM L1/L2 sequence and the user's explicit acceptance.
+remains pending the user's explicit acceptance.
+
+## 2026-09-15 live Agent-path acceptance evidence
+
+The root `.env` contained a non-empty `DEEPSEEK_API_KEY`; the key value was not
+printed or saved in evidence. The earlier check ran `.venv\Scripts\python.exe`
+directly, while the application only reads the process environment and does not
+load `.env` itself. The user's active command uses `uv --env-file .env`, and the
+live Agent checks used that same environment-file mechanism.
+
+The user's already-running `start_chat.py` held the configured
+`E:\BG6022-v3-data\.chat.lock`. To avoid interrupting or bypassing that session,
+the actual production `Agent.handle_message` / `/confirm` flow ran with the same
+`config.toml`, ORCA executable, and resource limits but an isolated data root at
+`E:\BG6022-v3-data\acceptance_live_20260915`. The CLI wrapper itself was not
+started concurrently.
+
+| Check | Evidence | Status |
+|---|---|---|
+| Live DeepSeek smoke test | `tests/live/test_m1_live.py -m live_llm`; real intake request | passed |
+| L1 normal Opt | Run `run_fee3692d4fa34244b4f68452062cb2e2`; PubChem water CID 962, 3-atom RDKit ETKDGv3 seed 61453 geometry, real LLM Plan, confirmation, ORCA 6.1.1; `-76.418938720831 Eh`; convergence, geometry consistency, input hashes, and process cleanup verified | passed |
+| L2 controlled failure and repair | Run `run_24854da4f43346cabe67a730bfa00891`; PubChem ethanol CID 702, 9-atom structure; real ORCA attempt 1 used `geom_maxiter=1`, exited normally but did not converge; validated restart candidate and clean process; real LLM selected the allowed `restart_optimization` patch to `geom_maxiter=100`; attempt 2 in the same Run converged at `-155.002350062010 Eh` with consistent geometry and clean process | passed |
+| Resource agreement | Both Runs: 4 cores, 1024 MB total, `%maxcore 192`, concurrency 1; generated inputs agree (`nprocs 4`, `%maxcore 192`) | passed |
+| Remaining M1 status | L1/L2 evidence exists; M1 has not been accepted by the user | awaiting user acceptance |
+
+The L2 artifacts retain the initial failed result, restart-candidate hash,
+LLM-selected repair record, and both ORCA attempts. Earlier non-passing live
+attempts in the same isolated evidence root are retained but are not counted as
+acceptance: `run_87598d747ff8468088159f395ad0bba8` exposed the ORCA “maximum
+number of optimization cycles” parser gap, and `run_af02fdbc9b9d4887a093d21dfe8cecbe` exposed repair-Plan topological-order replay. Both defects are fixed and covered by regression tests.

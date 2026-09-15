@@ -181,3 +181,53 @@ LLM-selected allowed repair, same-Run successful retry) remain unrun. The
 controlled historical failure in the M0 records and the direct ORCA runs above
 do not substitute for L2. SCF iteration-increase repair also remains without
 live validation. M1 is not marked complete; user acceptance remains required.
+
+## 2026-09-15 credential-check correction and live Agent-path L1/L2
+
+The earlier statement that `DEEPSEEK_API_KEY` was unset checked only the
+current process environment. The project-root `.env` had a non-empty value, but
+`config.load_config` does not load dotenv files and `LlmClient` reads only the
+configured process environment variable. The user's active process was
+launched with `uv run --env-file .env`, so it had the key. The secret value was
+never printed or saved in the evidence package. Real LLM calls used the
+existing configured variable only for DeepSeek authentication.
+
+The user's already-running `start_chat.py` held
+`E:\BG6022-v3-data\.chat.lock`. To preserve that session, the acceptance used
+the production `Agent.handle_message` and `/confirm` path with the same
+`config.toml`, registry, ORCA executable, and resource budget but an isolated
+data root at `E:\BG6022-v3-data\acceptance_live_20260915`. The CLI wrapper was
+not started concurrently; no lock was bypassed and no user process was stopped.
+
+| Live check | Evidence | Status |
+|---|---|---|
+| DeepSeek smoke | `tests/live/test_m1_live.py -m live_llm`; real intake request succeeded | passed |
+| L1 normal Opt | Run `run_fee3692d4fa34244b4f68452062cb2e2`; water from PubChem CID 962, H₂O, 3 atoms; RDKit 2026.03.6 ETKDGv3 seed 61453; real Plan and confirmation; ORCA 6.1.1 Opt result `-76.418938720831 Eh`; SCF/Opt convergence, geometry consistency, input hashes, exit code 0, `process_tree_empty=true`, and `stop_confirmed=true` | passed |
+| L2 controlled failure and restart | Run `run_24854da4f43346cabe67a730bfa00891`; ethanol from PubChem CID 702, C₂H₆O, 9 atoms; attempt 1 used `geom_maxiter=1`, ORCA exited normally but did not converge; parser recorded the iteration limit, consistent candidate, matching hashes, and clean process; real LLM selected the validated `restart_optimization` action with `geom_maxiter=100`; attempt 2 succeeded in the same Run at `-155.002350062010 Eh`, with convergence, geometry consistency, matching hashes, exit code 0, and clean process | passed |
+| Resource agreement | Both Run snapshots and inputs use 4 cores, 1024 MB total, `%maxcore 192`, concurrency 1; `%pal` / `nprocs 4` and `%maxcore 192` verified in both attempts | passed |
+| User milestone acceptance | Implementation and live L1/L2 evidence are ready for review; user has not yet accepted M1 | pending |
+
+All Run JSON, Results, source/geometry artifacts, repair record, and raw ORCA
+inputs/stdout/stderr are retained under
+`E:\BG6022-v3-data\acceptance_live_20260915\runs\<run_id>\`. In particular,
+L2 attempt 1 has no successful energy or geometry output port; attempt 2 is the
+only successful Opt result. The initial water geometry and the restart
+candidate remain immutable artifacts.
+
+Two pre-fix real L2 attempts are retained but are not counted as passing:
+`run_87598d747ff8468088159f395ad0bba8` exposed ORCA's wording “maximum number
+of optimization cycles,” which the parser did not recognize; the corrected
+parser now records that explicit limit message. In
+`run_af02fdbc9b9d4887a093d21dfe8cecbe`, the real LLM selected the allowed
+restart, but the execution boundary rejected the replayed Plan fingerprint
+because validation had canonicalized the now-independent Step order. Repair
+replay now applies the same registry topological validation as the Agent, with
+a multi-Step same-Run regression test. Earlier L1 planning attempts also
+exposed missing `electronic_energy` and `molecular_geometry` semantic aliases;
+both are now covered by SP/Opt target-validation tests.
+
+Final offline validation after these live-discovered fixes: `119 passed, 3
+live deselected`; Ruff lint and format checks and `compileall` passed. These
+evidence additions do not mark M1 accepted. SCF-iteration-increase repair has
+not received separate live validation; M1 awaits the user's explicit review
+and acceptance.
