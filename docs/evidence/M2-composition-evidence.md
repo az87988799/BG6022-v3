@@ -8,16 +8,16 @@ from actual DeepSeek, PubChem/RDKit, and ORCA Runs.
 
 | Field | Observed value | Status |
 |---|---|---|
-| Branch | `codex/v3-m2-implementation` | local candidate |
-| Code commit | `e7e300a` (`Implement M2 frequency and plan composition`) | committed locally |
-| Evidence commit / pushed branch head | to be filled after evidence commit and push | pending |
+| Branch | `codex/v3-m2-implementation` | pushed to `origin` |
+| Code commit | `e7e300a227973a815c6213f1a4a36996fa3f96f7` (`Implement M2 frequency and plan composition`) | pushed |
+| Evidence commit | `dd0ee54eb0d6b4fed714b73a065f0505b18ff0e1` (`Record M1 review and M2 evidence`) | pushed |
 | Python / OS | Python 3.11.4 / Windows 10 build 26200 | observed |
 | ORCA | `E:\orca\orca.exe`, Program Version 6.1.1 | observed in Run records |
 | Method and scope | r2SCAN-3c, gas phase, neutral singlet H2O and C2H6O | exercised |
 | Active real-compute budget | 4 cores / 1024 MB total / `%maxcore 192` / concurrency 1 | active project instruction |
 | Run/input agreement | All four current-candidate Runs snapshot 4/1024/192/1; each generated ORCA input has `nprocs 4` and `%maxcore 192` | verified |
 | Local offline validation | `ruff check src tests`; `ruff format --check src tests`; `python -m compileall -q src start_chat.py tests`; `pytest -q -m "not live_llm and not live_pubchem and not live_orca"` → 181 passed, 3 deselected; `uv build` | passed |
-| GitHub Actions | candidate workflow result to be recorded after push | pending |
+| GitHub Actions | [offline run 34993113284](https://github.com/az87988799/BG6022-v3/actions/runs/34993113284), tested commit `dd0ee54eb0d6b4fed714b73a065f0505b18ff0e1` | passed |
 | User acceptance | M2 acceptance owner and date | pending user review |
 
 Evidence root: `E:\BG6022-v3-data\m2_final_candidate_20260915_freqfix`.
