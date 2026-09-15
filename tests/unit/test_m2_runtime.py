@@ -26,6 +26,7 @@ from bg6022.models import (
     Step,
 )
 from bg6022.orca.frequency_parser import parse_vibrational_frequencies
+from bg6022.planner import IntakeOutput, PlanProposal, PlanStepProposal, PlanTargetProposal
 from bg6022.repair import RepairProposal
 from bg6022.repair import _context as repair_context
 from bg6022.session import (
@@ -1060,3 +1061,197 @@ def test_recovered_opt_geometry_flows_to_frequency_and_sp_without_repeating_prep
     )
     assert frequency_result.input_bindings["geometry"] == artifacts["retry"].id
     assert sp_result.input_bindings["geometry"] == artifacts["retry"].id
+
+
+def test_chat_freq_only_request_runs_on_supplied_xyz_without_preparation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    base_registry = build_registry(config)
+    calls: list[str] = []
+    agent: Agent | None = None
+
+    def unexpected_tool(step: Step, _run: Run, _cancel: Any) -> Result:
+        calls.append(step.tool)
+        raise AssertionError(f"Freq-only request unexpectedly ran {step.tool}")
+
+    def execute_frequency(step: Step, run: Run, _cancel: Any) -> Result:
+        calls.append(step.tool)
+        assert agent is not None
+        assert [item.tool for item in run.plan.steps] == ["frequency"]
+        assert step.parameters["charge"] == 0
+        assert step.parameters["multiplicity"] == 1
+        geometry = agent._artifact_from_reference(run, step.inputs["geometry"])
+        assert geometry is not None
+        assert geometry.role == "input_geometry"
+        assert geometry.source == "chat:inline_xyz"
+        assert artifact_path(config.data_root_path, run, geometry).read_bytes() == WATER_XYZ
+
+        attempt = run.attempt_counts[step.id]
+        hessian = register_bytes_artifact(
+            config.data_root_path,
+            run,
+            b"offline verified Hessian",
+            artifact_type="orca_hessian",
+            role="verified_hessian",
+            source="test:offline_frequency",
+            step_id=step.id,
+            attempt=attempt,
+            metadata={
+                "validated_for_input_geometry_sha256": geometry.sha256,
+                "dimension": 9,
+            },
+        )
+        run.attempts.append(
+            {
+                "step_id": step.id,
+                "attempt": attempt,
+                "phase": "finished",
+                "status": "succeeded",
+                "artifact_ids": [hessian.id],
+                "output_ports": {"hessian": hessian.id},
+            }
+        )
+        modes = [
+            {"index": index, "value": 0.0 if index < 6 else 100.0 + index, "unit": "cm^-1"}
+            for index in range(9)
+        ]
+        return Result(
+            run_id=run.id,
+            step_id=step.id,
+            attempt=attempt,
+            status="succeeded",
+            values={
+                "vibrational_frequencies": {
+                    "modes": modes,
+                    "unit": "cm^-1",
+                    "scaling_factor": 1.0,
+                    "scaling_applied": True,
+                    "complete": True,
+                }
+            },
+            checks={
+                name: True
+                for name in (
+                    "runner_succeeded",
+                    "exit_code_zero",
+                    "process_tree_empty",
+                    "normal_termination",
+                    "stdout_valid_utf8",
+                    "stdout_within_size_limit",
+                    "stderr_within_size_limit",
+                    "scf_converged",
+                    "input_hashes_match",
+                    "frequency_section_complete",
+                    "frequency_values_finite",
+                    "frequency_mode_indices_match_hessian",
+                    "hessian_present",
+                    "hessian_valid",
+                )
+            },
+            scientific_checks={
+                "frequency_complete": ScientificCheckResult(
+                    status="passed",
+                    input_geometry_sha256=geometry.sha256,
+                    conditions={"mode_count": 9, "hessian_valid": True},
+                ),
+                "local_minimum_supported": ScientificCheckResult(
+                    status="unverified",
+                    input_geometry_sha256=geometry.sha256,
+                    reason="A standalone frequency run does not establish optimization provenance.",
+                ),
+            },
+            artifact_ids=[hessian.id],
+            output_ports={"hessian": hessian.id},
+            attempt_relative_path=f"{step.id}/attempt-{attempt:02d}",
+        )
+
+    registry = ToolRegistry(
+        [
+            base_registry.get(name).model_copy(
+                update={
+                    "execute_function": (
+                        execute_frequency if name == "frequency" else unexpected_tool
+                    )
+                }
+            )
+            for name in base_registry.names()
+        ]
+    )
+    user_message = (
+        "Calculate vibrational frequencies for the supplied XYZ; charge 0, multiplicity 1"
+    )
+    intake = IntakeOutput(
+        intent="chemistry_compute",
+        operations=["Freq"],
+        explicit_parameters={"charge": 0, "multiplicity": 1},
+        structure_input={"xyz_text": WATER_XYZ.decode("ascii")},
+        requested_results=["vibrational_frequencies", "frequency_complete"],
+    )
+    proposal = PlanProposal(
+        steps=[
+            PlanStepProposal(
+                key="freq",
+                tool="frequency",
+                parameters={"method_profile": "r2scan3c", "environment": "gas"},
+                inputs={"geometry": {"artifact_alias": "request_geometry"}},
+            )
+        ],
+        requested_results=[
+            PlanTargetProposal(step_key="freq", field="vibrational_frequencies"),
+            PlanTargetProposal(step_key="freq", check="frequency_complete"),
+        ],
+    )
+
+    def fake_intake(*_args: Any, **_kwargs: Any) -> IntakeOutput:
+        return intake
+
+    def fake_plan(_client: Any, request: Request, **_kwargs: Any) -> PlanProposal:
+        assert request.operations == ["Freq"]
+        assert request.structure_input["xyz_text"] == WATER_XYZ.decode("ascii")
+        assert request.requested_results == [
+            ResultTarget(field="vibrational_frequencies"),
+            ResultTarget(check="frequency_complete"),
+        ]
+        return proposal
+
+    monkeypatch.setattr("bg6022.agent.intake_message", fake_intake)
+    monkeypatch.setattr("bg6022.agent.plan_message", fake_plan)
+    agent = Agent(config, registry, llm=object(), session_id="session_freq_only_inline_xyz")
+
+    waiting = agent.handle_message(user_message)
+
+    assert waiting.run is not None
+    assert waiting.run.status == "waiting"
+    assert waiting.run.waiting_for == "confirmation"
+    assert [item.tool for item in waiting.run.plan.steps] == ["frequency"]
+    assert waiting.run.plan.steps[0].inputs["geometry"].artifact_id != "request_geometry"
+    assert calls == []
+
+    completed = agent.confirm(waiting.run)
+
+    assert completed.run is not None
+    assert completed.run.status == "succeeded"
+    assert [item.tool for item in completed.run.plan.steps] == ["frequency"]
+    assert calls == ["frequency"]
+    frequency_step = completed.run.plan.steps[0]
+    result_path = (
+        Path(config.data_root_path)
+        / "runs"
+        / completed.run.id
+        / completed.run.current_results[frequency_step.id]
+    )
+    frequency_result = Result.model_validate(
+        json.loads(result_path.read_text(encoding="utf-8")), strict=True
+    )
+    geometry_id = frequency_result.input_bindings["geometry"]
+    geometry = next(item for item in completed.run.artifact_index if item.id == geometry_id)
+    assert geometry.role == "input_geometry"
+    assert geometry.source == "chat:inline_xyz"
+    assert artifact_path(config.data_root_path, completed.run, geometry).read_bytes() == WATER_XYZ
+    assert frequency_result.scientific_checks["frequency_complete"].status == "passed"
+    assert (
+        frequency_result.scientific_checks["frequency_complete"].input_geometry_sha256
+        == geometry.sha256
+    )
+    assert frequency_result.scientific_checks["local_minimum_supported"].status == "unverified"
