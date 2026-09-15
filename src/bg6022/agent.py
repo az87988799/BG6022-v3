@@ -6,7 +6,7 @@ import json
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -120,6 +120,7 @@ class Agent:
         if not execute:
             raise PermissionError("execution permission was not explicitly granted")
         plan = validate_request_plan(request, plan, self.registry)
+        _validate_request_parameter_scope(request, plan, self.registry)
         # The explicit command has always checked the machine before creating a
         # Run. Chat intentionally defers this check until an ORCA Tool starts.
         validate_execution_environment(self.config)
@@ -179,10 +180,13 @@ class Agent:
 
         request_token, request_cancel = self._begin_request()
         self._append_message("user", text)
+        llm_call_cursor = self._llm_call_count()
+        llm_stage = "intake"
         try:
             self._ensure_request_active(request_token, request_cancel)
             result_catalog = self._build_query_catalog()
             geometry_catalog, geometry_bindings = self._build_geometry_catalog()
+            capability_catalog = self.registry.result_capabilities()
             intake = intake_message(
                 self.llm,
                 text,
@@ -192,8 +196,12 @@ class Agent:
                 },
                 result_catalog=result_catalog,
                 geometry_catalog=geometry_catalog,
+                capability_catalog=capability_catalog,
+                registry=self.registry,
                 cancel=request_cancel,
             )
+            self._persist_llm_diagnostics(llm_call_cursor, stage="intake")
+            llm_call_cursor = self._llm_call_count()
             self._ensure_request_active(request_token, request_cancel)
 
             selected_geometry_alias = intake.history_geometry_alias
@@ -203,7 +211,11 @@ class Agent:
                     "a historical geometry can be selected only when the user explicitly "
                     "requests reuse of a previous structure"
                 )
-            if history_geometry_requested and len(geometry_catalog) > 1:
+            if (
+                intake.intent == "chemistry_compute"
+                and history_geometry_requested
+                and len(geometry_catalog) > 1
+            ):
                 # The intake model can help interpret a request, but it must not
                 # choose among multiple historical structures on the user's behalf.
                 explicit_alias = _explicit_history_geometry_alias(text, geometry_catalog)
@@ -333,6 +345,7 @@ class Agent:
                 text,
                 intake,
                 request_id=new_id("request"),
+                registry=self.registry,
                 normalized_parameters=normalized_parameters,
             )
             self._ensure_request_active(request_token, request_cancel)
@@ -340,6 +353,7 @@ class Agent:
             validation_feedback = None
             max_revisions = int(self.config.repair.max_plan_revisions)
             for revision in range(max_revisions + 1):
+                llm_stage = "planner"
                 proposal = plan_message(
                     self.llm,
                     request,
@@ -360,6 +374,8 @@ class Agent:
                     validation_feedback=validation_feedback,
                     cancel=request_cancel,
                 )
+                self._persist_llm_diagnostics(llm_call_cursor, stage="planner")
+                llm_call_cursor = self._llm_call_count()
                 self._ensure_request_active(request_token, request_cancel)
                 try:
                     plan = proposal_to_plan(
@@ -401,10 +417,34 @@ class Agent:
             self._append_message("assistant", response.text)
             return response
         except LlmError as error:
+            stage = error.purpose or llm_stage
+            self._persist_llm_diagnostics(
+                llm_call_cursor,
+                stage=stage,
+                failure_category=error.category,
+            )
             if error.category == "cancelled" or request_cancel.is_set():
                 response = AgentResponse("当前请求已取消，尚未执行。")
             else:
-                response = AgentResponse(f"暂时无法理解这个请求：{error}")
+                stage_label = {
+                    "intake": "请求解析阶段",
+                    "planner": "计划生成阶段",
+                }.get(stage)
+                if stage == "intake" and error.category == "ambiguous_result":
+                    response = AgentResponse(
+                        "Opt 和 SP 同时请求时，通用‘能量’目标不唯一。请明确选择 "
+                        "sp_electronic_energy（单点电子能）或 "
+                        "opt_final_electronic_energy（优化末态电子能）；未启动计算。"
+                    )
+                elif stage_label is not None:
+                    response = AgentResponse(
+                        f"{stage_label}未获得有效模型响应（{error.category}）；"
+                        "我已停止，没有生成或启动新的计算。"
+                    )
+                else:
+                    response = AgentResponse(
+                        f"模型调用未获得有效响应（{error.category}）；任务已停止。"
+                    )
             self._append_message("assistant", response.text)
             return response
         except (ValueError, OSError) as error:
@@ -475,31 +515,45 @@ class Agent:
                     return last_result
                 tool = self.registry.get(step.tool)
                 if tool.parameter_preparation == "orca_electronic_state":
-                    if tool.requires_compute_permission and not run.execution_permission:
-                        # Resolve every ORCA Step before showing one confirmation
-                        # for the whole Plan. Later operations often consume a
-                        # future geometry port, so structure facts are traced
-                        # back through that port to the already prepared input.
-                        for planned_step in run.plan.steps:
-                            planned_tool = self.registry.get(planned_step.tool)
-                            if planned_tool.parameter_preparation != "orca_electronic_state":
-                                continue
-                            prepared_step = self._prepare_orca_step(run, planned_step)
+                    preparing_step_id = step.id
+                    try:
+                        if tool.requires_compute_permission and not run.execution_permission:
+                            # Resolve every ORCA Step before showing one confirmation
+                            # for the whole Plan. Later operations often consume a
+                            # future geometry port, so structure facts are traced
+                            # back through that port to the already prepared input.
+                            for planned_step in run.plan.steps:
+                                planned_tool = self.registry.get(planned_step.tool)
+                                if planned_tool.parameter_preparation != "orca_electronic_state":
+                                    continue
+                                preparing_step_id = planned_step.id
+                                prepared_step = self._prepare_orca_step(run, planned_step)
+                                if prepared_step is None:
+                                    run.finish_active_interval()
+                                    save_run(self.config.data_root_path, run)
+                                    return last_result
+                            step = next(item for item in run.plan.steps if item.id == step.id)
+                        else:
+                            prepared_step = self._prepare_orca_step(run, step)
                             if prepared_step is None:
                                 run.finish_active_interval()
                                 save_run(self.config.data_root_path, run)
                                 return last_result
-                        step = next(item for item in run.plan.steps if item.id == step.id)
-                    else:
-                        prepared_step = self._prepare_orca_step(run, step)
-                        if prepared_step is None:
-                            run.finish_active_interval()
-                            save_run(self.config.data_root_path, run)
-                            return last_result
-                        # Parameter resolution may replace a deferred Step. The
-                        # exact replacement must be used for preview, fingerprint,
-                        # budget reservation, and execution in this same turn.
-                        step = prepared_step
+                            # Parameter resolution may replace a deferred Step. The
+                            # exact replacement must be used for preview, fingerprint,
+                            # budget reservation, and execution in this same turn.
+                            step = prepared_step
+                    except (TypeError, ValueError, OSError) as error:
+                        run.status = "failed"
+                        run.waiting_for = None
+                        run.pending_data = {
+                            "category": "parameter_preparation",
+                            "reason": str(error),
+                            "step_id": preparing_step_id,
+                        }
+                        run.finish_active_interval()
+                        save_run(self.config.data_root_path, run)
+                        return last_result
                     tool = self.registry.get(step.tool)
                 if tool.requires_compute_permission and not run.execution_permission:
                     self._prepare_confirmation(run, step)
@@ -718,6 +772,7 @@ class Agent:
         *,
         history_geometry_binding: Mapping[str, Any] | None = None,
     ) -> Run:
+        _validate_request_parameter_scope(request, plan, self.registry)
         history_alias = request.structure_input.get("history_geometry_alias")
         verified_history = (
             self._verify_history_geometry_binding(history_geometry_binding)
@@ -810,12 +865,17 @@ class Agent:
         return artifact
 
     def _prepare_orca_step(self, run: Run, step: Step) -> Step | None:
+        tool = self.registry.get(step.tool)
+        partial_parameters = tool.validate_parameters(step.parameters, allow_deferred=True)
+        if partial_parameters != step.parameters:
+            step = step.model_copy(update={"parameters": partial_parameters})
+        parameter_fields = _tool_parameter_fields(tool)
         if (
             run.accepted_snapshot
             and "charge" in step.parameters
             and "multiplicity" in step.parameters
         ):
-            validated = self.registry.get(step.tool).validate_parameters(step.parameters)
+            validated = tool.validate_parameters(step.parameters)
             _validate_orca_profile(validated)
             return step.model_copy(update={"parameters": validated})
         if (
@@ -833,6 +893,7 @@ class Agent:
             step.parameters,
             self.config.defaults,
             user_modifications=run.request.user_modifications,
+            parameter_fields=parameter_fields,
         )
         if resolution.missing_fields:
             run.status = "waiting"
@@ -845,9 +906,7 @@ class Agent:
                 "parameters": dict(step.parameters),
             }
             return None
-        validated = self.registry.get(step.tool).validate_parameters(
-            resolution.effective_parameters
-        )
+        validated = tool.validate_parameters(resolution.effective_parameters)
         _validate_orca_profile(validated)
         replacement = Step.model_validate(
             {**step.model_dump(mode="python"), "parameters": validated}, strict=True
@@ -867,77 +926,102 @@ class Agent:
     ) -> AgentResponse:
         if cancel is not None and cancel.is_set():
             return AgentResponse("当前请求已取消。", run=run)
-        step_id = str(run.pending_data.get("step_id", ""))
-        step = next((item for item in run.plan.steps if item.id == step_id), None)
-        if step is None:
-            science_steps = [
-                item
-                for item in run.plan.steps
-                if self.registry.get(item.tool).parameter_preparation == "orca_electronic_state"
-            ]
-            step = science_steps[0] if len(science_steps) == 1 else None
-        if step is None:
+        science_steps = [
+            item
+            for item in run.plan.steps
+            if self.registry.get(item.tool).parameter_preparation == "orca_electronic_state"
+        ]
+        if not science_steps:
             return AgentResponse("等待中的任务没有可编辑的计算步骤。", run=run)
-        tool = self.registry.get(step.tool)
-        if tool.parameter_preparation != "orca_electronic_state":
-            return AgentResponse("该 Tool 不支持修改 ORCA 电荷或自旋参数。", run=run)
-        merged = dict(step.parameters)
-        merged.update(parameters)
+        if not parameters:
+            return AgentResponse("没有识别到可应用的计算参数修改。", run=run)
+
+        candidate_request = run.request.model_copy(
+            update={
+                "explicit_parameters": {
+                    **run.request.explicit_parameters,
+                    **parameters,
+                },
+                "user_modifications": {
+                    **run.request.user_modifications,
+                    **parameters,
+                },
+            }
+        )
         try:
-            validated_partial = tool.validate_parameters(merged, allow_deferred=True)
-            if tool.execution_budget == "orca":
-                method_profile = validated_partial.get("method_profile")
-                environment = validated_partial.get("environment")
-                if method_profile is not None and environment is not None:
-                    normalized_profile = resolve_parameters(
-                        {}, {}, validated_partial, self.config.defaults
-                    ).effective_parameters
-                    _validate_orca_profile(normalized_profile)
-            replacement = Step.model_validate(
-                {**step.model_dump(mode="python"), "parameters": merged}, strict=True
-            )
-            candidate_request = run.request.model_copy(
-                update={
-                    "explicit_parameters": {
-                        **run.request.explicit_parameters,
-                        **parameters,
-                    },
-                    "user_modifications": {
-                        **run.request.user_modifications,
-                        **parameters,
-                    },
+            _validate_request_parameter_scope(candidate_request, run.plan, self.registry)
+            candidate_steps: list[Step] = []
+            candidate_sources: dict[str, dict[str, str]] = {}
+            for step in run.plan.steps:
+                tool = self.registry.get(step.tool)
+                if tool.parameter_preparation != "orca_electronic_state":
+                    candidate_steps.append(step)
+                    continue
+
+                parameter_fields = _tool_parameter_fields(tool)
+                step_patch = {
+                    name: value for name, value in parameters.items() if name in parameter_fields
                 }
-            )
-            resolution = resolve_parameters(
-                candidate_request.explicit_parameters,
-                self._known_structure_facts(run, replacement),
-                merged,
-                self.config.defaults,
-                user_modifications=candidate_request.user_modifications,
-            )
-            if not resolution.missing_fields:
-                effective = tool.validate_parameters(resolution.effective_parameters)
+                merged = dict(step.parameters)
+                merged.update(step_patch)
+                partial = tool.validate_parameters(merged, allow_deferred=True)
+                resolution = resolve_parameters(
+                    candidate_request.explicit_parameters,
+                    self._known_structure_facts(run, step),
+                    partial,
+                    self.config.defaults,
+                    user_modifications=candidate_request.user_modifications,
+                    parameter_fields=parameter_fields,
+                )
+                effective = tool.validate_parameters(
+                    resolution.effective_parameters,
+                    allow_deferred=bool(resolution.missing_fields),
+                )
                 if tool.execution_budget == "orca":
                     _validate_orca_profile(effective)
-                    self._validate_candidate_electronic_state(run, replacement, effective)
-            candidate_plan = _replace_step(run.plan, replacement)
+                    reference = step.inputs.get("geometry")
+                    if (
+                        "charge" in effective
+                        and "multiplicity" in effective
+                        and reference is not None
+                        and self._artifact_from_reference(run, reference) is not None
+                    ):
+                        # Validate against a geometry already available at this
+                        # boundary. A downstream Step may reference an Opt port
+                        # that is intentionally not produced until after confirmation.
+                        self._validate_candidate_electronic_state(run, step, effective)
+                replacement = Step.model_validate(
+                    {**step.model_dump(mode="python"), "parameters": effective}, strict=True
+                )
+                candidate_steps.append(replacement)
+                candidate_sources[step.id] = dict(resolution.parameter_sources)
+
             candidate_plan = Plan.model_validate(
                 {
-                    **candidate_plan.model_dump(mode="python"),
-                    "revision": candidate_plan.revision + 1,
+                    **run.plan.model_dump(mode="python"),
+                    "steps": candidate_steps,
+                    "revision": run.plan.revision + 1,
                 },
                 strict=True,
             )
             candidate_plan = self.registry.validate_plan(candidate_plan)
+            _validate_request_parameter_scope(candidate_request, candidate_plan, self.registry)
         except (TypeError, ValueError) as error:
             return AgentResponse(f"参数修改已拒绝（rejected）：{error}", run=run)
 
+        changed_steps = [
+            step.id
+            for old, step in zip(run.plan.steps, candidate_plan.steps, strict=True)
+            if old.parameters != step.parameters
+        ]
         run.request = candidate_request
         run.plan = candidate_plan
         run.execution_permission = not self.config.runtime.confirm_before_compute
         run.accepted_snapshot = {}
         run.accepted_execution_sha256 = None
-        _invalidate_current_results(run, step.id)
+        for changed_step_id in changed_steps:
+            _invalidate_current_results(run, changed_step_id)
+        run.parameter_sources_by_step.update(candidate_sources)
         run.waiting_for = None
         run.status = "running"
         run.pending_data = {}
@@ -1627,6 +1711,35 @@ class Agent:
             save_session(self.config.data_root_path, self.session_id, self._session)
         except OSError:
             pass
+
+    def _persist_llm_diagnostics(
+        self,
+        start_index: int,
+        *,
+        stage: str,
+        failure_category: str | None = None,
+    ) -> None:
+        """Keep bounded, credential-free model-call facts with session context."""
+
+        diagnostics = self._session.get("llm_diagnostics", [])
+        if not isinstance(diagnostics, list):
+            diagnostics = []
+        calls = getattr(self.llm, "calls", [])
+        if isinstance(calls, list):
+            for call in calls[start_index:]:
+                if not is_dataclass(call):
+                    continue
+                item = asdict(call)
+                item["stage"] = stage
+                diagnostics.append(item)
+        if failure_category is not None:
+            diagnostics.append({"stage": stage, "category": failure_category})
+        self._session["llm_diagnostics"] = diagnostics[-32:]
+        self._save_session()
+
+    def _llm_call_count(self) -> int:
+        calls = getattr(self.llm, "calls", [])
+        return len(calls) if isinstance(calls, list) else 0
 
     def _build_query_catalog(self) -> list[dict[str, Any]]:
         """Build short, public references for valid facts in this session.
@@ -2630,6 +2743,36 @@ def _replace_step(plan: Plan, replacement: Step) -> Plan:
         },
         strict=True,
     )
+
+
+def _tool_parameter_fields(tool: Tool) -> frozenset[str]:
+    if tool.parameter_type is None:
+        return frozenset()
+    return frozenset(tool.parameter_type.model_fields)
+
+
+def _validate_request_parameter_scope(request: Request, plan: Plan, registry: ToolRegistry) -> None:
+    """Require each explicit request-level parameter to have a consumer in this Plan."""
+
+    explicit_names = {
+        name
+        for parameters in (request.explicit_parameters, request.user_modifications)
+        for name, value in parameters.items()
+        if value is not None
+    }
+    if not explicit_names:
+        return
+    supported_names: set[str] = set()
+    for step in plan.steps:
+        tool = registry.get(step.tool)
+        if tool.parameter_preparation == "orca_electronic_state":
+            supported_names.update(_tool_parameter_fields(tool))
+    unscoped = sorted(explicit_names - supported_names)
+    if unscoped:
+        raise ValueError(
+            "request parameter(s) have no compatible calculation step in this Plan: "
+            + ", ".join(unscoped)
+        )
 
 
 def _next_ready_step(run: Run, data_root: str | None = None) -> Step | None:

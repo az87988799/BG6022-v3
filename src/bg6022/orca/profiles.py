@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -54,6 +54,7 @@ def resolve_parameters(
     defaults: Mapping[str, Any] | Any | None = None,
     *,
     user_modifications: Mapping[str, Any] | None = None,
+    parameter_fields: Collection[str] | None = None,
 ) -> ParameterResolution:
     """Merge one effective scientific parameter set without inventing q/M.
 
@@ -67,6 +68,20 @@ def resolve_parameters(
     structure_facts = structure_facts or {}
     tool_parameters = tool_parameters or {}
     user_modifications = user_modifications or {}
+    supported_fields = None if parameter_fields is None else frozenset(parameter_fields)
+    if supported_fields is not None:
+        unsupported_tool_parameters = sorted(set(tool_parameters) - supported_fields)
+        if unsupported_tool_parameters:
+            raise ValueError(
+                "step parameters are not accepted by the selected Tool: "
+                + ", ".join(unsupported_tool_parameters)
+            )
+        request_parameters = {
+            name: value for name, value in request_parameters.items() if name in supported_fields
+        }
+        user_modifications = {
+            name: value for name, value in user_modifications.items() if name in supported_fields
+        }
     if defaults is None:
         defaults_map: Mapping[str, Any] = {"method_profile": "r2scan3c", "environment": "gas"}
     elif isinstance(defaults, Mapping):
@@ -81,6 +96,8 @@ def resolve_parameters(
     sources: dict[str, str] = {}
 
     def choose(name: str, candidates: list[tuple[str, Mapping[str, Any]]]) -> None:
+        if supported_fields is not None and name not in supported_fields:
+            return
         for source, mapping in candidates:
             if name in mapping and mapping[name] is not None:
                 value = mapping[name]
@@ -134,7 +151,11 @@ def resolve_parameters(
             ],
         )
 
-    missing = tuple(name for name in ("charge", "multiplicity") if name not in values)
+    missing = tuple(
+        name
+        for name in ("charge", "multiplicity")
+        if name not in values and (supported_fields is None or name in supported_fields)
+    )
     return ParameterResolution(values, sources, missing)
 
 

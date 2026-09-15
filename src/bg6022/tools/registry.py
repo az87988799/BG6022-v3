@@ -34,6 +34,113 @@ class ToolRegistry:
     def describe(self) -> list[dict[str, Any]]:
         return [self._tools[name].description_json() for name in self.names()]
 
+    def result_capabilities(self) -> list[dict[str, Any]]:
+        """Describe user-requestable result targets from registered Tool contracts.
+
+        The capability list is derived from the same declarations used by Plan
+        validation. If a Tool declares a value as both a result and an output
+        port, the port is canonical because it carries the geometry type.
+        """
+
+        capabilities: list[dict[str, Any]] = []
+        for tool_name in self.names():
+            tool = self._tools[tool_name]
+            if not tool.available or not tool.operations:
+                continue
+            declared = [("port", name) for name in tool.output_ports]
+            declared.extend(
+                ("field", name) for name in tool.results if name not in tool.output_ports
+            )
+            declared.extend(("check", name) for name in tool.scientific_checks)
+            for kind, name in declared:
+                metadata = tool.result_metadata.get(name, {})
+                capabilities.append(
+                    {
+                        "name": name,
+                        "kind": kind,
+                        "tool": tool.name,
+                        "operations": list(tool.operations),
+                        "property": tool.result_properties.get(name),
+                        "label": metadata.get("label", name),
+                        "description": metadata.get("description")
+                        or tool.scientific_checks.get(name),
+                        "caveat": metadata.get("caveat"),
+                    }
+                )
+        return capabilities
+
+    def resolve_result_target(self, name: str, operations: Iterable[str]) -> ResultTarget:
+        """Normalize one current or legacy result name against Tool declarations."""
+
+        requested_operations = set(operations)
+        capabilities = self.result_capabilities()
+
+        def compatible(item: dict[str, Any]) -> bool:
+            producers = set(item["operations"])
+            return not producers or bool(producers & requested_operations)
+
+        exact = [item for item in capabilities if item["name"] == name]
+        if exact:
+            matches = [item for item in exact if compatible(item)]
+            if not matches:
+                raise ValueError(
+                    f"requested result {name!r} is not produced by the requested operation(s)"
+                )
+            return _target_from_unique_capability(name, matches)
+
+        # These aliases are retained only for older Intake output and stored
+        # Requests. New model output is constrained to canonical capability names.
+        exact_aliases = {
+            "sp_energy": "sp_electronic_energy",
+            "opt_energy": "opt_final_electronic_energy",
+            "frequency": "vibrational_frequencies",
+            "frequencies": "vibrational_frequencies",
+            "optimized_geometry": "optimized_geometry",
+        }
+        if name in exact_aliases:
+            canonical = exact_aliases[name]
+            matches = [
+                item for item in capabilities if item["name"] == canonical and compatible(item)
+            ]
+            if matches:
+                return _target_from_unique_capability(name, matches)
+            raise ValueError(
+                f"legacy result alias {name!r} is not supported by the requested operation(s)"
+            )
+
+        property_aliases = {
+            "energy": "electronic_energy",
+            "electronic_energy": "electronic_energy",
+            "geometry": "molecular_geometry",
+            "molecular_geometry": "molecular_geometry",
+        }
+        property_name = property_aliases.get(name)
+        if property_name is None:
+            raise ValueError(f"requested result is not in the Tool capability catalog: {name!r}")
+
+        matches = [
+            item for item in capabilities if item["property"] == property_name and compatible(item)
+        ]
+        # A geometry alias after an explicit Opt refers to the optimized output;
+        # otherwise it remains the initial geometry produced by the geometry Tool.
+        if property_name == "molecular_geometry" and "Opt" in requested_operations:
+            optimized = [item for item in matches if item["name"] == "optimized_geometry"]
+            if optimized:
+                matches = optimized
+        if not matches:
+            raise ValueError(
+                f"requested result {name!r} is not produced by the requested operation(s)"
+            )
+        identities = {(item["kind"], item["name"]) for item in matches}
+        if len(identities) != 1:
+            if property_name == "electronic_energy":
+                raise ValueError(
+                    "the request includes both Opt and SP, so ‘energy’ is ambiguous; "
+                    "specify opt_final_electronic_energy or sp_electronic_energy"
+                )
+            raise ValueError(f"requested result alias {name!r} is ambiguous")
+        return _target_from_unique_capability(name, matches)
+
     def validate_plan(self, plan: Plan) -> Plan:
         """Validate generic Tool contracts and return a dependency-ordered Plan.
 
@@ -148,6 +255,16 @@ def describe_tools() -> list[dict[str, Any]]:
 
 
 __all__ = ["ToolRegistry", "build_registry", "describe_tools"]
+
+
+def _target_from_unique_capability(
+    requested_name: str, matches: list[dict[str, Any]]
+) -> ResultTarget:
+    identities = {(item["kind"], item["name"]) for item in matches}
+    if len(identities) != 1:
+        raise ValueError(f"requested result alias {requested_name!r} is ambiguous")
+    kind, canonical_name = next(iter(identities))
+    return ResultTarget(**{kind: canonical_name})
 
 
 def _topological_order(steps: list[Any], dependencies: dict[str, set[str]]) -> list[Any]:

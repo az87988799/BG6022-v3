@@ -12,6 +12,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictStr,
+    ValidationInfo,
     create_model,
     field_validator,
     model_validator,
@@ -24,6 +25,7 @@ from bg6022.models import (
     Operation,
     Plan,
     Request,
+    RequiredGeometryBinding,
     ResultProperty,
     ResultTarget,
     Step,
@@ -165,6 +167,14 @@ class IntakeOutput(BaseModel):
         return self.operations[0] if len(self.operations) == 1 else None
 
 
+class IntakeStructureInput(BaseModel):
+    """Intake-only geometry schema that preserves inline XYZ and other keys."""
+
+    model_config = ConfigDict(extra="allow", strict=True)
+
+    required_bindings: list[RequiredGeometryBinding] = Field(default_factory=list)
+
+
 class InputBindingProposal(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -251,6 +261,8 @@ def intake_message(
     context: Mapping[str, Any] | None = None,
     result_catalog: list[Mapping[str, Any]] | None = None,
     geometry_catalog: list[Mapping[str, Any]] | None = None,
+    capability_catalog: list[Mapping[str, Any]] | None = None,
+    registry: ToolRegistry | None = None,
     cancel: Any = None,
 ) -> IntakeOutput:
     if not message.strip():
@@ -262,7 +274,8 @@ def intake_message(
         for item in catalog
         if isinstance(item, Mapping) and isinstance(item.get("subject_ref"), str)
     )
-    schema = _intake_schema(candidate_refs)
+    capabilities = [dict(item) for item in (capability_catalog or [])]
+    schema = _intake_schema(candidate_refs, capabilities, registry=registry)
     value = client.complete_json(
         [
             {"role": "system", "content": prompt},
@@ -274,6 +287,7 @@ def intake_message(
                         "recent_context": _bounded_context(context),
                         "result_catalog": catalog,
                         "geometry_catalog": [dict(item) for item in (geometry_catalog or [])],
+                        "capability_catalog": capabilities,
                     }
                 ),
             },
@@ -289,7 +303,7 @@ def intake_message(
             "structure_input": {},
             "explicit_parameters": {},
             "electronic_state_candidates": [],
-            "requested_results": ["energy"],
+            "requested_results": ["opt_final_electronic_energy"],
             "missing_fields": [],
         },
         cancel=cancel,
@@ -317,6 +331,7 @@ def plan_message(
                     {
                         "request": request.model_dump(mode="json"),
                         "tool_directory": directory,
+                        "capability_catalog": registry.result_capabilities(),
                         "context": _bounded_context(context),
                         "validation_feedback": validation_feedback,
                     }
@@ -436,6 +451,7 @@ def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) 
     """
 
     plan = registry.validate_plan(plan)
+    _validate_required_geometry_bindings(request, plan, registry)
     proposed_operations = [
         operation for step in plan.steps for operation in registry.get(step.tool).operations
     ]
@@ -459,7 +475,7 @@ def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) 
         matches = [
             target
             for target in plan_targets
-            if _request_target_matches(request_target, target, request)
+            if _request_target_matches(request_target, target, request, registry)
         ]
         if not matches:
             name = request_target.port or request_target.field or "<unknown>"
@@ -503,18 +519,12 @@ def request_from_intake(
     intake: IntakeOutput,
     *,
     request_id: str,
+    registry: ToolRegistry,
     normalized_parameters: ParameterNormalization | None = None,
 ) -> Request:
     if intake.intent == "chemistry_compute" and not intake.operations:
         raise ValueError(
             "the requested scientific operation is missing; please specify SP, Opt, or Freq"
-        )
-    if {"SP", "Opt"}.issubset(intake.operations) and any(
-        value in {"energy", "electronic_energy"} for value in intake.requested_results
-    ):
-        raise ValueError(
-            "the request includes both Opt and SP, so ‘energy’ is ambiguous; "
-            "specify Opt energy or SP energy"
         )
     if any(key in intake.structure_input for key in {"path", "local_path", "file"}):
         raise ValueError("model intake cannot authorize a local file path")
@@ -526,19 +536,24 @@ def request_from_intake(
             "electronic-state parameters need clarification: "
             + ", ".join(normalized.clarification_fields)
         )
-    return Request(
+    structure_input = dict(intake.structure_input)
+    raw_bindings = structure_input.get("required_bindings")
+    if raw_bindings is not None:
+        structure_input["required_bindings"] = [
+            RequiredGeometryBinding.model_validate(item, strict=True).model_dump(mode="json")
+            for item in raw_bindings
+        ]
+    request = Request(
         id=request_id,
         description=message,
         original_text=message,
         requested_results=[
-            ResultTarget(check=value)
-            if value in {"frequency_complete", "local_minimum_supported"}
-            else ResultTarget(field=value)
+            registry.resolve_result_target(value, intake.operations)
             for value in intake.requested_results
         ],
         explicit_parameters=dict(normalized.explicit_parameters),
         structure_input={
-            **dict(intake.structure_input),
+            **structure_input,
             **(
                 {"history_geometry_alias": intake.history_geometry_alias}
                 if intake.history_geometry_alias is not None
@@ -549,6 +564,9 @@ def request_from_intake(
         operations=list(intake.operations),
         missing_fields=list(intake.missing_fields),
     )
+    _validate_required_geometry_contract(request, registry)
+    _require_composite_geometry_sources(request)
+    return request
 
 
 def filter_user_explicit_parameters(message: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
@@ -610,12 +628,21 @@ def electronic_state_clarification(normalized: ParameterNormalization) -> str:
 
 
 def _request_target_matches(
-    request_target: ResultTarget, plan_target: ResultTarget, request: Request
+    request_target: ResultTarget,
+    plan_target: ResultTarget,
+    request: Request,
+    registry: ToolRegistry,
 ) -> bool:
     if request_target.step_id is not None and request_target.step_id != plan_target.step_id:
         return False
 
-    request_kind, request_name = _semantic_target(request_target, request)
+    if request_target.check is not None:
+        request_kind, request_name = "check", request_target.check
+    elif request_target.port is not None:
+        request_kind, request_name = "port", request_target.port
+    else:
+        canonical = registry.resolve_result_target(request_target.field or "", request.operations)
+        request_kind, request_name = _target_identity(canonical)
     plan_kind = (
         "check"
         if plan_target.check is not None
@@ -644,32 +671,139 @@ def _proposal_target_to_result_target(
     )
 
 
-def _semantic_target(target: ResultTarget, request: Request) -> tuple[str, str | None]:
+def _target_identity(target: ResultTarget) -> tuple[str, str]:
     if target.check is not None:
         return "check", target.check
     if target.port is not None:
         return "port", target.port
-    name = target.field
-    if name in {"geometry", "molecular_geometry"} and "Opt" in request.operations:
-        return "port", "optimized_geometry"
-    aliases = {
-        "optimized_geometry": ("port", "optimized_geometry"),
-        "geometry": ("port", "geometry"),
-        "molecular_geometry": ("port", "geometry"),
-        "sp_energy": ("field", "sp_electronic_energy"),
-        "opt_energy": ("field", "opt_final_electronic_energy"),
-        "frequency": ("field", "vibrational_frequencies"),
-        "frequencies": ("field", "vibrational_frequencies"),
-    }
-    if name in aliases:
-        return aliases[name]
-    if name in {"energy", "electronic_energy"}:
-        operations = set(request.operations)
-        if "SP" in operations and "Opt" not in operations:
-            return "field", "sp_electronic_energy"
-        if "Opt" in operations and "SP" not in operations:
-            return "field", "opt_final_electronic_energy"
-    return "field", name
+    assert target.field is not None
+    return "field", target.field
+
+
+def _required_geometry_bindings(request: Request) -> list[RequiredGeometryBinding]:
+    raw = request.structure_input.get("required_bindings", [])
+    if not isinstance(raw, list):
+        raise ValueError("Request.structure_input.required_bindings must be a list")
+    return [RequiredGeometryBinding.model_validate(item, strict=True) for item in raw]
+
+
+def _tool_for_operation(registry: ToolRegistry, operation: str):
+    matches = [
+        registry.get(name)
+        for name in registry.names()
+        if operation in registry.get(name).operations
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"operation {operation!r} must have exactly one registered production Tool"
+        )
+    return matches[0]
+
+
+def _validate_required_geometry_contract(request: Request, registry: ToolRegistry) -> None:
+    for binding in _required_geometry_bindings(request):
+        if binding.consumer_operation not in request.operations:
+            raise ValueError(
+                f"geometry binding consumer {binding.consumer_operation!r} "
+                "is not a requested operation"
+            )
+        consumer = _tool_for_operation(registry, binding.consumer_operation)
+        input_type = consumer.input_ports.get(binding.input_port)
+        if input_type is None:
+            raise ValueError(f"Tool {consumer.name!r} has no input port {binding.input_port!r}")
+        if input_type != "molecular_geometry":
+            raise ValueError("required geometry bindings must target a molecular-geometry input")
+        if binding.source_operation is None:
+            if binding.source_port != "initial_geometry":
+                raise ValueError(
+                    "an initial-geometry binding must use source_port='initial_geometry'"
+                )
+            continue
+        if binding.source_operation not in request.operations:
+            raise ValueError(
+                f"geometry binding source {binding.source_operation!r} is not a requested operation"
+            )
+        producer = _tool_for_operation(registry, binding.source_operation)
+        output_type = producer.output_ports.get(binding.source_port)
+        if output_type is None:
+            raise ValueError(f"Tool {producer.name!r} has no output port {binding.source_port!r}")
+        if output_type != input_type:
+            raise ValueError(
+                f"geometry binding type mismatch: {producer.name}.{binding.source_port} "
+                f"cannot feed {consumer.name}.{binding.input_port}"
+            )
+
+
+def _require_composite_geometry_sources(request: Request) -> None:
+    operations = set(request.operations)
+    if "Opt" not in operations:
+        return
+    bindings = _required_geometry_bindings(request)
+    bound_operations = {item.consumer_operation for item in bindings}
+    missing = [
+        operation
+        for operation in ("Freq", "SP")
+        if operation in operations and operation not in bound_operations
+    ]
+    if missing:
+        names = "、".join(missing)
+        raise ValueError(
+            f"请明确 {names} 使用优化后的结构还是初始结构；我没有让 Planner 自行选择几何来源。"
+        )
+
+
+def _validate_required_geometry_bindings(
+    request: Request, plan: Plan, registry: ToolRegistry
+) -> None:
+    _validate_required_geometry_contract(request, registry)
+    bindings = _required_geometry_bindings(request)
+    if not bindings:
+        return
+    steps_by_operation: dict[str, list[Step]] = {}
+    for step in plan.steps:
+        for operation in registry.get(step.tool).operations:
+            steps_by_operation.setdefault(operation, []).append(step)
+    for binding in bindings:
+        consumers = steps_by_operation.get(binding.consumer_operation, [])
+        if len(consumers) != 1:
+            raise ValueError(
+                f"geometry binding cannot identify one {binding.consumer_operation} Step"
+            )
+        consumer = consumers[0]
+        actual = consumer.inputs.get(binding.input_port)
+        if actual is None:
+            raise ValueError(f"Step {consumer.id!r} omits required input {binding.input_port!r}")
+        if binding.source_operation is not None:
+            producers = steps_by_operation.get(binding.source_operation, [])
+            if len(producers) != 1:
+                raise ValueError(
+                    f"geometry binding cannot identify one {binding.source_operation} Step"
+                )
+            expected = InputReference(
+                step_id=producers[0].id,
+                port=binding.source_port,
+            )
+            if actual != expected:
+                raise ValueError(
+                    f"Step {consumer.id!r}.{binding.input_port} must reference "
+                    f"{producers[0].id}.{binding.source_port} as requested; "
+                    f"received {actual.model_dump(exclude_none=True)}"
+                )
+            continue
+
+        if binding.source_port != "initial_geometry":
+            raise ValueError("unsupported initial geometry source contract")
+        optimizers = steps_by_operation.get("Opt", [])
+        if optimizers:
+            if len(optimizers) != 1:
+                raise ValueError("initial geometry binding cannot identify one Opt Step")
+            initial_reference = optimizers[0].inputs.get(binding.input_port)
+            if actual != initial_reference:
+                raise ValueError(
+                    f"Step {consumer.id!r}.{binding.input_port} must reuse the original "
+                    f"geometry consumed by Opt {optimizers[0].id!r}; it must not use the "
+                    "optimized output or another geometry"
+                )
 
 
 _STATE_TOKEN = (
@@ -993,33 +1127,113 @@ def _bounded_context(context: Mapping[str, Any] | None) -> Mapping[str, Any]:
     }
 
 
-def _intake_schema(candidate_refs: tuple[str, ...]) -> type[BaseModel]:
-    """Build the local subject-reference-constrained schema for one intake round."""
+def _intake_schema(
+    candidate_refs: tuple[str, ...],
+    capability_catalog: list[Mapping[str, Any]],
+    *,
+    registry: ToolRegistry | None = None,
+) -> type[BaseModel]:
+    """Constrain query subjects and calculation targets for one intake round."""
 
-    if not candidate_refs:
-        # Keep the base type for the empty-catalog case so existing lightweight
-        # clients can still classify ordinary compute requests.  The
-        # cross-field and empty-candidate checks below remain authoritative.
-        return IntakeOutput
-
-    allowed = frozenset(candidate_refs)
+    allowed_subjects = frozenset(candidate_refs)
+    capabilities = [dict(item) for item in capability_catalog]
+    allowed_targets = tuple(sorted({str(item["name"]) for item in capabilities}))
 
     def _targets_are_candidates(value: list[QueryTarget]) -> list[QueryTarget]:
-        unknown = sorted({target.subject_ref for target in value} - allowed)
+        unknown = sorted({target.subject_ref for target in value} - allowed_subjects)
         if unknown:
             raise ValueError(f"query subject references are outside this catalog: {unknown}")
         return value
 
-    targets_validator = field_validator("targets")(_targets_are_candidates)
-    selection_model = create_model(
-        "QuerySelectionForCatalog",
-        __base__=QuerySelection,
-        __validators__={"_targets_are_candidates": targets_validator},
+    def _requested_results_are_available(value: list[str], info: ValidationInfo) -> list[str]:
+        unknown = sorted(set(value) - set(allowed_targets))
+        if unknown:
+            raise ValueError(
+                f"requested results are outside the Tool capability catalog: {unknown}"
+            )
+        intent = info.data.get("intent")
+        if value and intent != "chemistry_compute":
+            raise ValueError("only chemistry_compute may request calculation results")
+        operations = set(info.data.get("operations", []))
+        for target in value:
+            candidates = [item for item in capabilities if item["name"] == target]
+            if not any(
+                not item.get("operations") or bool(set(item["operations"]) & operations)
+                for item in candidates
+            ):
+                raise ValueError(
+                    f"requested result {target!r} is not produced by the requested operation(s)"
+                )
+        return value
+
+    def _required_geometry_bindings_are_valid(value: IntakeOutput) -> IntakeOutput:
+        if value.intent != "chemistry_compute":
+            return value
+        structure_input = value.structure_input
+        if isinstance(structure_input, IntakeStructureInput):
+            structure_value = structure_input.model_dump(mode="python", exclude_unset=True)
+        else:
+            structure_value = structure_input
+        request = Request(
+            id="intake_geometry_validation",
+            description="validate intake geometry bindings",
+            operations=list(value.operations),
+            structure_input=structure_value,
+        )
+        bindings = _required_geometry_bindings(request)
+        operations = set(request.operations)
+        for binding in bindings:
+            if binding.consumer_operation not in operations:
+                raise ValueError(
+                    f"geometry binding consumer {binding.consumer_operation!r} "
+                    "is not a requested operation"
+                )
+            if binding.source_operation is not None and binding.source_operation not in operations:
+                raise ValueError(
+                    f"geometry binding source {binding.source_operation!r} "
+                    "is not a requested operation"
+                )
+        if registry is not None:
+            _validate_required_geometry_contract(request, registry)
+        return value
+
+    query_selection_type: Any = QuerySelection | None
+    validators: dict[str, Any] = {
+        "_requested_results_are_available": field_validator("requested_results")(
+            _requested_results_are_available
+        ),
+        "_required_geometry_bindings_are_valid": model_validator(mode="after")(
+            _required_geometry_bindings_are_valid
+        ),
+    }
+    if allowed_targets:
+        target_literal = Literal.__getitem__(allowed_targets)
+        requested_results_type: Any = list[target_literal]
+    else:
+        # An absent registry cannot authorize arbitrary result strings.
+        requested_results_type = list[StrictStr]
+
+    if allowed_subjects:
+        targets_validator = field_validator("targets")(_targets_are_candidates)
+        selection_type = create_model(
+            "QuerySelectionForCatalog",
+            __base__=QuerySelection,
+            __validators__={"_targets_are_candidates": targets_validator},
+        )
+        query_selection_type = selection_type | None
+
+    structure_input_type = create_model(
+        "IntakeStructureInputForCatalog",
+        __base__=IntakeStructureInput,
     )
+
     return create_model(
         "IntakeOutputForCatalog",
         __base__=IntakeOutput,
-        query_selection=(selection_model | None, None),
+        __validators__=validators,
+        requested_results=(requested_results_type, Field(default_factory=list)),
+        structure_input=(structure_input_type, Field(default_factory=structure_input_type)),
+        query_selection=(query_selection_type, None),
     )
 
 
@@ -1030,13 +1244,25 @@ def _coerce_intake_output(
     *,
     message: str,
 ) -> IntakeOutput:
-    payload = value.model_dump(mode="python") if isinstance(value, BaseModel) else value
+    payload = (
+        value.model_dump(mode="python", exclude_unset=True)
+        if isinstance(value, BaseModel)
+        else value
+    )
     try:
         output = schema.model_validate(payload, strict=True)
     except (TypeError, ValueError) as error:
         raise ValueError(f"intake output failed local validation: {error}") from error
     if not isinstance(output, IntakeOutput):
         raise ValueError("intake output has an unexpected model type")
+    if isinstance(output.structure_input, IntakeStructureInput):
+        output = output.model_copy(
+            update={
+                "structure_input": output.structure_input.model_dump(
+                    mode="python", exclude_unset=True
+                )
+            }
+        )
     return _validate_query_selection(output, candidate_refs, message=message)
 
 

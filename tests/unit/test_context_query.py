@@ -7,6 +7,7 @@ import pytest
 
 from bg6022.agent import Agent, _requests_history_geometry, _step_fingerprint
 from bg6022.config import load_config
+from bg6022.llm import LlmError
 from bg6022.models import InputReference, Plan, Request, Result, ResultTarget, Run, Step, Tool
 from bg6022.planner import IntakeOutput, intake_message
 from bg6022.session import (
@@ -656,6 +657,128 @@ def test_three_step_runs_preserve_current_and_historical_energy_for_queries(
         )
         >= 2
     )
+
+
+def test_history_geometry_language_does_not_route_result_query_into_compute_selection(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    registry = build_registry()
+    old_run, old_results = _save_three_step_opt_run(
+        config,
+        session_id="session_recent_geometry_query",
+        run_id="run_recent_geometry_old",
+        description="previous water Opt",
+        energy_token="-76.400000000000",
+    )
+    current_run, current_results = _save_three_step_opt_run(
+        config,
+        session_id="session_recent_geometry_query",
+        run_id="run_recent_geometry_current",
+        description="current water Opt",
+        energy_token="-76.418938720831",
+    )
+    agent = Agent(config, registry, llm=None, session_id="session_recent_geometry_query")
+    for run, results in ((old_run, old_results), (current_run, current_results)):
+        for result in results:
+            agent._record_result_summary(run, result)
+    initial_run_count = len(list((Path(config.data_root_path) / "runs").iterdir()))
+
+    client = SelectingClient(choose_description="current water Opt")
+    agent.llm = client
+    response = agent.handle_message("刚才优化结构的能量是多少？")
+
+    assert response.result is not None
+    assert response.result.run_id == current_run.id
+    assert "-76.418938720831 Eh" in response.text
+    assert "-76.400000000000" not in response.text
+    assert response.run is not None and response.run.id == current_run.id
+    assert len(list((Path(config.data_root_path) / "runs").iterdir())) == initial_run_count
+    assert len(client.catalog) >= 2
+
+
+@pytest.mark.parametrize(
+    ("category", "expected_text"),
+    [
+        ("empty_response", "请求解析阶段未获得有效模型响应"),
+        ("ambiguous_result", "Opt 和 SP 同时请求时"),
+    ],
+)
+def test_llm_intake_failure_names_stage_and_persists_bounded_diagnostic(
+    tmp_path: Path, category: str, expected_text: str
+) -> None:
+    config = _config(tmp_path)
+
+    class EmptyIntakeClient:
+        calls: list[object] = []
+
+        def complete_json(self, *_args, **_kwargs):
+            raise LlmError(
+                "model returned an empty JSON response",
+                category=category,
+                purpose="intake",
+            )
+
+    session_id = "session_intake_failure"
+    response = Agent(
+        config,
+        build_registry(),
+        llm=EmptyIntakeClient(),
+        session_id=session_id,
+    ).handle_message("计算水分子的能量")
+
+    assert expected_text in response.text
+    assert response.run is None
+    runs_path = Path(config.data_root_path) / "runs"
+    assert not runs_path.exists() or list(runs_path.iterdir()) == []
+    saved_session = load_session(config.data_root_path, session_id)
+    assert saved_session["llm_diagnostics"][-1] == {
+        "stage": "intake",
+        "category": category,
+    }
+
+
+def test_llm_planner_failure_names_stage_without_creating_a_run(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    class PlannerFailureClient:
+        calls: list[object] = []
+
+        def complete_json(self, _messages, schema, **kwargs):
+            if kwargs["purpose"] == "intake":
+                return schema.model_validate(
+                    {
+                        "intent": "chemistry_compute",
+                        "operations": ["Opt"],
+                        "molecule_query": "water",
+                        "molecule_input_kind": "name",
+                        "requested_results": ["opt_final_electronic_energy"],
+                    },
+                    strict=True,
+                )
+            raise LlmError(
+                "model returned an empty JSON response",
+                category="empty_response",
+                purpose="planner",
+            )
+
+    session_id = "session_planner_failure"
+    response = Agent(
+        config,
+        build_registry(),
+        llm=PlannerFailureClient(),
+        session_id=session_id,
+    ).handle_message("优化水分子，电荷为0，多重度为1")
+
+    assert "计划生成阶段未获得有效模型响应" in response.text
+    assert response.run is None
+    runs_path = Path(config.data_root_path) / "runs"
+    assert not runs_path.exists() or list(runs_path.iterdir()) == []
+    saved_session = load_session(config.data_root_path, session_id)
+    assert saved_session["llm_diagnostics"][-1] == {
+        "stage": "planner",
+        "category": "empty_response",
+    }
 
 
 @pytest.mark.parametrize(

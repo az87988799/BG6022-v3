@@ -6,7 +6,7 @@ import json
 import os
 import time
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import Event
 from typing import Any
 
@@ -19,20 +19,40 @@ from bg6022.config import AppConfig, LlmSettings
 class LlmError(RuntimeError):
     """A user-actionable model failure without retaining credentials."""
 
-    def __init__(self, message: str, *, category: str, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: str,
+        retryable: bool = False,
+        purpose: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.category = category
         self.retryable = retryable
+        self.purpose = purpose
 
 
 @dataclass(frozen=True)
 class LlmCall:
     purpose: str
-    model: str
+    request_model: str
     schema_version: str | None
     elapsed_seconds: float
     usage: dict[str, Any]
+    response_model: str | None = None
+    category: str = "response"
+    finish_reason: str | None = None
+    body_length: int | None = None
+    transport_attempts: int = 1
+    structured_correction_count: int = 0
     corrected: bool = False
+
+    @property
+    def model(self) -> str:
+        """Compatibility alias for the configured/request model name."""
+
+        return self.request_model
 
 
 class LlmClient:
@@ -69,6 +89,7 @@ class LlmClient:
             remaining_timeout_seconds=remaining_timeout_seconds,
         )
         content, _usage, _finish = payload
+        self._replace_last_call(category="success")
         return content
 
     def complete_json(
@@ -105,14 +126,18 @@ class LlmClient:
         if remaining_timeout_seconds is not None:
             overall_timeout = min(overall_timeout, max(0.0, remaining_timeout_seconds))
         if overall_timeout <= 0:
-            raise LlmError("language-model time budget is exhausted", category="timeout")
+            raise LlmError(
+                "language-model time budget is exhausted", category="timeout", purpose=purpose
+            )
         correction_deadline = time.monotonic() + overall_timeout
         for correction_index in range(corrections + 1):
             if cancel is not None and cancel.is_set():
-                raise LlmError("model call cancelled", category="cancelled")
+                raise LlmError("model call cancelled", category="cancelled", purpose=purpose)
             remaining = correction_deadline - time.monotonic()
             if remaining <= 0:
-                raise LlmError("language-model request timed out", category="timeout")
+                raise LlmError(
+                    "language-model request timed out", category="timeout", purpose=purpose
+                )
             request_messages = messages_with_schema
             if correction_error is not None:
                 request_messages = [
@@ -135,11 +160,35 @@ class LlmClient:
                 remaining_timeout_seconds=remaining,
             )
             if cancel is not None and cancel.is_set():
-                raise LlmError("model call cancelled", category="cancelled")
+                self._replace_last_call(
+                    category="cancelled",
+                    structured_correction_count=correction_index,
+                )
+                raise LlmError("model call cancelled", category="cancelled", purpose=purpose)
             if finish_reason == "length":
                 error = LlmError(
                     "model JSON response was truncated by the token limit",
                     category="truncated",
+                    purpose=purpose,
+                )
+                self._replace_last_call(
+                    category=error.category,
+                    structured_correction_count=correction_index,
+                )
+                if correction_index < corrections:
+                    correction_error = str(error)
+                    corrected = True
+                    continue
+                raise error
+            if not content.strip():
+                error = LlmError(
+                    "model returned an empty JSON response",
+                    category="empty_response",
+                    purpose=purpose,
+                )
+                self._replace_last_call(
+                    category=error.category,
+                    structured_correction_count=correction_index,
                 )
                 if correction_index < corrections:
                     correction_error = str(error)
@@ -149,29 +198,44 @@ class LlmClient:
             try:
                 payload = json.loads(content)
             except (TypeError, json.JSONDecodeError) as error:
+                self._replace_last_call(
+                    category="invalid_json",
+                    structured_correction_count=correction_index,
+                )
                 if correction_index < corrections:
                     correction_error = f"invalid JSON: {error}"
                     corrected = True
                     continue
-                raise LlmError("model returned invalid JSON", category="invalid_json") from error
+                raise LlmError(
+                    "model returned invalid JSON", category="invalid_json", purpose=purpose
+                ) from error
             try:
                 value = _validate_schema(schema, payload)
             except (TypeError, ValueError) as error:
+                ambiguous_energy = _is_ambiguous_energy_request(payload)
+                failure_category = "ambiguous_result" if ambiguous_energy else "schema_error"
+                self._replace_last_call(
+                    category=failure_category,
+                    structured_correction_count=correction_index,
+                )
                 if correction_index < corrections:
                     correction_error = str(error)
                     corrected = True
                     continue
                 raise LlmError(
-                    "model JSON failed the local schema", category="schema_error"
+                    "model JSON failed the local schema",
+                    category=failure_category,
+                    purpose=purpose,
                 ) from error
             self._replace_last_call(
-                purpose=purpose,
-                schema_version=schema_version,
-                usage=usage,
+                category="success",
+                structured_correction_count=correction_index,
                 corrected=corrected,
             )
             return value
-        raise LlmError("model JSON correction bound exhausted", category="schema_error")
+        raise LlmError(
+            "model JSON correction bound exhausted", category="schema_error", purpose=purpose
+        )
 
     def _complete(
         self,
@@ -184,18 +248,21 @@ class LlmClient:
         remaining_timeout_seconds: float | None,
     ) -> tuple[str, dict[str, Any], str | None]:
         if cancel is not None and cancel.is_set():
-            raise LlmError("model call cancelled", category="cancelled")
+            raise LlmError("model call cancelled", category="cancelled", purpose=purpose)
         api_key = self._api_key_override or os.environ.get(self.settings.api_key_env)
         if not api_key:
             raise LlmError(
                 f"set {self.settings.api_key_env} before using the language model",
                 category="missing_api_key",
+                purpose=purpose,
             )
         timeout_seconds = float(self.settings.request_timeout_seconds)
         if remaining_timeout_seconds is not None:
             timeout_seconds = min(timeout_seconds, max(0.0, remaining_timeout_seconds))
         if timeout_seconds <= 0:
-            raise LlmError("language-model time budget is exhausted", category="timeout")
+            raise LlmError(
+                "language-model time budget is exhausted", category="timeout", purpose=purpose
+            )
         deadline = time.monotonic() + timeout_seconds
         payload: dict[str, Any] = {
             "model": self.settings.model,
@@ -211,8 +278,37 @@ class LlmClient:
             timeout = httpx.Timeout(timeout_seconds)
             client = httpx.Client(timeout=timeout, transport=self._transport, follow_redirects=True)
         started = time.monotonic()
+        transport_attempts = 0
+        response_model: str | None = None
+        finish_reason: str | None = None
+        body_length: int | None = None
+        usage: dict[str, Any] = {}
+        call_recorded = False
+
+        def record_call(category: str) -> None:
+            nonlocal call_recorded
+            if call_recorded:
+                self._replace_last_call(category=category)
+                return
+            self.calls.append(
+                LlmCall(
+                    purpose=purpose,
+                    request_model=self.settings.model,
+                    response_model=response_model,
+                    schema_version=schema_version,
+                    elapsed_seconds=time.monotonic() - started,
+                    usage={str(key): value for key, value in usage.items()},
+                    category=category,
+                    finish_reason=finish_reason,
+                    body_length=body_length,
+                    transport_attempts=max(transport_attempts, 1),
+                )
+            )
+            call_recorded = True
+
         try:
             for attempt in range(2):
+                transport_attempts = attempt + 1
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise LlmError("language-model request timed out", category="timeout")
@@ -239,6 +335,7 @@ class LlmClient:
                         category="network_error",
                         retryable=True,
                     ) from error
+                body_length = len(response.content)
                 if response.status_code in {401, 403}:
                     raise LlmError("language-model authentication was rejected", category="auth")
                 if response.status_code == 429:
@@ -267,50 +364,85 @@ class LlmClient:
                     raise LlmError(
                         "language-model response was not valid JSON", category="invalid_response"
                     ) from error
-                try:
-                    choice = data["choices"][0]
-                    content = choice["message"]["content"]
-                except (KeyError, IndexError, TypeError) as error:
+                if not isinstance(data, Mapping):
                     raise LlmError(
-                        "language-model response contained no message", category="empty_response"
-                    ) from error
-                if not isinstance(content, str) or not content.strip():
+                        "language-model response was not a JSON object",
+                        category="invalid_response",
+                    )
+                response_model = _optional_text(data.get("model"))
+                usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+                choices = data.get("choices")
+                if not isinstance(choices, list) or not choices:
+                    raise LlmError(
+                        "language-model response has no valid choices",
+                        category="invalid_response",
+                    )
+                choice = choices[0]
+                if not isinstance(choice, Mapping):
+                    raise LlmError(
+                        "language-model response choice has an invalid structure",
+                        category="invalid_response",
+                    )
+                finish_reason = _optional_text(choice.get("finish_reason"))
+                message = choice.get("message")
+                if not isinstance(message, Mapping):
+                    if response_format is None or finish_reason != "length":
+                        raise LlmError(
+                            "language-model response message has an invalid structure",
+                            category="invalid_response",
+                        )
+                    content = ""
+                else:
+                    content = message.get("content")
+                    if not isinstance(content, str):
+                        if response_format is None or finish_reason != "length":
+                            raise LlmError(
+                                "language-model response content has an invalid structure",
+                                category="invalid_response",
+                            )
+                        content = ""
+                body_length = len(content)
+                category = (
+                    "truncated"
+                    if response_format is not None and finish_reason == "length"
+                    else "empty_response"
+                    if not content.strip()
+                    else "response"
+                )
+                record_call(category)
+                if not content.strip() and response_format is None:
                     raise LlmError(
                         "language-model returned an empty message", category="empty_response"
                     )
-                finish_reason = choice.get("finish_reason")
-                usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-                self.calls.append(
-                    LlmCall(
-                        purpose=purpose,
-                        model=self.settings.model,
-                        schema_version=schema_version,
-                        elapsed_seconds=time.monotonic() - started,
-                        usage={str(key): value for key, value in usage.items()},
-                    )
-                )
                 return content.strip(), usage, finish_reason
             raise LlmError(
                 "language-model request exhausted its retry bound", category="temporary_failure"
             )
+        except LlmError as error:
+            error.purpose = purpose
+            record_call(error.category)
+            raise
         finally:
             if owns_client:
                 client.close()
 
     def _replace_last_call(
-        self, *, purpose: str, schema_version: str, usage: dict[str, Any], corrected: bool
+        self,
+        *,
+        corrected: bool | None = None,
+        category: str | None = None,
+        structured_correction_count: int | None = None,
     ) -> None:
         if not self.calls:
             return
-        last = self.calls[-1]
-        self.calls[-1] = LlmCall(
-            purpose=purpose,
-            model=last.model,
-            schema_version=schema_version,
-            elapsed_seconds=last.elapsed_seconds,
-            usage={str(key): value for key, value in usage.items()},
-            corrected=corrected,
-        )
+        changes: dict[str, Any] = {}
+        if corrected is not None:
+            changes["corrected"] = corrected
+        if category is not None:
+            changes["category"] = category
+        if structured_correction_count is not None:
+            changes["structured_correction_count"] = structured_correction_count
+        self.calls[-1] = replace(self.calls[-1], **changes)
 
 
 DeepSeekClient = LlmClient
@@ -357,6 +489,23 @@ def _schema_version(schema: Mapping[str, Any]) -> str:
     import hashlib
 
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def _optional_text(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _is_ambiguous_energy_request(value: Any) -> bool:
+    if not isinstance(value, Mapping) or value.get("intent") != "chemistry_compute":
+        return False
+    operations = value.get("operations", [])
+    requested_results = value.get("requested_results", [])
+    return (
+        isinstance(operations, list)
+        and {"Opt", "SP"}.issubset(operations)
+        and isinstance(requested_results, list)
+        and any(item in {"energy", "electronic_energy"} for item in requested_results)
+    )
 
 
 def _validate_schema(schema: Any, payload: Any) -> Any:

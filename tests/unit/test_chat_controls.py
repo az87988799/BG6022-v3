@@ -8,7 +8,6 @@ from bg6022.config import load_config
 from bg6022.models import Plan, Request, Run, Step
 from bg6022.planner import (
     InputBindingProposal,
-    IntakeOutput,
     PlanProposal,
     PlanStepProposal,
     PlanTargetProposal,
@@ -36,14 +35,17 @@ environment = 'gas'
 
 
 class FakePlanner:
-    def complete_json(self, _messages, schema, **_kwargs):
-        if schema is IntakeOutput:
-            return IntakeOutput(
-                intent="chemistry_compute",
-                operation="Opt",
-                molecule_query="O",
-                molecule_input_kind="smiles",
-                requested_results=["energy"],
+    def complete_json(self, _messages, schema, **kwargs):
+        if kwargs.get("purpose") == "intake":
+            return schema.model_validate(
+                {
+                    "intent": "chemistry_compute",
+                    "operation": "Opt",
+                    "molecule_query": "O",
+                    "molecule_input_kind": "smiles",
+                    "requested_results": ["opt_final_electronic_energy"],
+                },
+                strict=True,
             )
         return PlanProposal(
             steps=[
@@ -81,7 +83,7 @@ class RevisingPlanner(FakePlanner):
         self.plan_contexts: list[dict[str, object]] = []
 
     def complete_json(self, messages, schema, **kwargs):
-        if schema is IntakeOutput:
+        if kwargs.get("purpose") == "intake":
             return super().complete_json(messages, schema, **kwargs)
         context = json.loads(messages[-1]["content"])
         self.plan_contexts.append(context)

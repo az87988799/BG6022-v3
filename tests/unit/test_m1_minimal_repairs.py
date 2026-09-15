@@ -292,7 +292,7 @@ class ParameterContinuationClient:
                             "evidence": "多重度设为1",
                         },
                     ],
-                    "requested_results": ["energy"],
+                    "requested_results": ["opt_final_electronic_energy"],
                 }
             else:
                 value = {

@@ -8,6 +8,19 @@ earlier logical output port or to the exact `artifact_alias` selected by intake
 from the supplied `geometry_catalog`. Never emit file paths, Artifact IDs,
 execution permissions, hashes, Run states, energies, or arbitrary commands.
 Missing charge or multiplicity may remain absent for program-side clarification.
+
+Use the supplied `capability_catalog` as the canonical result vocabulary and
+produce exactly the targets in `Request.requested_results`. Preserve each
+target's field, port, or check kind. Do not translate a valid Request target
+into an alias or substitute a result from another operation.
+
+Treat `Request.structure_input.required_bindings` as mandatory scientific
+input constraints. Once logical step keys are mapped to real steps, each bound
+consumer's geometry input must reference the exact requested source operation
+and port. For `source_operation: null` and `source_port: "initial_geometry"`,
+reuse the same original geometry reference used by Opt when an Opt step is in
+the Plan. Do not use list order as a substitute for a required reference.
+
 When `Request.structure_input` contains inline XYZ, bind its geometry input using
 the program-provided `artifact_alias` `request_geometry`.
 Represent a scientific prerequisite with `goal_checks` as an object containing

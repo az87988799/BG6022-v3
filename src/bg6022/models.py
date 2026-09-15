@@ -11,6 +11,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    TypeAdapter,
     create_model,
     field_validator,
     model_validator,
@@ -54,6 +55,24 @@ class ResultTarget(StrictModel):
         return self
 
 
+class RequiredGeometryBinding(StrictModel):
+    """A user-required source for one calculation's geometry input.
+
+    This is a nested Request value contract, not a durable runtime object.
+    ``source_operation=None`` with ``source_port='initial_geometry'`` means
+    retain the original input geometry; otherwise the named operation and
+    output port identify the required upstream source.
+    """
+
+    consumer_operation: Operation
+    input_port: str
+    source_operation: Operation | None
+    source_port: str
+
+
+_REQUIRED_GEOMETRY_BINDINGS = TypeAdapter(list[RequiredGeometryBinding])
+
+
 class Request(StrictModel):
     id: str
     description: str
@@ -93,6 +112,18 @@ class Request(StrictModel):
         if value is None:
             return []
         return [{"field": item} if isinstance(item, str) else item for item in value]
+
+    @field_validator("structure_input")
+    @classmethod
+    def _validate_required_geometry_bindings(cls, value: dict[str, Any]) -> dict[str, Any]:
+        raw_bindings = value.get("required_bindings")
+        if raw_bindings is None:
+            return value
+        bindings = _REQUIRED_GEOMETRY_BINDINGS.validate_python(raw_bindings, strict=True)
+        identities = [(item.consumer_operation, item.input_port) for item in bindings]
+        if len(identities) != len(set(identities)):
+            raise ValueError("required geometry bindings must be unique per calculation input")
+        return value
 
     @property
     def operation(self) -> Operation | None:
