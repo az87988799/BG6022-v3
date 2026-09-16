@@ -9,10 +9,10 @@ from the post-fix offline evidence.
 
 | Field | Observed value | Status |
 |---|---|---|
-| Branch | `codex/v3-m2-implementation` at `f6547f76315c27cd72a2899db279fe90799abdcc` | pushed to `origin` |
+| Branch | `codex/v3-m2-implementation` at the final candidate (two commits: `cc11043` plus the evidence commit) | pushed to `origin` |
 | Pre-fix baseline code commits | `e7e300a227973a815c6213f1a4a36996fa3f96f7` (M2 implementation) and `9da71b0d8adae70a812a00704eb6544911d53e1b` (standalone Freq Agent regression) | pushed; historical baseline |
 | Pre-fix evidence commits | `dd0ee54eb0d6b4fed714b73a065f0505b18ff0e1` (M1/M2 records) and `03a421438af09154b567d0c49d7c50c2aacc0b30` (CI result) | pushed; historical baseline |
-| Root-cause repair candidate | `f6547f76315c27cd72a2899db279fe90799abdcc` | pushed; offline-verified; fresh real-entry recertification pending |
+| Root-cause repair candidate | `cc11043` | pushed; final live evidence in [`M2-final-minimal-fix-acceptance.md`](M2-final-minimal-fix-acceptance.md) |
 | Python / OS | Python 3.11.4 / Windows 10 build 26200 | observed |
 | ORCA | `E:\orca\orca.exe`, Program Version 6.1.1 | observed in Run records |
 | Method and scope | r2SCAN-3c, gas phase, neutral singlet H2O and C2H6O | exercised |
