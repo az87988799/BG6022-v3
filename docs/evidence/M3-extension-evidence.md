@@ -8,7 +8,7 @@ complete or accepted.
 | Field | Observed value |
 |---|---|
 | Branch | `codex/v3-m3-extension` |
-| Implementation candidate | `733bd2ee8471071286be99ce50c299f8acead05d` |
+| Implementation candidate | `e71814c458c815ce80211b5c0fa9978220d6ef95` |
 | Baseline | `b5d37f07a040e7eb8dfc1dac7c06af51cf37f255` |
 | Python | 3.11.4 |
 | Key packages | pydantic 2.13.5; httpx 0.28.1; pytest 9.1.1; rdkit 2026.03.6 |
@@ -17,8 +17,8 @@ complete or accepted.
 | LLM | configured model `deepseek-flash`; live LLM suite passed with the key injected only into the current process |
 | Active resources | 4 cores; 1024 MB total; `%maxcore 192`; one concurrent job |
 | Live data root | `E:\BG6022-v3-data` |
-| Config record | `config.example.toml` SHA-256 `1935185b5da3bdb83792021281fbe804adc5f7e8760ed506ef1d1a2be7d09736`; only non-secret path/model/resource settings were recorded |
-| Prompt hashes | `intake.md` `8717035f102e879f25b9c7d3b4b910f0d58f3268234c39aad609c3819660f92d`; `planner.md` `ca3a15d284a306d1675991fad8d523d0ebdec077e136044dbd4284dc1393201e` |
+| Config record | `config.example.toml` SHA-256 `6047a76d41683b6d18059ed38130210adce8b99628f056dcbb522c3c645838b9`; only non-secret path/model/resource settings were recorded |
+| Prompt hashes | `intake.md` `73c75aaa3453c470f979a94bb7ba485536f0c6bd89bf580e4279b0136c57403c`; `planner.md` `eebfea972875d9f0fff0816f0c0cc87afb734804cfd73ceb90bf73addea213e5` |
 
 The machine did not have `uv`, and its installed `build` package had no runnable
 `build.__main__`; the package wheel was nevertheless built successfully with
@@ -42,6 +42,34 @@ The complete offline regression command passed 280 tests with 15 opt-in live
 tests deselected. Ruff lint and format checks, Python compilation, package wheel
 build, and `git diff --check` passed. `uv sync`/`uv build` were not available on
 this host; this environment limitation is recorded rather than hidden.
+
+## Formula input and boundary-fix evidence
+
+This candidate also implements the detailed formula-input and M3 boundary plan
+without adding a formula-specific execution loop. Program-owned identity
+constraints are stored on the Request; formula input accepts ordinary ASCII or
+Unicode-subscript formulas, keeps `H20` distinct from `H2O`, and rejects model
+invention of identity facts. PubChem formula resolution uses the bounded
+`fastformula -> CID list -> batched properties` path: one shared 20-second
+budget, at most three total attempts, at most 20 CIDs, and at most five displayed
+candidates. RDKit-computed composition, component count, isotope state, and
+formal charge are authoritative; source metadata is checked and cannot replace
+those facts. Raw source responses are retained as molecule-source artifacts.
+
+The dedicated formula/boundary suite passed 14 tests. It covers Unicode and
+literal formula preservation, planner identity binding, the two-endpoint
+PubChem path, the shared retry bound, metadata mismatch rejection, charged
+legacy SMILES compatibility, bounded candidate clarification, snapshot-bound
+candidate selection, subject mismatch rejection, punctuation-bounded output
+negation, and cancellation during answer rendering. The complete offline
+regression for this candidate passed 326 tests
+with 16 opt-in live tests skipped. A direct real PubChem smoke request for
+`H2O` completed in two requests, observed 23 returned CIDs, capped the property
+lookup at 20 CIDs, and reported the bounded candidate state; this was a lookup
+smoke test only and is not an ORCA scientific-success claim.
+
+The active resource contract remains 4 cores, 1024 MB total, `%maxcore 192`,
+and one concurrent job. The candidate remains awaiting user acceptance.
 
 ## Minimal repairs applied
 
