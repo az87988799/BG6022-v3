@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-import math
 import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, is_dataclass
@@ -12,8 +12,11 @@ from threading import Event
 from typing import Any
 
 from .answer import (
+    AnswerOutput,
+    compose_answer,
     facts_from_result,
     render_already_finished,
+    render_answer_output,
     render_clarification,
     render_confirmation,
     render_result,
@@ -26,6 +29,7 @@ from .llm import LlmClient, LlmError
 from .models import InputReference, Plan, Request, Result, Run, Step, Tool
 from .orca.profiles import get_profile, resolve_parameters
 from .orca.repair_rules import applicable_repairs, applicable_scf_repair
+from .output_contracts import is_compatible_value, public_type_info
 from .planner import (
     QuerySelection,
     electronic_state_clarification,
@@ -72,6 +76,7 @@ class AgentResponse:
     text: str
     run: Run | None = None
     result: Result | None = None
+    files: tuple[dict[str, Any], ...] = ()
 
 
 class Agent:
@@ -191,6 +196,9 @@ class Agent:
         self._append_message("user", text)
         llm_call_cursor = self._llm_call_count()
         llm_stage = "intake"
+        route_review_used = False
+        answer_draft: AnswerOutput | None = None
+        answer_error: str | None = None
         try:
             self._ensure_request_active(request_token, request_cancel)
             result_catalog = self._build_query_catalog()
@@ -212,6 +220,70 @@ class Agent:
             self._persist_llm_diagnostics(llm_call_cursor, stage="intake")
             llm_call_cursor = self._llm_call_count()
             self._ensure_request_active(request_token, request_cancel)
+
+            answer_stage_eligible = intake.intent in {"chemistry_qa", "daily_qa"} or (
+                intake.intent == "context_query"
+                and (
+                    intake.query_selection is None
+                    or intake.query_selection.status != "selected"
+                )
+            )
+            if answer_stage_eligible:
+                llm_stage = "answer"
+                answer_draft, answer_error = self._compose_answer_draft(
+                    text,
+                    mode="knowledge",
+                    capability_catalog=capability_catalog,
+                    available_outputs=result_catalog,
+                    context={"recent_messages": self._session.get("recent_messages", [])[-12:]},
+                    cancel=request_cancel,
+                )
+                llm_call_cursor = self._llm_call_count()
+                if (
+                    answer_draft is not None
+                    and answer_draft.action == "needs_tools"
+                    and not route_review_used
+                ):
+                    route_targets = self._validated_tool_targets(
+                        answer_draft, capability_catalog
+                    )
+                    if route_targets:
+                        route_review_used = True
+                        llm_stage = "intake"
+                        intake = intake_message(
+                            self.llm,
+                            text,
+                            context={
+                                "recent_messages": self._session.get("recent_messages", []),
+                                "recent_results": self._session.get("recent_results", []),
+                            },
+                            result_catalog=result_catalog,
+                            geometry_catalog=geometry_catalog,
+                            capability_catalog=capability_catalog,
+                            registry=self.registry,
+                            validation_feedback=(
+                                "The previous intake classified this as ordinary question "
+                                "answering, but the public answer stage identified a "
+                                "concrete registered Tool "
+                                f"target: {route_targets}. Re-evaluate the original user message "
+                                "and preserve the molecule, source, and requested result exactly; "
+                                "do not add an operation that the user did not request."
+                            ),
+                            cancel=request_cancel,
+                        )
+                        self._persist_llm_diagnostics(llm_call_cursor, stage="intake")
+                        llm_call_cursor = self._llm_call_count()
+                        self._ensure_request_active(request_token, request_cancel)
+                        answer_draft = None
+                        answer_error = None
+                        if intake.intent in {"chemistry_qa", "daily_qa"}:
+                            answer_draft = AnswerOutput(
+                                action="clarify",
+                                clarification=(
+                                    "我识别到这可能需要一个已注册工具产生具体结果，"
+                                    "但还无法形成合法的工具请求；请明确要获取的结构或文件。"
+                                ),
+                            )
 
             current = self._coerce_run(None)
             normalized_parameters = normalize_user_explicit_parameters(
@@ -263,7 +335,7 @@ class Agent:
                         for item in geometry_catalog
                     )
                     response = AgentResponse(
-                        "当前会话有多个可复用的成功优化结构，请明确选择一个结构别名后再继续：\n"
+                        "当前会话有多个可复用的成功结构，请明确选择一个结构别名后再继续：\n"
                         f"{options}\n回复如“复用 geometry_1”。"
                     )
                     self._append_message("assistant", response.text)
@@ -279,13 +351,13 @@ class Agent:
             ):
                 if not geometry_catalog:
                     response = AgentResponse(
-                        "当前会话没有找到可安全复用的成功优化结构；我没有改用新结构或启动计算。"
+                        "当前会话没有找到可安全复用的成功结构；我没有改用新结构或启动计算。"
                     )
                     self._append_message("assistant", response.text)
                     return response
                 if len(geometry_catalog) > 1:
                     response = AgentResponse(
-                        "当前会话有多个可复用的成功优化结构，请说明要使用哪一个分子或任务。"
+                        "当前会话有多个可复用的成功结构，请说明要使用哪一个分子或任务。"
                     )
                     self._append_message("assistant", response.text)
                     return response
@@ -362,7 +434,12 @@ class Agent:
                 return response
 
             if intake.intent in {"chemistry_qa", "daily_qa"}:
-                return self._answer_question(text, cancel=request_cancel)
+                return self._answer_question(
+                    text,
+                    draft=answer_draft,
+                    error=answer_error,
+                    cancel=request_cancel,
+                )
             if intake.intent == "context_query":
                 return self._answer_context(
                     text,
@@ -448,6 +525,8 @@ class Agent:
             return response
         except LlmError as error:
             stage = error.purpose or llm_stage
+            if stage == "answer":
+                llm_call_cursor = self._llm_call_count()
             self._persist_llm_diagnostics(
                 llm_call_cursor,
                 stage=stage,
@@ -840,17 +919,25 @@ class Agent:
         create_run(self.config.data_root_path, run)
         alias_replacements: dict[str, str] = {}
         if verified_history is not None:
-            source_run, source_step, source_result, source_artifact, source_path = verified_history
+            (
+                source_run,
+                source_step,
+                source_result,
+                source_artifact,
+                source_path,
+                source_port,
+            ) = verified_history
             copied = register_file_artifact(
                 self.config.data_root_path,
                 run,
                 source_path,
                 artifact_type="molecular_geometry",
                 role="input_geometry",
-                source="history:verified_optimized_geometry",
+                source=f"history:verified_{source_artifact.role}",
                 extension=".xyz",
                 metadata={
-                    "history_source_role": "optimized_geometry",
+                    "history_source_role": source_artifact.role,
+                    "history_source_port": source_port,
                     "history_source_run_id": source_run.id,
                     "history_source_step_id": source_step.id,
                     "history_source_attempt": source_result.attempt,
@@ -1421,7 +1508,7 @@ class Agent:
                         "artifact_role": artifact.role if artifact is not None else "待绑定结构",
                         "history_geometry": bool(
                             artifact is not None
-                            and artifact.source == "history:verified_optimized_geometry"
+                            and artifact.source.startswith("history:verified_")
                         ),
                     }
                 )
@@ -1790,16 +1877,36 @@ class Agent:
             return AgentResponse(self._waiting_text(run), run=run, result=result)
         structure = self._result_structure(run, result)
         if run.status in {"succeeded", "failed", "cancelled", "interrupted"}:
+            if run.status == "succeeded":
+                facts, files = self._collect_requested_outputs(run, result)
+            else:
+                facts = self._current_run_facts(run)
+                files = self._files_for_facts(facts)
+            default_text = render_run(
+                run,
+                result,
+                self.registry,
+                structure=structure,
+                **self._failure_render_context(run),
+            )
+            if run.status == "succeeded" and facts:
+                default_text = render_selected_facts(facts)
+                draft, _error = self._compose_answer_draft(
+                    run.request.description,
+                    mode="result",
+                    available_outputs=self._public_answer_outputs(facts, files),
+                    required_outputs=[str(fact["output_ref"]) for fact in facts],
+                    context={"run_status": run.status},
+                )
+                if self._answer_draft_covers_outputs(draft, facts, files=files):
+                    prose = render_answer_output(draft)
+                    if prose:
+                        default_text = f"{prose}\n\n{default_text}"
             return AgentResponse(
-                render_run(
-                    run,
-                    result,
-                    self.registry,
-                    structure=structure,
-                    **self._failure_render_context(run),
-                ),
+                default_text,
                 run=run,
                 result=result,
+                files=tuple(files),
             )
         if result is not None:
             return AgentResponse(
@@ -1808,6 +1915,204 @@ class Agent:
                 result=result,
             )
         return AgentResponse(render_run(run, registry=self.registry), run=run)
+
+    def _collect_requested_outputs(
+        self, run: Run, result: Result | None = None
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Select every current, verified producer named by the Plan targets."""
+
+        facts: list[dict[str, Any]] = []
+        files: list[dict[str, Any]] = []
+        targets = list(run.plan.requested_results)
+        if not targets and result is not None:
+            return facts_from_result(run, result, self.registry), []
+        for target_index, target in enumerate(targets, start=1):
+            kind, name = _normalized_run_target(run, target, self.registry)
+            if kind is None or name is None:
+                continue
+            step = self._target_producer(run, target, kind, name)
+            if step is None:
+                continue
+            relative = run.current_results.get(step.id)
+            if not isinstance(relative, str):
+                continue
+            bound = _load_bound_result(self.config.data_root_path, run, relative)
+            if bound is None or not self._query_result_is_valid(run, step, bound, relative):
+                continue
+            tool = self.registry.get(step.tool)
+            structure = self._query_structure(run, step, bound)
+            selected = bound
+            if kind == "field":
+                if name not in bound.values or not _query_value_is_compatible(
+                    bound.values[name], tool.results.get(name, "")
+                ):
+                    continue
+                selected = bound.model_copy(
+                    update={
+                        "values": {name: bound.values[name]},
+                        "output_ports": {},
+                        "scientific_checks": {},
+                    }
+                )
+            elif kind == "port":
+                artifact = self._query_port_artifact(
+                    run, step, bound, name, tool.output_ports.get(name, "")
+                )
+                if artifact is None:
+                    continue
+                selected = bound.model_copy(
+                    update={
+                        "values": {},
+                        "output_ports": {name: artifact.id},
+                        "scientific_checks": {},
+                    }
+                )
+            else:
+                check = bound.scientific_checks.get(name)
+                if check is None or check.status != "passed":
+                    continue
+                selected = bound.model_copy(
+                    update={"values": {}, "output_ports": {}, "scientific_checks": {name: check}}
+                )
+            selected_facts = facts_from_result(run, selected, self.registry, structure=structure)
+            for fact in selected_facts:
+                output_ref = f"out_{target_index}"
+                fact["output_ref"] = output_ref
+                fact["_run"] = run
+                fact["_result"] = bound
+                facts.append(fact)
+                if fact.get("kind") == "port":
+                    artifact_id = fact.get("value", {}).get("artifact_id")
+                    if isinstance(artifact_id, str):
+                        try:
+                            artifact = find_artifact(run, artifact_id)
+                        except ValueError:
+                            continue
+                        file_info = self._artifact_file_descriptor(
+                            run, step, bound, artifact, ref=f"file_{target_index}"
+                        )
+                        if file_info is not None:
+                            files.append(file_info)
+        return facts, files
+
+    def _target_producer(
+        self, run: Run, target: Any, kind: str, name: str
+    ) -> Step | None:
+        candidates = [
+            step
+            for step in run.plan.steps
+            if name in _declared_target_names(self.registry, step, kind)
+        ]
+        if target.step_id is not None:
+            candidates = [step for step in candidates if step.id == target.step_id]
+        return candidates[0] if len(candidates) == 1 else None
+
+    def _artifact_file_descriptor(
+        self,
+        run: Run,
+        step: Step,
+        result: Result,
+        artifact: Any,
+        *,
+        ref: str,
+    ) -> dict[str, Any] | None:
+        try:
+            path = artifact_path(self.config.data_root_path, run, artifact)
+            raw = path.read_bytes()
+        except (OSError, ValueError):
+            return None
+        if len(raw) > self.config.output_limit_bytes:
+            return None
+        if hashlib.sha256(raw).hexdigest() != artifact.sha256:
+            return None
+        return {
+            "ref": ref,
+            "artifact_id": artifact.id,
+            "filename": path.name,
+            "path": str(path),
+            "sha256": artifact.sha256,
+            "size_bytes": len(raw),
+            "role": artifact.role,
+            "source": artifact.source,
+            "step_id": step.id,
+            "attempt": result.attempt,
+        }
+
+    @staticmethod
+    def _public_answer_outputs(
+        facts: list[Mapping[str, Any]], files: list[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]:
+        outputs: list[dict[str, Any]] = []
+        for fact in facts:
+            metadata = fact.get("metadata") if isinstance(fact.get("metadata"), Mapping) else {}
+            outputs.append(
+                {
+                    "ref": fact.get("output_ref"),
+                    "kind": fact.get("kind"),
+                    "name": fact.get("name"),
+                    "property": fact.get("result_property"),
+                    "type": fact.get("expected_type"),
+                    "label": metadata.get("label"),
+                    "description": metadata.get("description"),
+                    "caveat": metadata.get("caveat"),
+                }
+            )
+        outputs.extend(
+            {
+                "ref": item.get("ref"),
+                "kind": "file",
+                "name": item.get("filename"),
+                "property": None,
+                "type": "file",
+                "label": item.get("role"),
+                "description": "已验证并可交付的本地产物文件",
+            }
+            for item in files
+        )
+        return outputs
+
+    @staticmethod
+    def _answer_draft_covers_outputs(
+        draft: AnswerOutput | None,
+        facts: list[Mapping[str, Any]],
+        *,
+        files: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] = (),
+    ) -> bool:
+        if draft is None or draft.action != "respond":
+            return False
+        required = {
+            str(fact.get("output_ref")) for fact in facts if fact.get("output_ref")
+        }
+        valid = required | {
+            str(item.get("ref")) for item in files if item.get("ref")
+        }
+        cited = {ref for section in draft.sections for ref in section.output_refs}
+        return required <= cited and cited <= valid
+
+    def _files_for_facts(self, facts: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        files: list[dict[str, Any]] = []
+        for index, fact in enumerate(facts, start=1):
+            run = fact.get("_run")
+            result = fact.get("_result")
+            if not isinstance(run, Run) or not isinstance(result, Result):
+                continue
+            step = next((item for item in run.plan.steps if item.id == fact.get("step_id")), None)
+            if step is None or fact.get("kind") != "port":
+                continue
+            value = fact.get("value")
+            artifact_id = value.get("artifact_id") if isinstance(value, Mapping) else None
+            if not isinstance(artifact_id, str):
+                continue
+            try:
+                artifact = find_artifact(run, artifact_id)
+            except ValueError:
+                continue
+            descriptor = self._artifact_file_descriptor(
+                run, step, result, artifact, ref=f"file_{index}"
+            )
+            if descriptor is not None:
+                files.append(descriptor)
+        return files
 
     def _waiting_text(self, run: Run) -> str:
         if run.waiting_for == "confirmation":
@@ -2056,7 +2361,7 @@ class Agent:
         return catalog
 
     def _build_geometry_catalog(self) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-        """Expose bounded aliases for current, verified optimized geometries."""
+        """Expose bounded aliases for verified molecular-geometry outputs."""
 
         indexed_ids: list[str] = []
         active_run_id = self._session.get("active_run_id")
@@ -2085,61 +2390,69 @@ class Agent:
                     tool = self.registry.get(step.tool)
                 except ValueError:
                     continue
-                if tool.name != "optimize_geometry":
-                    continue
                 relative = run.current_results.get(step.id)
                 if not isinstance(relative, str):
                     continue
                 result = _load_bound_result(self.config.data_root_path, run, relative)
                 if result is None or not self._query_result_is_valid(run, step, result, relative):
                     continue
-                artifact = self._query_port_artifact(
-                    run, step, result, "optimized_geometry", "molecular_geometry"
-                )
-                if artifact is None or artifact.role != "optimized_geometry":
-                    continue
-                try:
-                    geometry_path = artifact_path(self.config.data_root_path, run, artifact)
-                    geometry = parse_xyz_bytes(geometry_path.read_bytes())
-                except (OSError, ValueError):
-                    continue
-                alias = f"geometry_{len(catalog) + 1}"
-                binding = {
-                    "session_id": self.session_id,
-                    "run_id": run.id,
-                    "step_id": step.id,
-                    "result_path": relative,
-                    "attempt": result.attempt,
-                    "step_fingerprint": _step_fingerprint(step),
-                    "artifact_id": artifact.id,
-                    "sha256": artifact.sha256,
-                }
-                bindings[alias] = binding
-                system = self._query_structure(run, step, result)
-                catalog.append(
-                    {
-                        "alias": alias,
-                        "description": run.request.description[:160],
-                        "created_at": run.created_at,
-                        "run_status": run.status,
-                        "system": system,
-                        "geometry": {
-                            "role": "verified optimized_geometry",
-                            "atom_count": geometry.atom_count,
-                        },
-                        "calculation": {
-                            "method_profile": step.parameters.get("method_profile"),
-                            "environment": step.parameters.get("environment"),
-                            "charge": step.parameters.get("charge"),
-                            "multiplicity": step.parameters.get("multiplicity"),
-                        },
+                for port, expected_type in tool.output_ports.items():
+                    if len(catalog) >= MAX_HISTORY_GEOMETRIES:
+                        return catalog, bindings
+                    if expected_type != "molecular_geometry":
+                        continue
+                    artifact = self._query_port_artifact(run, step, result, port, expected_type)
+                    if artifact is None or artifact.role not in {
+                        "initial_geometry",
+                        "optimized_geometry",
+                    }:
+                        continue
+                    try:
+                        geometry_path = artifact_path(self.config.data_root_path, run, artifact)
+                        geometry = parse_xyz_bytes(geometry_path.read_bytes())
+                    except (OSError, ValueError):
+                        continue
+                    alias = f"geometry_{len(catalog) + 1}"
+                    binding = {
+                        "session_id": self.session_id,
+                        "run_id": run.id,
+                        "step_id": step.id,
+                        "result_path": relative,
+                        "attempt": result.attempt,
+                        "step_fingerprint": _step_fingerprint(step),
+                        "artifact_id": artifact.id,
+                        "sha256": artifact.sha256,
+                        "port": port,
+                        "role": artifact.role,
                     }
-                )
+                    bindings[alias] = binding
+                    system = self._query_structure(run, step, result)
+                    catalog.append(
+                        {
+                            "alias": alias,
+                            "description": run.request.description[:160],
+                            "created_at": run.created_at,
+                            "run_status": run.status,
+                            "system": system,
+                            "geometry": {
+                                "role": f"verified {artifact.role}",
+                                "port": port,
+                                "atom_count": geometry.atom_count,
+                            },
+                            "calculation": {
+                                "tool": tool.name,
+                                "method_profile": step.parameters.get("method_profile"),
+                                "environment": step.parameters.get("environment"),
+                                "charge": step.parameters.get("charge"),
+                                "multiplicity": step.parameters.get("multiplicity"),
+                            },
+                        }
+                    )
         return catalog, bindings
 
     def _verify_history_geometry_binding(
         self, binding: Mapping[str, Any]
-    ) -> tuple[Run, Step, Result, Any, Path]:
+    ) -> tuple[Run, Step, Result, Any, Path, str]:
         """Revalidate source result and bytes immediately before copying them."""
 
         if binding.get("session_id") != self.session_id:
@@ -2156,7 +2469,6 @@ class Agent:
         result = _load_bound_result(self.config.data_root_path, source_run, relative)
         if (
             step is None
-            or step.tool != "optimize_geometry"
             or result is None
             or source_run.current_results.get(step.id) != relative
             or result.status != "succeeded"
@@ -2167,13 +2479,23 @@ class Agent:
             or result.step_fingerprint != binding.get("step_fingerprint")
         ):
             raise ValueError("history geometry no longer belongs to a current successful result")
+        try:
+            source_tool = self.registry.get(step.tool)
+        except ValueError as error:
+            raise ValueError("history geometry source Tool is unavailable") from error
+        port = binding.get("port")
+        if not isinstance(port, str) or source_tool.output_ports.get(port) != "molecular_geometry":
+            raise ValueError("history geometry binding does not name a geometry output port")
         artifact = self._query_port_artifact(
-            source_run, step, result, "optimized_geometry", "molecular_geometry"
+            source_run, step, result, port, "molecular_geometry"
         )
         if (
             artifact is None
             or artifact.id != binding.get("artifact_id")
-            or artifact.role != "optimized_geometry"
+            or artifact.role not in {"initial_geometry", "optimized_geometry"}
+            or (
+                binding.get("role") is not None and artifact.role != binding.get("role")
+            )
             or artifact.step_id != step.id
             or artifact.attempt != result.attempt
             or artifact.sha256 != binding.get("sha256")
@@ -2181,7 +2503,7 @@ class Agent:
             raise ValueError("history geometry artifact binding is invalid")
         path = artifact_path(self.config.data_root_path, source_run, artifact)
         parse_xyz_bytes(path.read_bytes())
-        return source_run, step, result, artifact, path
+        return source_run, step, result, artifact, path, port
 
     def _public_query_entry(
         self,
@@ -2199,6 +2521,7 @@ class Agent:
         metadata = dict(tool.result_metadata.get(name, {}))
         metadata.setdefault("label", name.replace("_", " "))
         metadata.setdefault("description", tool.description)
+        contract = public_type_info(expected_type, kind=kind)
         item = {
             "subject_ref": subject_ref,
             "active_task": run.id == self._session.get("active_run_id"),
@@ -2223,7 +2546,9 @@ class Agent:
                 "property": property_name,
                 "label": metadata["label"],
                 "description": metadata["description"],
-                "unit": expected_type if kind == "field" else None,
+                "type": contract["type"],
+                "unit": contract["unit"],
+                "mime_type": contract["mime_type"],
                 "artifact_type": expected_type if kind == "port" else None,
                 "caveat": metadata.get("caveat"),
                 "validity": "verified",
@@ -2354,7 +2679,11 @@ class Agent:
                 is not None
             }
             safe_result = result.model_copy(update={"values": values, "output_ports": ports})
-            facts.extend(facts_from_result(run, safe_result, self.registry, structure=structure))
+            current_facts = facts_from_result(run, safe_result, self.registry, structure=structure)
+            for fact in current_facts:
+                fact["_run"] = run
+                fact["_result"] = result
+            facts.extend(current_facts)
         return facts
 
     def _incomplete_target_labels(
@@ -2620,36 +2949,79 @@ class Agent:
             }
         return {}
 
-    def _answer_question(self, question: str, *, cancel: Event | None = None) -> AgentResponse:
+    def _compose_answer_draft(
+        self,
+        question: str,
+        *,
+        mode: str,
+        capability_catalog: list[Mapping[str, Any]] | None = None,
+        available_outputs: list[Mapping[str, Any]] | None = None,
+        required_outputs: list[str] | tuple[str, ...] = (),
+        context: Mapping[str, Any] | None = None,
+        cancel: Event | None = None,
+    ) -> tuple[AnswerOutput | None, str | None]:
+        start = self._llm_call_count()
+        failure_category: str | None = None
+        if not callable(getattr(self.llm, "complete_json", None)):
+            return None, "answer protocol is unavailable on the configured model client"
         try:
-            text = self.llm.complete_text(
-                [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Answer the question without claiming an unperformed computation."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {
-                                "question": question,
-                                "recent_messages": self._session.get("recent_messages", [])[-12:],
-                            },
-                            ensure_ascii=False,
-                        ),
-                    },
-                ],
-                purpose="answer",
+            draft = compose_answer(
+                self.llm,
+                question=question,
+                mode=mode,  # type: ignore[arg-type]
+                capability_catalog=capability_catalog or self.registry.result_capabilities(),
+                available_outputs=available_outputs or (),
+                required_outputs=required_outputs,
+                context=context,
                 cancel=cancel,
             )
+            if not isinstance(draft, AnswerOutput):
+                draft = AnswerOutput.model_validate(draft, strict=True)
         except LlmError as error:
-            text = (
-                "当前请求已取消。"
-                if error.category == "cancelled"
-                else f"当前配置的模型无法回答：{error}"
+            failure_category = error.category
+            if error.category == "cancelled":
+                raise
+            return None, str(error)
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            failure_category = "schema_error"
+            return None, str(error)
+        finally:
+            self._persist_llm_diagnostics(
+                start,
+                stage="answer",
+                failure_category=failure_category,
             )
+        return draft, None
+
+    @staticmethod
+    def _validated_tool_targets(
+        draft: AnswerOutput, capability_catalog: list[Mapping[str, Any]]
+    ) -> tuple[str, ...]:
+        names = {str(item.get("name")) for item in capability_catalog if item.get("name")}
+        requested = tuple(dict.fromkeys(str(item) for item in draft.requested_results))
+        if not requested or any(item not in names for item in requested):
+            return ()
+        return requested
+
+    def _answer_question(
+        self,
+        question: str,
+        *,
+        draft: AnswerOutput | None = None,
+        error: str | None = None,
+        cancel: Event | None = None,
+    ) -> AgentResponse:
+        del cancel
+        if draft is not None and draft.action == "respond":
+            text = render_answer_output(draft)
+            if not text:
+                text = "当前配置的模型没有生成可展示的回答。"
+        elif draft is not None and draft.action == "clarify":
+            text = render_answer_output(draft) or "请进一步明确要查询的对象或性质。"
+        elif error:
+            text = f"当前配置的模型无法回答：{error}"
+        else:
+            text = "当前配置的模型没有生成可展示的回答。"
         response = AgentResponse(text)
         self._append_message("assistant", text)
         return response
@@ -2701,11 +3073,34 @@ class Agent:
             response = AgentResponse(text)
             self._append_message("assistant", text)
             return response
-        text = render_selected_facts(facts)
+        for index, fact in enumerate(facts, start=1):
+            fact["output_ref"] = f"out_{index}"
+        files = self._files_for_facts(facts)
+        default_text = render_selected_facts(facts)
+        draft, _error = self._compose_answer_draft(
+            question,
+            mode="query",
+            available_outputs=self._public_answer_outputs(facts, files),
+            required_outputs=[str(fact["output_ref"]) for fact in facts],
+            context={
+                "run_status": facts[0].get("run_status") if facts else None,
+            },
+            cancel=cancel,
+        )
+        text = default_text
+        if self._answer_draft_covers_outputs(draft, facts, files=files):
+            prose = render_answer_output(draft)
+            if prose:
+                text = f"{prose}\n\n{default_text}"
         first = facts[0] if facts else {}
         run = first.get("_run")
         result = first.get("_result")
-        response = AgentResponse(text, run=run, result=result)
+        response = AgentResponse(
+            text,
+            run=run,
+            result=result,
+            files=tuple(files),
+        )
         self._append_message("assistant", text)
         return response
 
@@ -3164,6 +3559,49 @@ def _declared_target_names(registry: ToolRegistry, step: Step, kind: str) -> set
     return set(tool.results) - set(tool.output_ports)
 
 
+def _normalized_run_target(
+    run: Run, target: Any, registry: ToolRegistry
+) -> tuple[str | None, str | None]:
+    """Normalize legacy target spellings against the current Tool directory."""
+
+    if target.check is not None:
+        return "check", target.check
+    kind = "port" if target.port is not None else "field"
+    name = target.port or target.field
+    if name is None:
+        return None, None
+    operations = set(run.request.operations)
+    if name == "energy":
+        if operations == {"SP"}:
+            return "field", "sp_electronic_energy"
+        if operations == {"Opt"}:
+            return "field", "opt_final_electronic_energy"
+    if name in {"geometry", "molecular_geometry"}:
+        if "Opt" in operations:
+            return "port", "optimized_geometry"
+        return "port", "geometry"
+    aliases = {
+        "sp_energy": ("field", "sp_electronic_energy"),
+        "opt_energy": ("field", "opt_final_electronic_energy"),
+        "frequency": ("field", "vibrational_frequencies"),
+        "frequencies": ("field", "vibrational_frequencies"),
+        "optimized_geometry": ("port", "optimized_geometry"),
+    }
+    if name in aliases:
+        return aliases[name]
+    if kind == "field":
+        # Old Plans sometimes encoded a port in field.  Resolve only if the
+        # producer directory proves that this name is a port.
+        port_matches = [
+            step
+            for step in run.plan.steps
+            if name in _declared_target_names(registry, step, "port")
+        ]
+        if port_matches:
+            return "port", name
+    return kind, name
+
+
 def _invalidate_current_results(run: Run, changed_step_id: str) -> None:
     """Drop current outputs for a changed step and every downstream consumer."""
 
@@ -3206,22 +3644,17 @@ def _requested_results_satisfied(data_root: str, run: Run, registry: ToolRegistr
                 return False
     if run.plan.requested_results:
         for target in run.plan.requested_results:
+            target_kind, target_name = _normalized_run_target(run, target, registry)
+            if target_kind is None or target_name is None:
+                return False
             step_id = target.step_id
             if step_id is None:
                 # Old M0 targets were unqualified; the registry ensures this
                 # is unique, so the first producer is the only legal binding.
-                kind = (
-                    "check"
-                    if target.check is not None
-                    else "port"
-                    if target.port is not None
-                    else "field"
-                )
-                name = target.check or target.port or target.field
                 matches = [
                     step.id
                     for step in run.plan.steps
-                    if name is not None and name in _declared_target_names(registry, step, kind)
+                    if target_name in _declared_target_names(registry, step, target_kind)
                 ]
                 if len(matches) != 1:
                     return False
@@ -3235,28 +3668,27 @@ def _requested_results_satisfied(data_root: str, run: Run, registry: ToolRegistr
             step = next((item for item in run.plan.steps if item.id == step_id), None)
             if step is None or result.step_fingerprint != _step_fingerprint(step):
                 return False
-            if target.field is not None and target.field not in result.values:
-                return False
-            if target.field is not None:
+            if target_kind == "field":
                 tool = registry.get(step.tool)
-                expected_type = tool.results.get(target.field)
+                expected_type = tool.results.get(target_name)
                 if (
                     expected_type is None
-                    or target.field in tool.output_ports
-                    or not _query_value_is_compatible(result.values[target.field], expected_type)
+                    or target_name in tool.output_ports
+                    or target_name not in result.values
+                    or not _query_value_is_compatible(result.values[target_name], expected_type)
                 ):
                     return False
-            if target.check is not None:
-                check = result.scientific_checks.get(target.check)
+            if target_kind == "check":
+                check = result.scientific_checks.get(target_name)
                 if check is None or check.status != "passed":
                     return False
                 if not _result_check_input_is_bound(data_root, run, result, check):
                     return False
-            if target.port is not None:
+            if target_kind == "port":
                 tool = registry.get(step.tool)
-                artifact_id = result.output_ports.get(target.port)
+                artifact_id = result.output_ports.get(target_name)
                 if (
-                    target.port not in tool.output_ports
+                    target_name not in tool.output_ports
                     or artifact_id is None
                     or artifact_id not in result.artifact_ids
                 ):
@@ -3269,7 +3701,7 @@ def _requested_results_satisfied(data_root: str, run: Run, registry: ToolRegistr
                 if (
                     artifact.step_id != step.id
                     or artifact.attempt != result.attempt
-                    or artifact.artifact_type != tool.output_ports[target.port]
+                    or artifact.artifact_type != tool.output_ports[target_name]
                     or artifact.role == "restart_candidate"
                 ):
                     return False
@@ -3311,94 +3743,9 @@ def _step_fingerprint(step: Step) -> str:
 
 
 def _query_value_is_compatible(value: Any, declared_type: str) -> bool:
-    """Accept only finite values whose persisted unit/type matches the Tool."""
+    """Accept only values covered by a registered public output contract."""
 
-    if declared_type == "frequency":
-        if not isinstance(value, Mapping) or value.get("complete") is not True:
-            return False
-        if value.get("unit") != "cm^-1" or type(value.get("scaling_applied")) is not bool:
-            return False
-        modes = value.get("modes")
-        if not isinstance(modes, list) or not modes:
-            return False
-        indices: list[int] = []
-        for mode in modes:
-            if not isinstance(mode, Mapping):
-                return False
-            index, number = mode.get("index"), mode.get("value")
-            if type(index) is not int or type(number) not in {int, float}:
-                return False
-            if mode.get("unit") != "cm^-1" or not math.isfinite(float(number)):
-                return False
-            indices.append(index)
-        if indices != list(range(len(indices))):
-            return False
-        factor = value.get("scaling_factor")
-        return factor is None or (
-            type(factor) in {int, float} and math.isfinite(float(factor)) and factor > 0
-        )
-    if declared_type == "Eh":
-        if not isinstance(value, Mapping):
-            return False
-        raw = value.get("value")
-        if type(raw) not in {int, float} or not math.isfinite(float(raw)):
-            return False
-        if value.get("unit") != "Eh":
-            return False
-        token = value.get("token")
-        if token is not None:
-            if not isinstance(token, str):
-                return False
-            try:
-                if not math.isfinite(float(token)):
-                    return False
-            except ValueError:
-                return False
-        return True
-    if declared_type == "angstrom":
-        if not isinstance(value, Mapping):
-            return False
-        raw = value.get("value")
-        if type(raw) not in {int, float} or not math.isfinite(float(raw)):
-            return False
-        if value.get("unit") != "angstrom":
-            return False
-        atom_indices = value.get("atom_indices")
-        if atom_indices is not None:
-            if (
-                not isinstance(atom_indices, list)
-                or len(atom_indices) != 2
-                or any(type(item) is not int or item < 1 for item in atom_indices)
-                or atom_indices[0] == atom_indices[1]
-            ):
-                return False
-        atom_symbols = value.get("atom_symbols")
-        if atom_symbols is not None and (
-            not isinstance(atom_symbols, list)
-            or len(atom_symbols) != 2
-            or any(not isinstance(item, str) or not item for item in atom_symbols)
-        ):
-            return False
-        return True
-    if declared_type == "integer":
-        if isinstance(value, Mapping):
-            value = value.get("value")
-        return type(value) is int
-    if declared_type == "text":
-        if isinstance(value, Mapping):
-            value = value.get("value")
-        return type(value) is str
-    if isinstance(value, Mapping):
-        raw = value.get("value")
-        if type(raw) in {int, float} and not math.isfinite(float(raw)):
-            return False
-        unit = value.get("unit")
-        if unit is not None and unit != declared_type:
-            return False
-        return True
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return math.isfinite(float(value))
-    return True
+    return is_compatible_value(value, declared_type)
 
 
 def _step_purpose(step: Step) -> str:

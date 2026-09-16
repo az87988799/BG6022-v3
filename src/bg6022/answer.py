@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 
 from bg6022.llm import LlmClient
 from bg6022.models import Result, Run
@@ -26,6 +28,96 @@ _PARAMETER_LABELS = {
     "atom_i": "第一个原子索引",
     "atom_j": "第二个原子索引",
 }
+
+
+class AnswerSection(BaseModel):
+    """Small, ephemeral public-answer section; not a runtime domain object."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    text: StrictStr
+    format: Literal["plain", "table"] = "plain"
+    output_refs: list[StrictStr] = Field(default_factory=list)
+
+
+class AnswerOutput(BaseModel):
+    """Bounded common protocol for knowledge, result, and query answers."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    action: Literal["respond", "needs_tools", "clarify"]
+    requested_results: list[StrictStr] = Field(default_factory=list)
+    clarification: StrictStr | None = None
+    sections: list[AnswerSection] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_action(self) -> AnswerOutput:
+        if self.action == "needs_tools" and not self.requested_results:
+            raise ValueError("needs_tools answer must name at least one requested result")
+        if self.action != "needs_tools" and self.requested_results:
+            raise ValueError("requested_results are only valid for needs_tools")
+        if self.action == "clarify" and not (
+            (self.clarification and self.clarification.strip()) or self.sections
+        ):
+            raise ValueError("clarify answer needs a clarification or section")
+        if len(self.sections) > 8:
+            raise ValueError("answer may contain at most eight sections")
+        return self
+
+
+def compose_answer(
+    client: LlmClient,
+    *,
+    question: str,
+    mode: Literal["knowledge", "result", "query"],
+    capability_catalog: Sequence[Mapping[str, Any]] = (),
+    available_outputs: Sequence[Mapping[str, Any]] = (),
+    required_outputs: Sequence[str] = (),
+    context: Mapping[str, Any] | None = None,
+    cancel: Any = None,
+) -> AnswerOutput:
+    """Ask one bounded model call to organize a public answer.
+
+    The model receives names and descriptions only.  Verified values, paths,
+    and file bytes remain program-owned and are rendered by the caller.
+    """
+
+    payload = {
+        "question": question,
+        "mode": mode,
+        "capability_catalog": [dict(item) for item in capability_catalog],
+        "available_outputs": [dict(item) for item in available_outputs],
+        "required_outputs": list(required_outputs),
+        "context": dict(context or {}),
+    }
+    return client.complete_json(
+        [
+            {"role": "system", "content": load_prompt("answer")},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False, sort_keys=True)},
+        ],
+        AnswerOutput,
+        purpose="answer",
+        example={
+            "action": "respond",
+            "requested_results": [],
+            "clarification": None,
+            "sections": [
+                {"text": "下面是与用户目标直接相关的说明。", "format": "plain", "output_refs": []}
+            ],
+        },
+        cancel=cancel,
+    )
+
+
+def render_answer_output(output: AnswerOutput | None) -> str:
+    """Render only model prose; scientific facts are appended separately."""
+
+    if output is None:
+        return ""
+    sections = [section.text.strip() for section in output.sections if section.text.strip()]
+    if output.clarification and output.clarification.strip():
+        sections.insert(0, output.clarification.strip())
+    return "\n\n".join(sections)
 
 
 def render_confirmation(preview: Mapping[str, Any]) -> str:
@@ -967,10 +1059,14 @@ def _string_or_none(value: Any) -> str | None:
 
 
 __all__ = [
+    "AnswerOutput",
+    "AnswerSection",
+    "compose_answer",
     "context_answer",
     "explain_result",
     "fact_matches_question",
     "render_already_finished",
+    "render_answer_output",
     "render_clarification",
     "render_confirmation",
     "facts_from_result",

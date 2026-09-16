@@ -65,6 +65,20 @@ def make_resolve_molecule_tool(config: AppConfig | None = None) -> Tool:
         parameter_type=ResolveMoleculeParameters,
         output_ports={"molecule": "molecule"},
         results={"molecule_formula": "text", "formal_charge": "integer"},
+        result_metadata={
+            "molecule": {
+                "label": "已验证分子结构记录",
+                "description": "来自结构来源并经解析校验的分子身份与 SMILES 记录",
+            },
+            "molecule_formula": {
+                "label": "分子式",
+                "description": "已验证分子结构的分子式",
+            },
+            "formal_charge": {
+                "label": "形式电荷",
+                "description": "已验证分子结构记录中的形式电荷",
+            },
+        },
         success_conditions=["structure parsed and identity source recorded"],
         repair_capabilities=[],
         requires_compute_permission=False,

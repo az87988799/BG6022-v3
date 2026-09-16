@@ -269,9 +269,10 @@ class LlmClient:
             "messages": [dict(message) for message in messages],
             "max_tokens": self.settings.max_tokens,
         }
-        if purpose == "intake" and "deepseek.com" in self.settings.base_url.casefold():
-            # Intake is bounded schema extraction. DeepSeek's default thinking
-            # mode can consume the full output budget before emitting its JSON.
+        if purpose in {"intake", "answer"} and "deepseek.com" in self.settings.base_url.casefold():
+            # Intake and the public answer protocol are bounded extraction/
+            # presentation calls. DeepSeek's default thinking mode can consume
+            # the full output budget before emitting a usable body.
             payload["thinking"] = {"type": "disabled"}
         if response_format is not None:
             payload["response_format"] = response_format
@@ -408,12 +409,16 @@ class LlmClient:
                 body_length = len(content)
                 category = (
                     "truncated"
-                    if response_format is not None and finish_reason == "length"
+                    if finish_reason == "length"
                     else "empty_response"
                     if not content.strip()
                     else "response"
                 )
                 record_call(category)
+                if response_format is None and finish_reason == "length":
+                    raise LlmError(
+                        "language-model output was truncated", category="truncated"
+                    )
                 if not content.strip() and response_format is None:
                     raise LlmError(
                         "language-model returned an empty message", category="empty_response"

@@ -129,6 +129,17 @@ def make_generate_geometry_tool(config: AppConfig | None = None) -> Tool:
         output_ports={"geometry": "molecular_geometry"},
         results={"geometry_atom_count": "integer"},
         result_properties={"geometry": "molecular_geometry", "geometry_atom_count": "atom_count"},
+        result_metadata={
+            "geometry": {
+                "label": "初始 XYZ 结构文件",
+                "description": "由已验证分子生成并通过 XYZ 解析校验的初始结构",
+                "caveat": "这是初始猜测结构，不代表已完成几何优化",
+            },
+            "geometry_atom_count": {
+                "label": "结构原子数",
+                "description": "初始 XYZ 结构中的原子数量",
+            },
+        },
         success_conditions=["RDKit structure rebuilt", "XYZ parsed and atom order preserved"],
         repair_capabilities=[],
         requires_compute_permission=False,

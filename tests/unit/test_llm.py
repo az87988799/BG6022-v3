@@ -386,9 +386,13 @@ def test_length_finish_reason_wins_over_missing_json_message() -> None:
 
 @pytest.mark.parametrize(
     ("purpose", "expected_thinking"),
-    [("intake", {"type": "disabled"}), ("planner", None)],
+    [
+        ("intake", {"type": "disabled"}),
+        ("answer", {"type": "disabled"}),
+        ("planner", None),
+    ],
 )
-def test_deepseek_disables_thinking_only_for_bounded_intake_json(
+def test_deepseek_disables_thinking_for_intake_and_public_answer_json(
     purpose: str, expected_thinking: dict[str, str] | None
 ) -> None:
     llm, requests, http_client = _offline_client(
@@ -432,6 +436,31 @@ def test_complete_text_still_rejects_an_empty_answer() -> None:
         assert len(requests) == 1
         assert len(llm.calls) == 1
         assert llm.calls[0].category == "empty_response"
+    finally:
+        http_client.close()
+
+
+def test_complete_text_classifies_length_finish_as_truncated() -> None:
+    llm, requests, http_client = _offline_client(
+        [
+            _response(
+                "partial answer",
+                finish_reason="length",
+                usage={"prompt_tokens": 7, "completion_tokens": 4096},
+            )
+        ],
+        structured_output_corrections=1,
+    )
+    try:
+        with pytest.raises(LlmError) as raised:
+            llm.complete_text([{"role": "user", "content": "answer in text"}])
+
+        assert raised.value.category == "truncated"
+        assert len(requests) == 1
+        assert len(llm.calls) == 1
+        assert llm.calls[0].category == "truncated"
+        assert llm.calls[0].finish_reason == "length"
+        assert llm.calls[0].usage == {"prompt_tokens": 7, "completion_tokens": 4096}
     finally:
         http_client.close()
 

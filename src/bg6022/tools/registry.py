@@ -9,6 +9,7 @@ from typing import Any
 from bg6022.config import AppConfig
 from bg6022.models import Plan, Request, ResultTarget, Step, Tool
 from bg6022.orca.profiles import method_capability_catalog
+from bg6022.output_contracts import public_type_info
 from bg6022.tools.geometry_distance import make_geometry_distance_tool
 from bg6022.tools.molecule import make_generate_geometry_tool
 from bg6022.tools.orca import make_frequency_tool, make_optimize_tool, make_single_point_tool
@@ -63,6 +64,16 @@ class ToolRegistry:
                         "tool": tool.name,
                         "operations": list(tool.operations),
                         "property": tool.result_properties.get(name),
+                        **public_type_info(
+                            (
+                                tool.output_ports[name]
+                                if kind == "port"
+                                else tool.results[name]
+                                if kind == "field"
+                                else "scientific_check"
+                            ),
+                            kind=kind,
+                        ),
                         "label": metadata.get("label", name),
                         "description": metadata.get("description")
                         or tool.scientific_checks.get(name),

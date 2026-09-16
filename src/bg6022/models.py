@@ -11,6 +11,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    StrictStr,
     TypeAdapter,
     create_model,
     field_validator,
@@ -326,15 +327,7 @@ class Run(StrictModel):
 
 ExecuteFunction = Callable[[Step, Run, Any], Result]
 ParameterValidationFunction = Callable[[dict[str, Any], Mapping[str, Any]], None]
-ResultProperty = Literal[
-    "electronic_energy",
-    "molecular_geometry",
-    "zero_point_energy",
-    "free_energy",
-    "frequency",
-    "atom_count",
-    "distance",
-]
+ResultProperty = StrictStr
 
 
 class Tool(StrictModel):
@@ -386,6 +379,22 @@ class Tool(StrictModel):
         unknown = sorted(set(self.result_metadata) - declared)
         if unknown:
             raise ValueError(f"result metadata has undeclared keys: {unknown}")
+        from bg6022.output_contracts import validate_declared_output, validate_declared_type
+
+        for kind, outputs in (("field", self.results), ("port", self.output_ports)):
+            for name, expected_type in outputs.items():
+                validate_declared_type(name, expected_type, kind=kind)
+
+        for name, property_name in self.result_properties.items():
+            if name in self.output_ports:
+                expected_type = self.output_ports[name]
+                kind = "port"
+            else:
+                expected_type = self.results.get(name)
+                kind = "field"
+            if expected_type is None:
+                continue
+            validate_declared_output(name, expected_type, property_name, kind=kind)
         allowed = {"label", "description", "caveat"}
         for name, metadata in self.result_metadata.items():
             extra = sorted(set(metadata) - allowed)

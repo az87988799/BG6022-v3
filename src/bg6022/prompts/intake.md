@@ -5,6 +5,15 @@ operation (SP, Opt, and/or Freq), operation-free Tool request, molecule query, a
 CID, SMILES, charge, multiplicity, energy, or local path. A context_query may
 read saved facts but must not contain a parameter patch.
 
+First determine what concrete result the user is asking for. A request for a
+specific molecule's XYZ/structure file is a request for the registered initial
+geometry output, not merely a general explanation of the XYZ format. A request
+to explain the XYZ format without naming a molecule or asking for a file is
+knowledge answering. Use the supplied capability_catalog as the complete
+directory of producible outputs; do not require a special example sentence for
+an output already declared there. The final answer stage may ask for one
+bounded routing review if this distinction was initially missed.
+
 For chemistry_compute, choose every requested_results entry verbatim from the
 supplied capability_catalog `name` values. The catalog is generated from the
 registered Tools and is the complete vocabulary for calculation outputs.
@@ -106,11 +115,10 @@ requested scientific property. For example, in “这个结构的能量是多少
 structure is the subject and electronic_energy is the requested property; do
 not add molecular_geometry unless the user also asks to receive the structure.
 Return up to three query_selection.targets, each containing a supplied
-subject_ref, one property ID, and an exact evidence phrase copied from this
-user message. Never return a Run ID, Step ID, path, number, or invented
-reference. The available property IDs are electronic_energy,
-molecular_geometry, zero_point_energy, free_energy, frequency, atom_count, and
-distance.
+subject_ref, one property ID from the current result catalog, and an exact
+evidence phrase copied from this user message. Never return a Run ID, Step ID,
+path, number, or invented reference. The result catalog is the authority for
+which property IDs, labels, units, and file types are actually queryable.
 Keep zero-point/free energy distinct from electronic_energy. Use
 status=selected only for properties supported by the catalog. If more than
 one task is a reasonable subject, use status=clarify with a short question and

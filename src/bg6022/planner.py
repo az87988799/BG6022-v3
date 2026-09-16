@@ -30,6 +30,7 @@ from bg6022.models import (
     ResultTarget,
     Step,
 )
+from bg6022.output_contracts import property_evidence_matches
 from bg6022.tools.molecule import parse_xyz_bytes
 from bg6022.tools.registry import ToolRegistry, merge_explicit_step_parameters
 
@@ -265,6 +266,7 @@ def intake_message(
     geometry_catalog: list[Mapping[str, Any]] | None = None,
     capability_catalog: list[Mapping[str, Any]] | None = None,
     registry: ToolRegistry | None = None,
+    validation_feedback: str | None = None,
     cancel: Any = None,
 ) -> IntakeOutput:
     if not message.strip():
@@ -287,7 +289,11 @@ def intake_message(
         if isinstance(item, Mapping) and isinstance(item.get("subject_ref"), str)
     )
     capabilities = [dict(item) for item in (capability_catalog or [])]
-    schema = _intake_schema(candidate_refs, capabilities, registry=registry)
+    schema = _intake_schema(
+        candidate_refs,
+        capabilities,
+        registry=registry,
+    )
     value = client.complete_json(
         [
             {"role": "system", "content": prompt},
@@ -308,6 +314,7 @@ def intake_message(
                         "method_capability_catalog": (
                             registry.method_capability_catalog() if registry is not None else []
                         ),
+                        "validation_feedback": validation_feedback,
                     }
                 ),
             },
@@ -329,7 +336,13 @@ def intake_message(
         },
         cancel=cancel,
     )
-    output = _coerce_intake_output(value, schema, candidate_refs, message=message)
+    output = _coerce_intake_output(
+        value,
+        schema,
+        candidate_refs,
+        message=message,
+        result_catalog=catalog,
+    )
     if inline_xyz is not None and output.intent == "chemistry_compute":
         xyz_text, _atom_count = inline_xyz
         structure = dict(output.structure_input)
@@ -1486,6 +1499,7 @@ def _coerce_intake_output(
     candidate_refs: tuple[str, ...],
     *,
     message: str,
+    result_catalog: list[Mapping[str, Any]] | None = None,
 ) -> IntakeOutput:
     payload = (
         value.model_dump(mode="python", exclude_unset=True)
@@ -1503,11 +1517,20 @@ def _coerce_intake_output(
         if structure.get("required_bindings") == []:
             structure.pop("required_bindings")
         output = output.model_copy(update={"structure_input": structure})
-    return _validate_query_selection(output, candidate_refs, message=message)
+    return _validate_query_selection(
+        output,
+        candidate_refs,
+        message=message,
+        result_catalog=result_catalog,
+    )
 
 
 def _validate_query_selection(
-    output: IntakeOutput, candidate_refs: tuple[str, ...], *, message: str
+    output: IntakeOutput,
+    candidate_refs: tuple[str, ...],
+    *,
+    message: str,
+    result_catalog: list[Mapping[str, Any]] | None = None,
 ) -> IntakeOutput:
     selection = output.query_selection
     if output.intent != "context_query":
@@ -1523,7 +1546,12 @@ def _validate_query_selection(
     if not candidate_set and selection.status == "selected":
         raise ValueError("cannot select a result from an empty catalog")
     if selection.status == "selected" and any(
-        not _query_property_evidence_matches(target.property, target.evidence, message)
+        not _query_property_evidence_matches(
+            target.property,
+            target.evidence,
+            message,
+            metadata=_query_property_metadata(target.property, result_catalog),
+        )
         for target in selection.targets
     ):
         replacement = QuerySelection(
@@ -1534,7 +1562,30 @@ def _validate_query_selection(
     return output
 
 
-def _query_property_evidence_matches(property_name: str, evidence: str, message: str) -> bool:
+def _query_property_metadata(
+    property_name: str, result_catalog: list[Mapping[str, Any]] | None
+) -> Mapping[str, Any] | None:
+    for item in result_catalog or []:
+        if not isinstance(item, Mapping):
+            continue
+        result = item.get("result")
+        if not isinstance(result, Mapping) or result.get("property") != property_name:
+            continue
+        return {
+            key: result[key]
+            for key in ("label", "description")
+            if isinstance(result.get(key), str)
+        }
+    return None
+
+
+def _query_property_evidence_matches(
+    property_name: str,
+    evidence: str,
+    message: str,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> bool:
     if not evidence or evidence not in message:
         return False
     text = evidence.casefold().replace("电子结构", "")
@@ -1552,9 +1603,17 @@ def _query_property_evidence_matches(property_name: str, evidence: str, message:
             return False
         return _electronic_energy_evidence_matches(evidence, message)
     if property_name == "molecular_geometry":
-        return _has_affirmed_property_phrase(
-            ("结构", "几何", "geometry", "structure"), evidence, message
-        ) and _geometry_output_requested(evidence)
+        affirmed = _has_affirmed_property_phrase(
+            ("结构", "几何", "geometry", "structure", "xyz", "坐标"), evidence, message
+        )
+        requested = _geometry_output_requested(evidence) or bool(
+            re.search(
+                r"(?:xyz|坐标).{0,8}(?:文件|结构)|(?:文件|结构).{0,8}(?:xyz|坐标)",
+                evidence,
+                re.I,
+            )
+        )
+        return affirmed and requested
     if property_name == "zero_point_energy":
         return _has_affirmed_property_phrase(
             ("零点", "zero-point", "zero point", "zpe"), evidence, message
@@ -1577,7 +1636,11 @@ def _query_property_evidence_matches(property_name: str, evidence: str, message:
             evidence,
             message,
         )
-    return False
+    # New Tool properties are accepted only when their declared public label or
+    # property identifier is present in the user's exact evidence phrase.  The
+    # catalog still decides whether the property exists and belongs to the
+    # selected subject.
+    return property_evidence_matches(property_name, evidence, message, metadata=metadata)
 
 
 def _has_affirmed_property_phrase(phrases: tuple[str, ...], evidence: str, message: str) -> bool:
