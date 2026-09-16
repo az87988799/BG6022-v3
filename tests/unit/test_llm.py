@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from bg6022.config import LlmSettings
 from bg6022.llm import LlmClient, LlmError
@@ -15,6 +15,14 @@ from bg6022.llm import LlmClient, LlmError
 
 class _Answer(BaseModel):
     value: int
+
+
+class _ComputeRequest(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    intent: str
+    operations: list[str]
+    requested_results: list[str]
 
 
 def _response(content: Any, *, finish_reason: str, usage: dict[str, int]) -> httpx.Response:
@@ -213,6 +221,108 @@ def test_invalid_json_and_schema_errors_share_the_same_correction_limit(
 
 
 @pytest.mark.parametrize(
+    "malformed",
+    [
+        {
+            "intent": "chemistry_compute",
+            "operations": ["Opt", "SP"],
+            "requested_results": [{"field": "sp_electronic_energy"}],
+        },
+        {
+            "intent": "chemistry_compute",
+            "operations": [{"operation": "Opt"}, "SP"],
+            "requested_results": ["energy"],
+        },
+        {
+            "intent": "chemistry_compute",
+            "operations": [["Opt"], "SP"],
+            "requested_results": [None],
+        },
+    ],
+)
+def test_malformed_compute_shapes_get_one_schema_correction(
+    malformed: dict[str, Any],
+) -> None:
+    valid = json.dumps(
+        {
+            "intent": "chemistry_compute",
+            "operations": ["Opt"],
+            "requested_results": ["opt_final_electronic_energy"],
+        }
+    )
+    llm, requests, http_client = _offline_client(
+        [
+            _response(
+                json.dumps(malformed),
+                finish_reason="stop",
+                usage={"prompt_tokens": 6, "completion_tokens": 2},
+            ),
+            _response(
+                valid,
+                finish_reason="stop",
+                usage={"prompt_tokens": 9, "completion_tokens": 3},
+            ),
+        ],
+        structured_output_corrections=1,
+    )
+    try:
+        result = llm.complete_json(
+            [{"role": "user", "content": "calculate"}],
+            _ComputeRequest,
+        )
+
+        assert result.operations == ["Opt"]
+        assert result.requested_results == ["opt_final_electronic_energy"]
+        assert len(requests) == 2
+        assert [call.category for call in llm.calls] == ["schema_error", "success"]
+        assert [call.structured_correction_count for call in llm.calls] == [0, 1]
+    finally:
+        http_client.close()
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {
+            "intent": "chemistry_compute",
+            "operations": ["Opt", "SP"],
+            "requested_results": [{"field": "sp_electronic_energy"}],
+        },
+        {
+            "intent": "chemistry_compute",
+            "operations": [{"operation": "Opt"}, "SP"],
+            "requested_results": ["energy"],
+        },
+    ],
+)
+def test_persistent_malformed_compute_shapes_stop_with_schema_error(
+    malformed: dict[str, Any],
+) -> None:
+    body = json.dumps(malformed)
+    response = _response(
+        body,
+        finish_reason="stop",
+        usage={"prompt_tokens": 6, "completion_tokens": 2},
+    )
+    llm, requests, http_client = _offline_client(
+        [response, response], structured_output_corrections=1
+    )
+    try:
+        with pytest.raises(LlmError) as raised:
+            llm.complete_json(
+                [{"role": "user", "content": "calculate"}],
+                _ComputeRequest,
+            )
+
+        assert raised.value.category == "schema_error"
+        assert len(requests) == 2
+        assert [call.category for call in llm.calls] == ["schema_error", "schema_error"]
+        assert [call.structured_correction_count for call in llm.calls] == [0, 1]
+    finally:
+        http_client.close()
+
+
+@pytest.mark.parametrize(
     "payload",
     [
         {"model": "offline-response-v1", "choices": [], "usage": {"completion_tokens": 0}},
@@ -270,6 +380,35 @@ def test_length_finish_reason_wins_over_missing_json_message() -> None:
         assert len(requests) == 1
         assert llm.calls[0].category == "truncated"
         assert llm.calls[0].finish_reason == "length"
+    finally:
+        http_client.close()
+
+
+@pytest.mark.parametrize(
+    ("purpose", "expected_thinking"),
+    [("intake", {"type": "disabled"}), ("planner", None)],
+)
+def test_deepseek_disables_thinking_only_for_bounded_intake_json(
+    purpose: str, expected_thinking: dict[str, str] | None
+) -> None:
+    llm, requests, http_client = _offline_client(
+        [
+            _response(
+                json.dumps({"value": 1}),
+                finish_reason="stop",
+                usage={"prompt_tokens": 4, "completion_tokens": 3},
+            )
+        ],
+        structured_output_corrections=0,
+    )
+    try:
+        llm.complete_json(
+            [{"role": "user", "content": "return a small JSON value"}],
+            _Answer,
+            purpose=purpose,
+        )
+        assert requests[0].get("thinking") == expected_thinking
+        assert requests[0]["max_tokens"] == llm.settings.max_tokens
     finally:
         http_client.close()
 

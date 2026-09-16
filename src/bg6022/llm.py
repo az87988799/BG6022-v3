@@ -269,6 +269,10 @@ class LlmClient:
             "messages": [dict(message) for message in messages],
             "max_tokens": self.settings.max_tokens,
         }
+        if purpose == "intake" and "deepseek.com" in self.settings.base_url.casefold():
+            # Intake is bounded schema extraction. DeepSeek's default thinking
+            # mode can consume the full output budget before emitting its JSON.
+            payload["thinking"] = {"type": "disabled"}
         if response_format is not None:
             payload["response_format"] = response_format
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -496,15 +500,20 @@ def _optional_text(value: Any) -> str | None:
 
 
 def _is_ambiguous_energy_request(value: Any) -> bool:
-    if not isinstance(value, Mapping) or value.get("intent") != "chemistry_compute":
+    if not isinstance(value, Mapping):
+        return False
+    if value.get("intent") != "chemistry_compute":
         return False
     operations = value.get("operations", [])
     requested_results = value.get("requested_results", [])
-    return (
-        isinstance(operations, list)
-        and {"Opt", "SP"}.issubset(operations)
-        and isinstance(requested_results, list)
-        and any(item in {"energy", "electronic_energy"} for item in requested_results)
+    if not isinstance(operations, list) or not isinstance(requested_results, list):
+        return False
+    if not all(isinstance(item, str) for item in operations):
+        return False
+    if not all(isinstance(item, str) for item in requested_results):
+        return False
+    return {"Opt", "SP"}.issubset(operations) and any(
+        item in {"energy", "electronic_energy"} for item in requested_results
     )
 
 

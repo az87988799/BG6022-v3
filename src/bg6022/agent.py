@@ -29,6 +29,7 @@ from .orca.repair_rules import applicable_repairs, applicable_scf_repair
 from .planner import (
     QuerySelection,
     electronic_state_clarification,
+    intake_blocking_requirements,
     intake_message,
     normalize_user_explicit_parameters,
     plan_message,
@@ -166,16 +167,17 @@ class Agent:
     def handle_message(self, message: str) -> AgentResponse:
         """Process one chat message synchronously; the CLI may call this worker-side."""
 
-        text = message.strip()
-        if not text:
+        text = message
+        command = message.strip()
+        if not command:
             return AgentResponse("请输入请求。")
-        if text.casefold() in {"/confirm", "confirm", "确认"}:
+        if command.casefold() in {"/confirm", "confirm", "确认"}:
             return self.confirm()
-        if text.casefold() in {"/cancel", "cancel", "取消"}:
+        if command.casefold() in {"/cancel", "cancel", "取消"}:
             return self.cancel()
-        if text.casefold() in {"/status", "status", "状态"}:
+        if command.casefold() in {"/status", "status", "状态"}:
             return self.status()
-        if text.casefold() in {"/new", "new", "新任务"}:
+        if command.casefold() in {"/new", "new", "新任务"}:
             return self.new_session()
 
         request_token, request_cancel = self._begin_request()
@@ -203,6 +205,16 @@ class Agent:
             self._persist_llm_diagnostics(llm_call_cursor, stage="intake")
             llm_call_cursor = self._llm_call_count()
             self._ensure_request_active(request_token, request_cancel)
+
+            blocking = intake_blocking_requirements(intake, self.registry)
+            if blocking:
+                response = AgentResponse(
+                    "本次请求还有尚未支持或尚未明确的要求："
+                    + "；".join(blocking)
+                    + "。请明确这些要求，或重新指定只计算已支持的部分。"
+                )
+                self._append_message("assistant", response.text)
+                return response
 
             selected_geometry_alias = intake.history_geometry_alias
             history_geometry_requested = _requests_history_geometry(text)
@@ -2584,12 +2596,19 @@ def _is_parameter_continuation(
     message: str,
     explicit_parameters: dict[str, Any],
 ) -> bool:
-    if not explicit_parameters or intake.molecule_query or intake.structure_input:
+    if (
+        intake.intent != "chemistry_compute"
+        or not explicit_parameters
+        or intake.molecule_query
+        or intake.structure_input
+        or intake.history_geometry_alias
+        or intake.requested_results
+    ):
         return False
     if intake.operations and run.request.operations:
         if intake.operations != run.request.operations:
             return False
-    if _looks_like_molecule_change(message):
+    if _looks_like_molecule_change(message) and not _looks_like_parameter_only_change(message):
         return False
     return run.waiting_for in {"clarification", "confirmation"}
 
@@ -2718,6 +2737,21 @@ def _looks_like_molecule_change(message: str) -> bool:
             flags=re.IGNORECASE,
         )
     )
+
+
+def _looks_like_parameter_only_change(message: str) -> bool:
+    """Avoid treating a scoped numerical parameter edit as a molecule change."""
+
+    parameter_change = re.compile(
+        r"(?:几何优化|优化几何|geometry optimization|geom_maxiter|SCF|scf_maxiter)"
+        r".{0,16}?(?:改成|改为|设为|设置为|change(?:d)?\s+to|set\s+to|=)\s*[-+]?\d+",
+        re.IGNORECASE,
+    )
+    matches = list(parameter_change.finditer(message))
+    if not matches:
+        return False
+    remainder = parameter_change.sub("", message)
+    return not _looks_like_molecule_change(remainder)
 
 
 def _iteration_increase_allowed(message: str) -> bool:

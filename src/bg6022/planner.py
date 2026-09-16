@@ -30,6 +30,7 @@ from bg6022.models import (
     ResultTarget,
     Step,
 )
+from bg6022.tools.molecule import parse_xyz_bytes
 from bg6022.tools.registry import ToolRegistry
 
 Intent = Literal["chemistry_compute", "chemistry_qa", "daily_qa", "context_query"]
@@ -123,6 +124,7 @@ class IntakeOutput(BaseModel):
     electronic_state_candidates: list[ElectronicStateCandidate] = Field(default_factory=list)
     structure_input: dict[str, Any] = Field(default_factory=dict)
     requested_results: list[str] = Field(default_factory=list)
+    unresolved_results: list[StrictStr] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
     query_selection: QuerySelection | None = None
 
@@ -267,6 +269,16 @@ def intake_message(
 ) -> IntakeOutput:
     if not message.strip():
         raise ValueError("message must not be empty")
+    inline_xyz = _extract_single_inline_xyz(message)
+    model_message = message
+    if inline_xyz is not None and _mentions_computation(message):
+        xyz_text, atom_count = inline_xyz
+        replacement = (
+            f"[Valid inline XYZ for {atom_count} atoms is present; use it as the input "
+            "geometry. The application preserves the exact coordinate text separately. "
+            "Do not resolve or regenerate a geometry.]"
+        )
+        model_message = message.replace(xyz_text, replacement, 1)
     prompt = load_prompt("intake")
     catalog = [dict(item) for item in (result_catalog or [])]
     candidate_refs = tuple(
@@ -283,11 +295,16 @@ def intake_message(
                 "role": "user",
                 "content": _json_context(
                     {
-                        "message": message,
+                        "message": model_message,
                         "recent_context": _bounded_context(context),
                         "result_catalog": catalog,
                         "geometry_catalog": [dict(item) for item in (geometry_catalog or [])],
                         "capability_catalog": capabilities,
+                        "parameter_capability_catalog": (
+                            registry.request_parameter_capabilities()
+                            if registry is not None
+                            else []
+                        ),
                     }
                 ),
             },
@@ -305,10 +322,59 @@ def intake_message(
             "electronic_state_candidates": [],
             "requested_results": ["opt_final_electronic_energy"],
             "missing_fields": [],
+            "unresolved_results": [],
         },
         cancel=cancel,
     )
-    return _coerce_intake_output(value, schema, candidate_refs, message=message)
+    output = _coerce_intake_output(value, schema, candidate_refs, message=message)
+    if inline_xyz is not None and output.intent == "chemistry_compute":
+        xyz_text, _atom_count = inline_xyz
+        structure = dict(output.structure_input)
+        if output.history_geometry_alias is not None or structure.get("history_geometry_alias"):
+            raise ValueError("inline XYZ cannot be combined with a historical geometry selection")
+        structure["xyz_text"] = xyz_text
+        output = output.model_copy(
+            update={
+                "molecule_query": None,
+                "molecule_input_kind": None,
+                "structure_input": structure,
+            }
+        )
+    return output
+
+
+def _extract_single_inline_xyz(message: str) -> tuple[str, int] | None:
+    """Find one complete XYZ block and retain its exact original text."""
+
+    lines = message.splitlines(keepends=True)
+    matches: list[tuple[str, int]] = []
+    for index, line in enumerate(lines):
+        count_text = line.strip()
+        if not count_text.isdecimal():
+            continue
+        count = int(count_text)
+        if count <= 0 or count > 10000 or index + count + 2 > len(lines):
+            continue
+        block = "".join(lines[index : index + count + 2])
+        try:
+            parsed = parse_xyz_bytes(block.encode("utf-8"))
+        except (TypeError, ValueError):
+            continue
+        matches.append((block, parsed.atom_count))
+        if len(matches) > 1:
+            return None
+    return matches[0] if matches else None
+
+
+def _mentions_computation(message: str) -> bool:
+    return (
+        re.search(
+            r"(?i)(?:\b(?:opt|sp|freq)\b|geometry\s+optimization|optimiz|"
+            r"single[ -]?point|frequency|frequencies|几何优化|优化|单点|频率|计算)",
+            message,
+        )
+        is not None
+    )
 
 
 def plan_message(
@@ -522,6 +588,13 @@ def request_from_intake(
     registry: ToolRegistry,
     normalized_parameters: ParameterNormalization | None = None,
 ) -> Request:
+    blocking = intake_blocking_requirements(intake, registry)
+    if blocking:
+        raise ValueError(
+            "本次请求还有尚未支持或尚未明确的要求："
+            + "；".join(blocking)
+            + "。请明确这些要求，或重新指定只计算已支持的部分。"
+        )
     if intake.intent == "chemistry_compute" and not intake.operations:
         raise ValueError(
             "the requested scientific operation is missing; please specify SP, Opt, or Freq"
@@ -548,7 +621,7 @@ def request_from_intake(
         description=message,
         original_text=message,
         requested_results=[
-            registry.resolve_result_target(value, intake.operations)
+            registry.resolve_result_target(value, intake.operations, canonical_only=True)
             for value in intake.requested_results
         ],
         explicit_parameters=dict(normalized.explicit_parameters),
@@ -567,6 +640,26 @@ def request_from_intake(
     _validate_required_geometry_contract(request, registry)
     _require_composite_geometry_sources(request)
     return request
+
+
+def intake_blocking_requirements(intake: IntakeOutput, registry: ToolRegistry) -> tuple[str, ...]:
+    """Return unresolved compute requirements that are not deferred Tool inputs."""
+
+    if intake.intent != "chemistry_compute":
+        return ()
+
+    requested_operations = set(intake.operations)
+    deferred: set[str] = set()
+    for name in registry.names():
+        tool = registry.get(name)
+        if not tool.available:
+            continue
+        if requested_operations and not (requested_operations & set(tool.operations)):
+            continue
+        deferred.update(tool.deferred_parameters)
+
+    unclassified = [item for item in intake.missing_fields if item not in deferred]
+    return tuple(dict.fromkeys([*intake.unresolved_results, *unclassified]))
 
 
 def filter_user_explicit_parameters(message: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
@@ -1138,6 +1231,9 @@ def _intake_schema(
     allowed_subjects = frozenset(candidate_refs)
     capabilities = [dict(item) for item in capability_catalog]
     allowed_targets = tuple(sorted({str(item["name"]) for item in capabilities}))
+    parameter_capabilities = (
+        registry.request_parameter_capabilities() if registry is not None else []
+    )
 
     def _targets_are_candidates(value: list[QueryTarget]) -> list[QueryTarget]:
         unknown = sorted({target.subject_ref for target in value} - allowed_subjects)
@@ -1164,6 +1260,29 @@ def _intake_schema(
                 raise ValueError(
                     f"requested result {target!r} is not produced by the requested operation(s)"
                 )
+        return value
+
+    def _explicit_parameters_are_declared(
+        value: dict[str, Any], info: ValidationInfo
+    ) -> dict[str, Any]:
+        if not value or info.data.get("intent") != "chemistry_compute":
+            return value
+        if registry is None:
+            raise ValueError("parameter capability catalog is required")
+
+        operations = set(info.data.get("operations", []))
+        allowed: set[str] = set()
+        for item in parameter_capabilities:
+            if operations and not (operations & set(item["operations"])):
+                continue
+            allowed.update(item["schema"].get("properties", {}))
+
+        unknown = sorted(set(value) - allowed)
+        if unknown:
+            raise ValueError(
+                "explicit parameter names are outside the Tool catalog: "
+                f"{unknown}; allowed names: {sorted(allowed)}"
+            )
         return value
 
     def _required_geometry_bindings_are_valid(value: IntakeOutput) -> IntakeOutput:
@@ -1201,6 +1320,9 @@ def _intake_schema(
     validators: dict[str, Any] = {
         "_requested_results_are_available": field_validator("requested_results")(
             _requested_results_are_available
+        ),
+        "_explicit_parameters_are_declared": field_validator("explicit_parameters")(
+            _explicit_parameters_are_declared
         ),
         "_required_geometry_bindings_are_valid": model_validator(mode="after")(
             _required_geometry_bindings_are_valid
@@ -1256,13 +1378,10 @@ def _coerce_intake_output(
     if not isinstance(output, IntakeOutput):
         raise ValueError("intake output has an unexpected model type")
     if isinstance(output.structure_input, IntakeStructureInput):
-        output = output.model_copy(
-            update={
-                "structure_input": output.structure_input.model_dump(
-                    mode="python", exclude_unset=True
-                )
-            }
-        )
+        structure = output.structure_input.model_dump(mode="python", exclude_unset=True)
+        if structure.get("required_bindings") == []:
+            structure.pop("required_bindings")
+        output = output.model_copy(update={"structure_input": structure})
     return _validate_query_selection(output, candidate_refs, message=message)
 
 

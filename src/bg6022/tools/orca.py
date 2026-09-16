@@ -54,7 +54,12 @@ class OrcaParameters(BaseModel):
     environment: StrictStr = "gas"
     charge: StrictInt
     multiplicity: StrictInt
-    scf_maxiter: StrictInt | None = Field(default=None, ge=1, le=1000)
+    scf_maxiter: StrictInt | None = Field(
+        default=None,
+        ge=1,
+        le=1000,
+        description="SCF electronic iterations; applies to SP, Opt, and Freq.",
+    )
 
     @field_validator("multiplicity")
     @classmethod
@@ -69,7 +74,12 @@ class SinglePointParameters(OrcaParameters):
 
 
 class OptimizeParameters(OrcaParameters):
-    geom_maxiter: StrictInt | None = Field(default=None, ge=1, le=1000)
+    geom_maxiter: StrictInt | None = Field(
+        default=None,
+        ge=1,
+        le=1000,
+        description="Geometry optimization iterations; applies only to Opt.",
+    )
 
 
 class FrequencyParameters(OrcaParameters):

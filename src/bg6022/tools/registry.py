@@ -45,7 +45,7 @@ class ToolRegistry:
         capabilities: list[dict[str, Any]] = []
         for tool_name in self.names():
             tool = self._tools[tool_name]
-            if not tool.available or not tool.operations:
+            if not tool.available:
                 continue
             declared = [("port", name) for name in tool.output_ports]
             declared.extend(
@@ -69,7 +69,29 @@ class ToolRegistry:
                 )
         return capabilities
 
-    def resolve_result_target(self, name: str, operations: Iterable[str]) -> ResultTarget:
+    def request_parameter_capabilities(self) -> list[dict[str, Any]]:
+        """Describe request-level parameters accepted by available compute Tools."""
+
+        return [
+            {
+                "tool": tool.name,
+                "operations": list(tool.operations),
+                "schema": tool.parameter_schema,
+                "deferred_parameters": list(tool.deferred_parameters),
+            }
+            for tool in (self.get(name) for name in self.names())
+            if tool.available
+            and tool.parameter_preparation == "orca_electronic_state"
+            and tool.parameter_type is not None
+        ]
+
+    def resolve_result_target(
+        self,
+        name: str,
+        operations: Iterable[str],
+        *,
+        canonical_only: bool = False,
+    ) -> ResultTarget:
         """Normalize one current or legacy result name against Tool declarations."""
 
         requested_operations = set(operations)
@@ -79,6 +101,17 @@ class ToolRegistry:
             producers = set(item["operations"])
             return not producers or bool(producers & requested_operations)
 
+        if (
+            not canonical_only
+            and name in {"geometry", "molecular_geometry"}
+            and "Opt" in requested_operations
+        ):
+            return self.resolve_result_target(
+                "optimized_geometry",
+                requested_operations,
+                canonical_only=True,
+            )
+
         exact = [item for item in capabilities if item["name"] == name]
         if exact:
             matches = [item for item in exact if compatible(item)]
@@ -87,6 +120,9 @@ class ToolRegistry:
                     f"requested result {name!r} is not produced by the requested operation(s)"
                 )
             return _target_from_unique_capability(name, matches)
+
+        if canonical_only:
+            raise ValueError(f"requested result is not in the Tool capability catalog: {name!r}")
 
         # These aliases are retained only for older Intake output and stored
         # Requests. New model output is constrained to canonical capability names.

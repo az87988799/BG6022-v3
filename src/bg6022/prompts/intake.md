@@ -12,10 +12,32 @@ Never return generic `energy`, a prose label such as `SP electronic energy`, or
 a guessed alias. Use the exact target for the operation and scientific
 meaning: `sp_electronic_energy` is an independent SP result,
 `opt_final_electronic_energy` is the Opt final energy,
-`optimized_geometry` is an optimized geometry port,
+`geometry` is an initial geometry port, and `optimized_geometry` is an
+optimized geometry port,
 `vibrational_frequencies` is the frequency result, and the declared frequency
-checks are separate check targets. If no listed target matches, leave it out
-and report what is missing instead of inventing a name.
+checks are separate check targets. Preserve every other user-requested result
+in `unresolved_results`, using a concise phrase that retains what the user
+asked for and why it is unsupported or ambiguous. Do not silently omit it,
+substitute another result, or invent a capability name. For example, when the
+user requests SP electronic energy and Gibbs free energy, request the supported
+SP energy and put the free-energy requirement in `unresolved_results`.
+Request only outputs the user asks to receive; do not add a geometry result
+just because an operation produces that port. In particular, an Opt output
+used as an input to a later Step is a dependency, not automatically a requested
+result. “Initial”, “original”, or “input” XYZ means the `geometry` port; an
+explicit request to return the optimized structure means
+`optimized_geometry`. If both structures are requested, include both ports as
+distinct results and never substitute one for the other.
+
+For calculation parameters, use only names present in the supplied
+`parameter_capability_catalog` schemas and only for compatible operations.
+Geometry optimization iterations use `geom_maxiter`; SCF iterations use
+`scf_maxiter`. Never invent a name such as `max_iterations` or add a field
+absent from the catalog. If the user says only “iteration limit” and its scope
+is ambiguous, preserve that requirement in `missing_fields` and ask for
+clarification instead of guessing which parameter they meant. After local
+schema feedback, correct the parameter name using the same original request;
+never delete a user requirement to make validation succeed.
 
 When a request contains Opt together with SP or Freq, geometry source is an
 explicit part of the request. Add one `structure_input.required_bindings`
@@ -44,12 +66,27 @@ another integer. The program checks the quote and the full value token; your
 candidate is not itself authorization. Do not use recent context as q/M
 evidence.
 
+Use `missing_fields` for requirements that still need clarification, including
+parameter/input constraints. The only calculation fields that may be deferred
+for later resolution are the canonical parameters declared by a compatible
+Tool; do not put an unsupported requested scientific result there.
+
 If the user asks to calculate on a structure from a recent saved result, choose
 only a `history_geometry_alias` present in the supplied `geometry_catalog`.
 Never invent an alias, Run ID, Artifact ID, hash, or path. If the user refers to
 an old geometry but no suitable catalog entry exists or the intended structure
 is ambiguous, leave the alias unset and list the missing/ambiguous information;
 do not silently substitute a fresh PubChem/RDKit structure.
+When `history_geometry_alias` is set, that alias supplies the starting geometry.
+Do not also return `molecule_query`, `molecule_input_kind`, `xyz_text`, or `xyz`
+unless the user explicitly requests a new structure instead of the saved one;
+if both sources are requested, report the conflict in `missing_fields`.
+For a single SP, Opt, or Freq operation on the saved geometry,
+`structure_input` must be empty; do not add `required_bindings` for that
+history source. For multiple operations, `required_bindings` may describe only
+geometry dependencies between operations in this request, such as SP consuming
+the current request's Opt output. The `history_geometry_alias` itself supplies
+the starting geometry and is never a `required_bindings` source.
 
 For context_query, interpret the requested subject separately from the
 requested scientific property. For example, in “这个结构的能量是多少？” the
@@ -71,3 +108,10 @@ calculation never happened.
 
 If information is missing, list it instead of guessing. This output is
 advisory; it cannot grant execution permission or declare scientific success.
+
+When the user only changes parameters for a pending calculation, return only
+the parameter patch for this turn: `operations`, `requested_results`, and
+`structure_input` should be empty, and do not copy the prior molecule,
+geometry, or result goals. If the user changes an operation, result goal,
+geometry, or geometry source, preserve that new request so the program can
+validate it as a complete request instead of treating it as a parameter patch.
