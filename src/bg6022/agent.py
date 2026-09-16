@@ -55,7 +55,11 @@ from .session import (
     save_session,
     utc_now,
 )
-from .tools.molecule import parse_xyz_bytes, validate_electronic_state
+from .tools.molecule import (
+    parse_xyz_bytes,
+    resolve_artifact_reference,
+    validate_electronic_state,
+)
 from .tools.registry import ToolRegistry, merge_explicit_step_parameters
 
 INPUT_GEOMETRY_PLACEHOLDER = "__input_geometry__"
@@ -150,7 +154,9 @@ class Agent:
             metadata={"imported_as_raw_bytes": True},
         )
         bound_plan = _bind_input_geometry(plan, initial_artifact.id)
-        run.plan = _normalize_explicit_plan(self.registry, bound_plan)
+        run.plan = _normalize_explicit_plan(
+            self.registry, bound_plan, defaults=self.config.defaults
+        )
         run.origin_step_map = {step.id: step.origin_step_id or step.id for step in run.plan.steps}
         run.accepted_snapshot = self._acceptance_snapshot(run)
         run.accepted_execution_sha256 = execution_fingerprint(
@@ -207,8 +213,26 @@ class Agent:
             llm_call_cursor = self._llm_call_count()
             self._ensure_request_active(request_token, request_cancel)
 
+            current = self._coerce_run(None)
+            normalized_parameters = normalize_user_explicit_parameters(
+                text,
+                intake.explicit_parameters,
+                intake.electronic_state_candidates,
+            )
+            explicit_parameters = normalized_parameters.explicit_parameters
             blocking = intake_blocking_requirements(intake, self.registry)
             if blocking:
+                if (
+                    current is not None
+                    and current.status == "waiting"
+                    and _has_explicit_atom_index_update(text)
+                    and explicit_parameters
+                ):
+                    response = self._apply_parameter_update(
+                        current, explicit_parameters, cancel=request_cancel
+                    )
+                    self._append_message("assistant", response.text)
+                    return response
                 response = AgentResponse(
                     "本次请求还有尚未支持或尚未明确的要求："
                     + "；".join(blocking)
@@ -283,13 +307,6 @@ class Agent:
                         "a request cannot combine a historical geometry alias with inline XYZ"
                     )
 
-            current = self._coerce_run(None)
-            normalized_parameters = normalize_user_explicit_parameters(
-                text,
-                intake.explicit_parameters,
-                intake.electronic_state_candidates,
-            )
-            explicit_parameters = normalized_parameters.explicit_parameters
             if normalized_parameters.clarification_fields and (
                 intake.intent == "chemistry_compute"
                 or (
@@ -527,6 +544,19 @@ class Agent:
                     save_run(self.config.data_root_path, run)
                     return last_result
                 tool = self.registry.get(step.tool)
+                if tool.requires_compute_permission and not run.execution_permission:
+                    try:
+                        self._validate_known_plan_parameters(run)
+                    except (TypeError, ValueError, OSError) as error:
+                        run.status = "failed"
+                        run.waiting_for = None
+                        run.pending_data = {
+                            "category": "parameter_validation",
+                            "reason": str(error),
+                        }
+                        run.finish_active_interval()
+                        save_run(self.config.data_root_path, run)
+                        return last_result
                 if tool.parameter_preparation == "orca_electronic_state":
                     preparing_step_id = step.id
                     try:
@@ -1040,6 +1070,7 @@ class Agent:
             )
             candidate_plan = self.registry.validate_plan(candidate_plan)
             _validate_request_parameter_scope(candidate_request, candidate_plan, self.registry)
+            self._validate_known_plan_parameters(run, candidate_plan)
         except (TypeError, ValueError) as error:
             return AgentResponse(f"参数修改已拒绝（rejected）：{error}", run=run)
 
@@ -1234,6 +1265,94 @@ class Agent:
         run.status = "waiting"
         run.waiting_for = "confirmation"
         run.pending_data = self._preview(run, step)
+
+    def _validate_known_plan_parameters(self, run: Run, plan: Plan | None = None) -> None:
+        """Validate parameters against any trusted geometry already available."""
+
+        candidate_plan = plan or run.plan
+        for step in candidate_plan.steps:
+            tool = self.registry.get(step.tool)
+            if tool.parameter_validation_function is None:
+                continue
+            context = self._parameter_validation_context(run, candidate_plan, step)
+            try:
+                tool.validate_parameters(
+                    step.parameters,
+                    allow_deferred=True,
+                    context=context,
+                )
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"step {step.id} has invalid parameters: {error}") from error
+
+    def _parameter_validation_context(self, run: Run, plan: Plan, step: Step) -> dict[str, Any]:
+        """Build context from validated geometry, never from model-provided counts."""
+
+        tool = self.registry.get(step.tool)
+        for input_name, input_type in tool.input_ports.items():
+            if input_type != "molecular_geometry":
+                continue
+            reference = step.inputs.get(input_name)
+            if reference is None:
+                continue
+            atom_count = self._geometry_atom_count_for_reference(run, plan, reference, seen=set())
+            if atom_count is not None:
+                return {"geometry_atom_count": atom_count}
+        return {}
+
+    def _geometry_atom_count_for_reference(
+        self,
+        run: Run,
+        plan: Plan,
+        reference: InputReference,
+        *,
+        seen: set[tuple[str | None, str | None, str | None]],
+    ) -> int | None:
+        """Resolve a count from an artifact or a declared geometry-preserving edge."""
+
+        key = (reference.artifact_id, reference.step_id, reference.port)
+        if key in seen:
+            return None
+        seen.add(key)
+
+        if reference.artifact_id is not None:
+            try:
+                artifact = resolve_artifact_reference(
+                    self.config, run, reference, expected_type="molecular_geometry"
+                )
+                geometry = parse_xyz_bytes(
+                    artifact_path(self.config.data_root_path, run, artifact).read_bytes()
+                )
+            except (OSError, TypeError, ValueError):
+                return None
+            return geometry.atom_count
+
+        if reference.step_id is None:
+            return None
+        try:
+            artifact = self._artifact_from_reference(run, reference)
+        except (OSError, TypeError, ValueError):
+            artifact = None
+        if artifact is not None:
+            try:
+                geometry = parse_xyz_bytes(
+                    artifact_path(self.config.data_root_path, run, artifact).read_bytes()
+                )
+            except (OSError, TypeError, ValueError):
+                return None
+            return geometry.atom_count
+
+        steps_by_id = {item.id: item for item in plan.steps}
+        producer = steps_by_id.get(reference.step_id)
+        if producer is None:
+            return None
+        producer_tool = self.registry.get(producer.tool)
+        input_name = producer_tool.geometry_output_input_ports.get(reference.port or "")
+        if input_name is None:
+            return None
+        producer_reference = producer.inputs.get(input_name)
+        if producer_reference is None:
+            return None
+        return self._geometry_atom_count_for_reference(run, plan, producer_reference, seen=seen)
 
     def _preview(self, run: Run, step: Step) -> dict[str, Any]:
         artifacts = self._input_artifacts(run, step)
@@ -2602,14 +2721,26 @@ def _bind_input_geometry(plan: Plan, artifact_id: str) -> Plan:
     return plan.model_copy(update={"steps": steps})
 
 
-def _normalize_explicit_plan(registry: ToolRegistry, plan: Plan) -> Plan:
+def _normalize_explicit_plan(
+    registry: ToolRegistry, plan: Plan, *, defaults: Any | None = None
+) -> Plan:
     """Resolve defaults before an explicit Run receives its acceptance snapshot."""
 
     steps: list[Step] = []
     for step in plan.steps:
         tool = registry.get(step.tool)
         if tool.requires_compute_permission:
-            parameters = tool.validate_parameters(step.parameters)
+            original_parameters = dict(step.parameters)
+            checked_parameters = tool.validate_parameters(original_parameters, allow_deferred=True)
+            supplied_parameters = {
+                name: checked_parameters[name]
+                for name in original_parameters
+                if name in checked_parameters
+            }
+            if defaults is not None and tool.parameter_preparation == "orca_electronic_state":
+                supplied_parameters.setdefault("method_profile", defaults.method_profile)
+                supplied_parameters.setdefault("environment", defaults.environment)
+            parameters = tool.validate_parameters(supplied_parameters)
             if tool.execution_budget == "orca":
                 _validate_orca_profile(parameters)
             step = step.model_copy(update={"parameters": parameters})
@@ -2623,10 +2754,14 @@ def _is_parameter_continuation(
     message: str,
     explicit_parameters: dict[str, Any],
 ) -> bool:
+    if intake.intent != "chemistry_compute" or not explicit_parameters:
+        return False
+    # A scoped numeric edit is authoritative enough to continue a waiting Run.
+    # Do not let a stochastic intake response turn it into a new plan request.
+    if _has_explicit_atom_index_update(message):
+        return run.waiting_for in {"clarification", "confirmation"}
     if (
-        intake.intent != "chemistry_compute"
-        or not explicit_parameters
-        or intake.molecule_query
+        intake.molecule_query
         or intake.structure_input
         or intake.history_geometry_alias
         or intake.requested_results
@@ -2769,7 +2904,8 @@ def _looks_like_parameter_only_change(message: str) -> bool:
     """Avoid treating a scoped numerical parameter edit as a molecule change."""
 
     parameter_change = re.compile(
-        r"(?:几何优化|优化几何|geometry optimization|geom_maxiter|SCF|scf_maxiter)"
+        r"(?:几何优化|优化几何|geometry optimization|geom_maxiter|SCF|scf_maxiter|"
+        r"atom_[ij])"
         r".{0,16}?(?:改成|改为|设为|设置为|change(?:d)?\s+to|set\s+to|=)\s*[-+]?\d+",
         re.IGNORECASE,
     )
@@ -2778,6 +2914,17 @@ def _looks_like_parameter_only_change(message: str) -> bool:
         return False
     remainder = parameter_change.sub("", message)
     return not _looks_like_molecule_change(remainder)
+
+
+def _has_explicit_atom_index_update(message: str) -> bool:
+    return bool(
+        re.search(
+            r"(?<![A-Za-z0-9_])atom_[ij](?![A-Za-z0-9_]).{0,16}?"
+            r"(?:=|:|改成|改为|设为|设置为)\s*[-+]?\d+(?!\d)",
+            message,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _iteration_increase_allowed(message: str) -> bool:

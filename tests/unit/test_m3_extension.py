@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from bg6022.agent import Agent, _query_value_is_compatible
+from bg6022.agent import (
+    Agent,
+    _looks_like_parameter_only_change,
+    _normalize_explicit_plan,
+    _query_value_is_compatible,
+)
 from bg6022.answer import render_selected_facts
 from bg6022.config import load_config
 from bg6022.models import InputReference, Plan, Request, ResultTarget, Run, Step
@@ -19,6 +24,7 @@ from bg6022.planner import (
     PlanTargetProposal,
     _intake_schema,
     _query_property_evidence_matches,
+    normalize_user_explicit_parameters,
     proposal_to_plan,
     request_from_intake,
     validate_request_plan,
@@ -337,6 +343,178 @@ def test_b3lyp_default_is_selected_when_step_omits_method(tmp_path: Path) -> Non
     assert prepared is not None
     assert prepared.parameters["method_profile"] == "b3lyp_d3bj_def2svp"
     assert run.parameter_sources_by_step[step.id]["method_profile"] == "default_policy"
+
+
+@pytest.mark.parametrize(
+    ("configured_method", "step_method", "expected_method"),
+    [
+        ("b3lyp_d3bj_def2svp", None, "b3lyp_d3bj_def2svp"),
+        ("b3lyp_d3bj_def2svp", "r2scan3c", "r2scan3c"),
+        ("r2scan3c", "b3lyp_d3bj_def2svp", "b3lyp_d3bj_def2svp"),
+    ],
+)
+def test_explicit_plan_normalization_preserves_method_precedence(
+    tmp_path: Path,
+    configured_method: str,
+    step_method: str | None,
+    expected_method: str,
+) -> None:
+    config = _config(tmp_path, default_method=configured_method)
+    registry = build_registry(config)
+    parameters: dict[str, object] = {"charge": 0, "multiplicity": 1}
+    if step_method is not None:
+        parameters["method_profile"] = step_method
+    plan = Plan(
+        id="explicit-default-plan",
+        request_id="explicit-default-request",
+        steps=[
+            Step(
+                id="sp",
+                tool="single_point",
+                parameters=parameters,
+                inputs={"geometry": InputReference(artifact_id="geometry")},
+            )
+        ],
+    )
+
+    normalized = _normalize_explicit_plan(registry, plan, defaults=config.defaults)
+
+    assert normalized.steps[0].parameters["method_profile"] == expected_method
+
+
+def _opt_to_distance_chat_run(tmp_path: Path, *, atom_j: int, session_id: str) -> tuple[Agent, Run]:
+    config = _config(tmp_path)
+    registry = build_registry(config)
+    request = Request(
+        id=f"request-{session_id}",
+        description="optimize the fixture, then measure two atoms",
+        source="chat",
+        operations=["Opt"],
+        requested_results=[ResultTarget(field="interatomic_distance")],
+        explicit_parameters={
+            "atom_i": 1,
+            "atom_j": atom_j,
+            "charge": 0,
+            "multiplicity": 1,
+        },
+        structure_input={
+            "xyz_text": M3_XYZ.decode("utf-8"),
+            "required_bindings": [
+                {
+                    "consumer_tool": "geometry_distance",
+                    "input_port": "geometry",
+                    "source_operation": "Opt",
+                    "source_port": "optimized_geometry",
+                }
+            ],
+        },
+    )
+    plan = Plan(
+        id=f"plan-{session_id}",
+        request_id=request.id,
+        steps=[
+            Step(
+                id="opt",
+                tool="optimize_geometry",
+                parameters={
+                    "method_profile": "r2scan3c",
+                    "environment": "gas",
+                    "charge": 0,
+                    "multiplicity": 1,
+                },
+                inputs={"geometry": InputReference(artifact_id="__input_geometry__")},
+            ),
+            Step(
+                id="distance",
+                tool="geometry_distance",
+                inputs={"geometry": InputReference(step_id="opt", port="optimized_geometry")},
+            ),
+        ],
+        requested_results=[ResultTarget(step_id="distance", field="interatomic_distance")],
+    )
+    plan = validate_request_plan(request, plan, registry)
+    agent = Agent(config, registry, session_id=session_id)
+    run = agent._create_chat_run(request, plan)
+    return agent, run
+
+
+def test_distance_index_update_checks_known_geometry_before_writing_run(
+    tmp_path: Path,
+) -> None:
+    agent, run = _opt_to_distance_chat_run(tmp_path, atom_j=2, session_id="distance-index-update")
+    agent.advance(run)
+    assert run.status == "waiting"
+    assert run.waiting_for == "confirmation"
+    assert run.attempts == []
+
+    accepted = agent._apply_parameter_update(run, {"atom_j": 3})
+
+    assert accepted.run is run
+    assert run.status == "waiting"
+    assert run.waiting_for == "confirmation"
+    assert next(step for step in run.plan.steps if step.id == "distance").parameters == {
+        "atom_i": 1,
+        "atom_j": 3,
+    }
+    before_rejected_update = run.model_dump(mode="json")
+
+    rejected = agent._apply_parameter_update(run, {"atom_j": 99})
+
+    assert "rejected" in rejected.text
+    assert run.model_dump(mode="json") == before_rejected_update
+    assert run.attempts == []
+
+
+def test_invalid_initial_distance_index_never_reaches_confirmation(tmp_path: Path) -> None:
+    agent, run = _opt_to_distance_chat_run(tmp_path, atom_j=99, session_id="distance-index-initial")
+
+    agent.advance(run)
+
+    assert run.status == "failed"
+    assert run.waiting_for is None
+    assert run.pending_data["category"] == "parameter_validation"
+    assert "outside the known" in run.pending_data["reason"]
+    assert run.attempts == []
+
+
+def test_atom_index_update_is_classified_as_parameter_only_change() -> None:
+    assert _looks_like_parameter_only_change("只把 atom_j 改为99，不改变当前分子或任务目标。")
+
+
+def test_user_atom_index_assignments_override_model_intake_values() -> None:
+    normalized = normalize_user_explicit_parameters(
+        "保持 atom_i=1，只把 atom_j 改为99。",
+        {"atom_i": 2, "atom_j": 3},
+    )
+
+    assert normalized.explicit_parameters == {"atom_i": 1, "atom_j": 99}
+
+
+def test_waiting_parameter_update_precedes_intake_blocking(monkeypatch, tmp_path: Path) -> None:
+    agent, run = _opt_to_distance_chat_run(
+        tmp_path, atom_j=3, session_id="distance-index-blocking-update"
+    )
+    agent.advance(run)
+    agent._session["active_run_id"] = run.id
+    agent._save_session()
+    before = run.model_dump(mode="json")
+
+    def blocked_intake(*_args, **_kwargs) -> IntakeOutput:
+        return IntakeOutput(
+            intent="chemistry_compute",
+            explicit_parameters={"atom_j": 99},
+            missing_fields=["atom_i", "atom_j"],
+        )
+
+    monkeypatch.setattr("bg6022.agent.intake_message", blocked_intake)
+    response = agent.handle_message("只把 atom_j 改为99。")
+
+    assert response.run is not None
+    assert response.run.id == run.id
+    assert "rejected" in response.text
+    assert response.run.model_dump(mode="json") == before
+    assert run.model_dump(mode="json") == before
+    assert run.attempts == []
 
 
 @pytest.mark.parametrize(

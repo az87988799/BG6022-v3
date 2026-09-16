@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from threading import Event
 from typing import Any
 
@@ -27,6 +28,20 @@ class GeometryDistanceParameters(BaseModel):
         if self.atom_i == self.atom_j:
             raise ValueError("atom_i and atom_j must identify two different atoms")
         return self
+
+
+def validate_distance_parameters(parameters: dict[str, Any], context: Mapping[str, Any]) -> None:
+    """Validate index upper bounds when a trusted geometry count is known."""
+
+    atom_count = context.get("geometry_atom_count")
+    if atom_count is None:
+        return
+    if isinstance(atom_count, bool) or not isinstance(atom_count, int) or atom_count < 1:
+        raise ValueError("geometry_atom_count must be a positive integer")
+    if max(parameters["atom_i"], parameters["atom_j"]) > atom_count:
+        raise ValueError(
+            f"atom index is outside the known XYZ geometry; it contains {atom_count} atoms"
+        )
 
 
 def measure_distance(geometry: Any, parameters: GeometryDistanceParameters) -> float:
@@ -79,6 +94,7 @@ def make_geometry_distance_tool(config: AppConfig | None = None) -> Tool:
         parameter_preparation="none",
         execution_budget="none",
         execute_function=execute if config is not None else None,
+        parameter_validation_function=validate_distance_parameters,
     )
 
 
@@ -186,4 +202,5 @@ __all__ = [
     "execute_geometry_distance",
     "make_geometry_distance_tool",
     "measure_distance",
+    "validate_distance_parameters",
 ]

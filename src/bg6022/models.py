@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -325,6 +325,7 @@ class Run(StrictModel):
 
 
 ExecuteFunction = Callable[[Step, Run, Any], Result]
+ParameterValidationFunction = Callable[[dict[str, Any], Mapping[str, Any]], None]
 ResultProperty = Literal[
     "electronic_energy",
     "molecular_geometry",
@@ -356,8 +357,12 @@ class Tool(StrictModel):
     execution_budget: Literal["none", "orca"] = "none"
     deferred_parameters: list[str] = Field(default_factory=list)
     request_parameters: list[str] = Field(default_factory=list)
+    geometry_output_input_ports: dict[str, str] = Field(default_factory=dict)
     available: bool = True
     execute_function: ExecuteFunction | None = Field(default=None, exclude=True, repr=False)
+    parameter_validation_function: ParameterValidationFunction | None = Field(
+        default=None, exclude=True, repr=False
+    )
     repair_capabilities_function: Callable[[dict[str, Any]], list[str]] | None = Field(
         default=None, exclude=True, repr=False
     )
@@ -386,6 +391,31 @@ class Tool(StrictModel):
             extra = sorted(set(metadata) - allowed)
             if extra:
                 raise ValueError(f"result metadata for {name!r} has unsupported keys: {extra}")
+        unknown_geometry_outputs = sorted(
+            set(self.geometry_output_input_ports) - set(self.output_ports)
+        )
+        if unknown_geometry_outputs:
+            raise ValueError(
+                f"geometry output declarations have undeclared ports: {unknown_geometry_outputs}"
+            )
+        unknown_geometry_inputs = sorted(
+            set(self.geometry_output_input_ports.values()) - set(self.input_ports)
+        )
+        if unknown_geometry_inputs:
+            raise ValueError(
+                f"geometry output declarations have undeclared inputs: {unknown_geometry_inputs}"
+            )
+        incompatible_geometry_bindings = sorted(
+            output
+            for output, input_name in self.geometry_output_input_ports.items()
+            if self.output_ports[output] != "molecular_geometry"
+            or self.input_ports[input_name] != "molecular_geometry"
+        )
+        if incompatible_geometry_bindings:
+            raise ValueError(
+                "geometry output declarations must connect molecular-geometry ports: "
+                f"{incompatible_geometry_bindings}"
+            )
         if len(self.request_parameters) != len(set(self.request_parameters)):
             raise ValueError("request_parameters must not contain duplicates")
         if self.request_parameters and self.parameter_type is None:
@@ -407,7 +437,11 @@ class Tool(StrictModel):
         return self.execute_function(step, run, cancel)
 
     def validate_parameters(
-        self, parameters: dict[str, Any], *, allow_deferred: bool = False
+        self,
+        parameters: dict[str, Any],
+        *,
+        allow_deferred: bool = False,
+        context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if self.parameter_type is None:
             if self.parameter_schema:
@@ -426,9 +460,12 @@ class Tool(StrictModel):
                 raise ValueError(f"missing required parameters: {sorted(undeclared)}")
             if missing:
                 return _validate_partial_model(self.parameter_type, parameters)
-        return self.parameter_type.model_validate(parameters, strict=True).model_dump(
+        validated = self.parameter_type.model_validate(parameters, strict=True).model_dump(
             mode="python", exclude_none=True
         )
+        if self.parameter_validation_function is not None:
+            self.parameter_validation_function(validated, context or {})
+        return validated
 
     def applicable_repair_capabilities(self, parameters: dict[str, Any]) -> list[str]:
         """Return repair actions permitted for this Tool and its parameters."""

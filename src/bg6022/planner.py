@@ -727,6 +727,7 @@ def normalize_user_explicit_parameters(
     patch = {
         name: value for name, value in parameters.items() if name not in {"charge", "multiplicity"}
     }
+    patch.update(_parse_explicit_atom_parameters(message))
     states: dict[str, ElectronicStateInput] = {}
     for name in ("charge", "multiplicity"):
         state = _parse_electronic_state(message, name)
@@ -739,6 +740,22 @@ def normalize_user_explicit_parameters(
         if state.status == "set":
             patch[name] = state.value
     return ParameterNormalization(explicit_parameters=patch, states=states)
+
+
+def _parse_explicit_atom_parameters(message: str) -> dict[str, int]:
+    """Parse only unambiguous atom-index assignments made by the user."""
+
+    parsed: dict[str, int] = {}
+    for name in ("atom_i", "atom_j"):
+        pattern = re.compile(
+            rf"(?<![A-Za-z0-9_]){name}(?![A-Za-z0-9_]).{{0,16}}?"
+            r"(?:=|:|改成|改为|设为|设置为)\s*([+-]?\d+)(?!\d)",
+            re.IGNORECASE,
+        )
+        values = {int(match.group(1)) for match in pattern.finditer(message)}
+        if len(values) == 1:
+            parsed[name] = values.pop()
+    return parsed
 
 
 def electronic_state_clarification(normalized: ParameterNormalization) -> str:

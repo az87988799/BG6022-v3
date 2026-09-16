@@ -261,6 +261,9 @@ def _make_tool(
         execution_budget="orca",
         deferred_parameters=["charge", "multiplicity"],
         request_parameters=request_parameters,
+        geometry_output_input_ports=(
+            {"optimized_geometry": "geometry"} if operation == "Opt" else {}
+        ),
         repair_capabilities_function=lambda parameters: _profile_repair_capabilities(
             parameters,
             operation=operation,
