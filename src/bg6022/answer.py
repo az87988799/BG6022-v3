@@ -759,9 +759,21 @@ def _confirmation_system_label(structure: Mapping[str, Any], description: Any) -
     smiles = _string_or_none(structure.get("isomeric_smiles")) or _string_or_none(
         structure.get("canonical_smiles")
     )
-    if title and formula and smiles and title.casefold() not in {"o", "water"}:
-        return f"{title}  {_pretty_formula(formula)}  (SMILES:{smiles})"
-    return _system_label(structure, description)
+    if not any((title, formula, smiles)):
+        return _system_label(structure, description)
+
+    if title is None and formula == "H2O":
+        name = "水分子（H₂O）"
+        formula_text = None
+    else:
+        name = title or "名称未提供"
+        formula_text = _pretty_formula(formula) if formula else "分子式未提供"
+    smiles_text = smiles or "未提供"
+    parts = [name]
+    if formula_text:
+        parts.append(formula_text)
+    parts.append(f"(SMILES:{smiles_text})")
+    return "  ".join(parts)
 
 
 def _has_complete_confirmation_identity(structure: Mapping[str, Any]) -> bool:
@@ -772,7 +784,7 @@ def _has_complete_confirmation_identity(structure: Mapping[str, Any]) -> bool:
     smiles = _string_or_none(structure.get("isomeric_smiles")) or _string_or_none(
         structure.get("canonical_smiles")
     )
-    return bool(title and formula and smiles and title.casefold() not in {"o", "water"})
+    return bool(title and formula and smiles)
 
 
 def _pretty_formula(value: str) -> str:

@@ -77,6 +77,21 @@ def _water_plan() -> tuple[Request, Plan]:
     return request, plan
 
 
+def _identity_confirmation_preview(structure: dict[str, str]) -> dict[str, object]:
+    return {
+        "request": {"description": "身份展示回归", "requested_results": []},
+        "operation": "Opt",
+        "parameters": {
+            "method_profile": "r2scan3c",
+            "environment": "gas",
+            "charge": 0,
+            "multiplicity": 1,
+        },
+        "resources": {},
+        "structure": structure,
+    }
+
+
 def test_confirmation_is_chinese_and_uses_the_bound_xyz_atom_count(tmp_path: Path) -> None:
     config = _config(tmp_path)
     registry = build_registry(config)
@@ -90,6 +105,7 @@ def test_confirmation_is_chinese_and_uses_the_bound_xyz_atom_count(tmp_path: Pat
     assert run.pending_data["structure"]["atom_count"] == 3
     text = render_confirmation(run.pending_data)
     assert "水分子（H₂O）" in text
+    assert "SMILES:O" in text
     assert "3 个原子" in text
     assert "优化后的电子能" in text
     assert "优化后的几何" in text
@@ -102,6 +118,41 @@ def test_confirmation_is_chinese_and_uses_the_bound_xyz_atom_count(tmp_path: Pat
     assert "20 分钟" in text
     assert "60 分钟" in text
     assert "{" not in text and "}" not in text
+
+
+def test_confirmation_keeps_water_smiles_for_name_variants() -> None:
+    for title in ("water", "Water", "O"):
+        text = render_confirmation(
+            _identity_confirmation_preview(
+                {"title": title, "formula": "H2O", "isomeric_smiles": "O"}
+            )
+        )
+        assert title in text
+        assert "H₂O" in text
+        assert "SMILES:O" in text
+
+
+def test_confirmation_marks_missing_identity_fields_without_hiding_known_facts() -> None:
+    missing_title = render_confirmation(
+        _identity_confirmation_preview({"formula": "C6H14", "canonical_smiles": "CCCCCC"})
+    )
+    assert "名称未提供" in missing_title
+    assert "C₆H₁₄" in missing_title
+    assert "SMILES:CCCCCC" in missing_title
+
+    missing_formula = render_confirmation(
+        _identity_confirmation_preview({"title": "Hexane", "canonical_smiles": "CCCCCC"})
+    )
+    assert "Hexane" in missing_formula
+    assert "分子式未提供" in missing_formula
+    assert "SMILES:CCCCCC" in missing_formula
+
+    missing_smiles = render_confirmation(
+        _identity_confirmation_preview({"title": "Hexane", "formula": "C6H14"})
+    )
+    assert "Hexane" in missing_smiles
+    assert "C₆H₁₄" in missing_smiles
+    assert "SMILES:未提供" in missing_smiles
 
 
 def test_confirmation_includes_verified_hexane_identity_in_plan_heading() -> None:
