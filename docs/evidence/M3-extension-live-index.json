@@ -3,13 +3,15 @@
   "status": "awaiting_user_acceptance",
   "candidate": {
     "branch": "codex/v3-m3-extension",
-    "implementation_sha": "a6830a57492bf2d5879602994e5987d6f4816e3b",
+    "implementation_sha": "733bd2ee8471071286be99ce50c299f8acead05d",
     "commits": [
       "fa0a90a",
       "3e1f612",
-      "a6830a5"
+      "a6830a5",
+      "b5d37f0",
+      "733bd2e"
     ],
-    "baseline_sha": "f6904328e4227fb60f0438268c222a8a04f8ca6b"
+    "baseline_sha": "b5d37f07a040e7eb8dfc1dac7c06af51cf37f255"
   },
   "environment": {
     "python": "3.11.4",
@@ -26,8 +28,12 @@
     },
     "llm": {
       "model": "deepseek-flash",
-      "status": "not_executed",
-      "reason": "DEEPSEEK_API_KEY was not present"
+      "status": "passed",
+      "tests": 8,
+      "cases": 54,
+      "repetitions_per_expression": 2,
+      "evidence_root": "E:\\BG6022-v3-data\\m3-llm-evidence",
+      "credential_policy": "key injected into the current process only; no secret stored"
     },
     "resources": {
       "cores": 4,
@@ -38,14 +44,14 @@
     "config_sha256": "1935185b5da3bdb83792021281fbe804adc5f7e8760ed506ef1d1a2be7d09736",
     "uv_lock_sha256": "4ebcff69853f57680c368e061b57e1ea0a1cd2171ebfb8e426c95a5b40128bf3",
     "prompt_sha256": {
-      "src/bg6022/prompts/intake.md": "8717035f102e879f25b9c7d3b4b910f0d58f3268234c39aad609c3819660f92",
+      "src/bg6022/prompts/intake.md": "8717035f102e879f25b9c7d3b4b910f0d58f3268234c39aad609c3819660f92d",
       "src/bg6022/prompts/planner.md": "ca3a15d284a306d1675991fad8d523d0ebdec077e136044dbd4284dc1393201e"
     },
-    "data_root": "E:\\BG6022-v3-data-m3-live-20260916"
+    "data_root": "E:\\BG6022-v3-data"
   },
   "offline": {
-    "m3_tests": "24 passed",
-    "regression": "272 passed, 9 deselected",
+    "m3_tests": "32 passed",
+    "regression": "280 passed, 15 deselected",
     "ruff": "passed",
     "compileall": "passed",
     "package_wheel": "passed",
@@ -149,8 +155,6 @@
     }
   ],
   "not_executed": [
-    {"id": "LLM-distance", "status": "not_executed", "reason": "DEEPSEEK_API_KEY unavailable"},
-    {"id": "LLM-b3lyp", "status": "not_executed", "reason": "DEEPSEEK_API_KEY unavailable"},
     {"id": "L5", "status": "not_executed", "reason": "new live r2SCAN-3c repair-to-distance run not performed"}
   ]
 }
