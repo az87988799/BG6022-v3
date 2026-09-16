@@ -9,7 +9,7 @@ from the post-fix offline evidence.
 
 | Field | Observed value | Status |
 |---|---|---|
-| Branch | `codex/v3-m2-implementation` at the final candidate (two commits: `cc11043` plus the evidence commit) | pushed to `origin` |
+| Branch | `codex/v3-m2-implementation` at the final candidate (`cc11043` plus cleanup `01ceed4`) | pushed to `origin` |
 | Pre-fix baseline code commits | `e7e300a227973a815c6213f1a4a36996fa3f96f7` (M2 implementation) and `9da71b0d8adae70a812a00704eb6544911d53e1b` (standalone Freq Agent regression) | pushed; historical baseline |
 | Pre-fix evidence commits | `dd0ee54eb0d6b4fed714b73a065f0505b18ff0e1` (M1/M2 records) and `03a421438af09154b567d0c49d7c50c2aacc0b30` (CI result) | pushed; historical baseline |
 | Root-cause repair candidate | `cc11043` | pushed; final live evidence in [`M2-final-minimal-fix-acceptance.md`](M2-final-minimal-fix-acceptance.md) |
@@ -20,7 +20,7 @@ from the post-fix offline evidence.
 | Run/input agreement | All four historical pre-fix Agent Runs snapshot 4/1024/192/1; each generated ORCA input has `nprocs 4` and `%maxcore 192` | verified for those Runs |
 | Pre-fix local offline validation | `ruff check src tests`; `ruff format --check src tests`; `python -m compileall -q src start_chat.py tests`; `pytest -q -m "not live_llm and not live_pubchem and not live_orca"` → 182 passed, 3 deselected; `uv build` | passed on pre-fix baseline |
 | Pre-fix GitHub Actions | [offline run 34994186571](https://github.com/az87988799/BG6022-v3/actions/runs/34994186571), tested commit `9da71b0d8adae70a812a00704eb6544911d53e1b` | passed on baseline |
-| Post-fix GitHub Actions | [offline run 35007233667](https://github.com/az87988799/BG6022-v3/actions/runs/35007233667), tested commit `f6547f76315c27cd72a2899db279fe90799abdcc` | passed |
+| Final GitHub Actions | [offline run 35051882558](https://github.com/az87988799/BG6022-v3/actions/runs/35051882558), tested commit `01ceed43447cba48fb2f8b68c888f0c9e286e3f2` | passed |
 | User acceptance | M2 acceptance owner and date | pending user review |
 
 Evidence root: `E:\BG6022-v3-data\m2_final_candidate_20260915_freqfix`.

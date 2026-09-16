@@ -1,6 +1,8 @@
 # M2 final minimal-fix implementation and acceptance evidence
 
 - **Code revision:** `cc11043` on `codex/v3-m2-implementation`
+- **Final cleanup commit:** `01ceed4` (test isolation and evidence correction)
+- **Windows CI:** [offline run 35051882558](https://github.com/az87988799/BG6022-v3/actions/runs/35051882558), commit `01ceed43447cba48fb2f8b68c888f0c9e286e3f2` — **success**
 - **Date:** 2026-09-16 (Asia/Hong_Kong)
 - **Live evidence root:** `E:\BG6022-v3-data\acceptance_live_20260916_finalplan`
 - **Machine-readable file index:** [`M2-final-live-run-index.json`](M2-final-live-run-index.json)
