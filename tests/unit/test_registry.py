@@ -6,7 +6,7 @@ from bg6022.models import GoalCheckRequirement, InputReference, Plan, Request, S
 from bg6022.tools.registry import build_registry, describe_tools
 
 
-def test_m1_and_m2_tools_are_public() -> None:
+def test_registered_tools_are_public() -> None:
     names = {item["name"] for item in describe_tools()}
     assert names == {
         "resolve_molecule",
@@ -14,6 +14,7 @@ def test_m1_and_m2_tools_are_public() -> None:
         "single_point",
         "optimize_geometry",
         "frequency",
+        "geometry_distance",
     }
 
 

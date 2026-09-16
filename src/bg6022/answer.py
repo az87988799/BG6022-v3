@@ -23,6 +23,8 @@ _PARAMETER_LABELS = {
     "environment": "计算环境",
     "geom_maxiter": "几何优化迭代上限",
     "scf_maxiter": "SCF 迭代上限",
+    "atom_i": "第一个原子索引",
+    "atom_j": "第二个原子索引",
 }
 
 
@@ -494,7 +496,15 @@ def _metadata(tool: Any, name: str) -> dict[str, str]:
 def _fact_context(fact: Mapping[str, Any], *, include_task_identity: bool = False) -> str:
     system = _string_or_none(fact.get("system"))
     tool = fact.get("step_tool")
-    operation = "优化" if tool == "optimize_geometry" else "单点" if tool == "single_point" else ""
+    operation = (
+        "优化"
+        if tool == "optimize_geometry"
+        else "单点"
+        if tool == "single_point"
+        else "距离测量"
+        if tool == "geometry_distance"
+        else ""
+    )
     method = _method_label(fact.get("method_profile"))
     environment = _environment_label(fact.get("environment"))
     details = [
@@ -558,6 +568,7 @@ def _confirmation_step_line(value: Any) -> str:
         "optimize_geometry": "几何优化",
         "frequency": "频率计算",
         "single_point": "独立单点计算",
+        "geometry_distance": "原子间距离测量",
     }
     operation_names = {
         "SP": "单点计算",
@@ -592,6 +603,12 @@ def _confirmation_step_line(value: Any) -> str:
         details.append(f"电荷 {_format_scalar(parameters['charge'])}")
     if parameters.get("multiplicity") is not None:
         details.append(f"多重度 {_format_scalar(parameters['multiplicity'])}")
+    if parameters.get("atom_i") is not None and parameters.get("atom_j") is not None:
+        details.append(
+            f"第 {_format_scalar(parameters['atom_i'])}、"
+            f"{_format_scalar(parameters['atom_j'])} 号原子"
+            "（XYZ 从 1 编号）"
+        )
     for name, label_text in (("geom_maxiter", "几何迭代上限"), ("scf_maxiter", "SCF 迭代上限")):
         if parameters.get(name) is not None:
             details.append(f"{label_text} {_format_scalar(parameters[name])}")
@@ -659,6 +676,23 @@ def _fact_sentence(fact: Mapping[str, Any]) -> str:
         reason = _string_or_none(value.get("reason"))
         suffix = f"；{reason}" if reason else ""
         return f"{label}{status_label}{suffix}。"
+    if fact.get("expected_type") == "angstrom" and isinstance(fact.get("value"), Mapping):
+        distance = _mapping(fact.get("value"))
+        raw = distance.get("value")
+        if type(raw) in {int, float} and math.isfinite(float(raw)):
+            indices = distance.get("atom_indices")
+            symbols = distance.get("atom_symbols")
+            if (
+                isinstance(indices, list)
+                and len(indices) == 2
+                and isinstance(symbols, list)
+                and len(symbols) == 2
+            ):
+                pair = (
+                    f"第 {_format_scalar(indices[0])} 号 {symbols[0]} 与第 "
+                    f"{_format_scalar(indices[1])} 号 {symbols[1]} 原子"
+                )
+                return f"{label}为 **{_format_scalar(raw)} Å**（{pair}；来源：已验证几何）。"
     value, unit = _display_value(fact.get("value"), fact.get("expected_type"))
     return f"{label}为 **{value}{unit}**。"
 
@@ -716,6 +750,8 @@ def _display_value(value: Any, expected_type: str | None) -> tuple[str, str]:
         token = value.get("token")
         raw = token if isinstance(token, str) and token.strip() else value.get("value")
         unit = value.get("unit") or _display_unit(expected_type)
+        if unit == "angstrom":
+            unit = "Å"
         return _format_scalar(raw), f" {unit}" if unit else ""
     unit = f" {_display_unit(expected_type)}" if _display_unit(expected_type) else ""
     return _format_scalar(value), unit
@@ -724,7 +760,7 @@ def _display_value(value: Any, expected_type: str | None) -> tuple[str, str]:
 def _display_unit(expected_type: str | None) -> str:
     if expected_type in {None, "integer", "text", "boolean", "molecular_geometry"}:
         return ""
-    return str(expected_type)
+    return "Å" if expected_type == "angstrom" else str(expected_type)
 
 
 def _render_failed_result(result: Result) -> str:
@@ -798,6 +834,8 @@ def _operation_label(
         return "几何优化"
     if operation == "SP":
         return "单点计算"
+    if operation == "Freq":
+        return "频率计算"
     return "计算任务"
 
 
@@ -805,7 +843,13 @@ def _method_label(value: Any) -> str:
     if not value:
         return "未指定方法"
     text = str(value)
-    return {"r2scan3c": "r²SCAN-3c", "r2scan-3c": "r²SCAN-3c"}.get(text, text)
+    try:
+        from bg6022.orca.profiles import get_profile
+
+        profile = get_profile(text)
+    except ValueError:
+        return text
+    return profile.display_name or profile.name
 
 
 def _environment_label(value: Any) -> str:
