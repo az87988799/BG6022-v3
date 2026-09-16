@@ -185,13 +185,12 @@ record user acceptance. The verified baseline is branch `codex/v3-m1-agent` at
 
 ## M2 status
 
-M2 has offline O1–O8, historical pre-fix R1–R4, and fresh post-fix real
-Agent/ORCA recertification. The root-cause repairs pass 224 offline tests; the
-new live evidence covers all seven entry paths, including a real same-Run
-failure/recovery/Freq/SP chain. One additional colloquial iteration-limit
-phrase was safely rejected before Run creation because Intake returned an
-unsupported `max_iterations` alias; this is documented separately and is not
-counted as a pass. M2 remains pending the user's acceptance; see
+M2 has offline O1–O8 and final-candidate real Agent/ORCA recertification. The
+root-cause repairs pass 245 offline tests; P1–P4 and the final R1/R2 chains are
+recorded with credential-free file hashes. Safe stops for malformed state
+punctuation, unsupported targets, and ambiguous historical geometry remain in
+the evidence and are not counted as passes. M2 remains pending the user's
+acceptance; see
 [`docs/milestones/M2.md`](milestones/M2.md) and
-[`docs/evidence/M2-composition-evidence.md`](evidence/M2-composition-evidence.md),
-plus the [post-fix live recertification](evidence/M2-postfix-live-recertification.md).
+[`docs/evidence/M2-final-minimal-fix-acceptance.md`](evidence/M2-final-minimal-fix-acceptance.md),
+plus the [machine-readable run index](evidence/M2-final-live-run-index.json).

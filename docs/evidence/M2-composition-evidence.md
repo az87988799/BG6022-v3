@@ -131,9 +131,9 @@ the offline Freq-only Agent test and does not replace any R1–R4 Agent scenario
 | Item | Status |
 |---|---|
 | Pre-fix M2 implementation and offline/live evidence | historical baseline; not post-fix recertification |
-| Root-cause repair candidate commit | `f6547f76315c27cd72a2899db279fe90799abdcc` (pushed) |
-| Post-fix offline verification | 224 passed, 3 skipped; lint, format, compile, package build, and diff checks passed; GitHub Actions passed |
-| Post-fix fresh real-entry recertification | completed; see [`M2-postfix-live-recertification.md`](M2-postfix-live-recertification.md); awaiting user acceptance |
+| Root-cause repair candidate commit | `cc11043` (final candidate; push pending in this turn) |
+| Post-fix offline verification | 245 passed, 3 deselected; lint, format, compile, package build, and diff checks passed |
+| Post-fix fresh real-entry recertification | final candidate recorded in [`M2-final-minimal-fix-acceptance.md`](M2-final-minimal-fix-acceptance.md); awaiting user acceptance |
 | Evidence commits | `dd0ee54eb0d6b4fed714b73a065f0505b18ff0e1`, `03a421438af09154b567d0c49d7c50c2aacc0b30`, `e7b33d74d1e59f045ec66dbabcf2865bcdb0cda7` (post-fix live recertification; pushed) |
 | M2 user acceptance owner and date | pending user review |
 | M1 user acceptance | remains separately pending |
@@ -143,9 +143,9 @@ explicitly accepts it.
 
 ## Post-fix live recertification
 
-Fresh DeepSeek and ORCA results for the seven real-entry scenarios in the
-root-cause plan, the waiting-confirmation continuity check, bounded correction
-metadata, and one additional safe parameter-alias stop are recorded in
-[`M2-postfix-live-recertification.md`](M2-postfix-live-recertification.md).
-Those tests exercise the pushed `f6547f7` code candidate; their evidence does
-not constitute user acceptance of M2.
+Fresh DeepSeek and ORCA results for P1–P4 and the final R1/R2 chains are
+recorded in [`M2-final-minimal-fix-acceptance.md`](M2-final-minimal-fix-acceptance.md),
+with every evidence-root file indexed by SHA-256 in
+[`M2-final-live-run-index.json`](M2-final-live-run-index.json). The earlier
+post-fix document remains historical evidence. This record does not constitute
+user acceptance of M2.
