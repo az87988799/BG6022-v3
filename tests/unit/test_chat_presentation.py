@@ -104,6 +104,81 @@ def test_confirmation_is_chinese_and_uses_the_bound_xyz_atom_count(tmp_path: Pat
     assert "{" not in text and "}" not in text
 
 
+def test_confirmation_includes_verified_hexane_identity_in_plan_heading() -> None:
+    text = render_confirmation(
+        {
+            "request": {
+                "description": "计算己烷优化后的能量",
+                "requested_results": [],
+            },
+            "operation": "Opt",
+            "parameters": {
+                "method_profile": "r2scan3c",
+                "environment": "gas",
+                "charge": 0,
+                "multiplicity": 1,
+            },
+            "resources": {
+                "cores": 4,
+                "memory_mb": 1024,
+                "maxcore_mb": 192,
+                "attempt_timeout_seconds": 1200,
+                "run_active_timeout_seconds": 3600,
+            },
+            "structure": {
+                "title": "Hexane",
+                "formula": "C6H14",
+                "isomeric_smiles": "CCCCCC",
+                "atom_count": 20,
+            },
+            "plan_steps": [
+                {
+                    "index": 1,
+                    "tool": "resolve_molecule",
+                    "parameters": {"query": "hexane"},
+                },
+                {
+                    "index": 2,
+                    "tool": "generate_geometry",
+                    "parameters": {},
+                    "inputs": [{"name": "molecule", "source_step": "步骤 1", "port": "molecule"}],
+                },
+                {
+                    "index": 3,
+                    "tool": "optimize_geometry",
+                    "parameters": {
+                        "method_profile": "r2scan3c",
+                        "environment": "gas",
+                        "charge": 0,
+                        "multiplicity": 1,
+                    },
+                    "inputs": [{"name": "geometry", "source_step": "步骤 2", "port": "geometry"}],
+                    "requested_results": [{"label": "优化后的电子能"}],
+                },
+            ],
+            "repair_scope": {"steps": {"s03_opt": {"actions": {"restart_optimization": {}}}}},
+            "budget": {
+                "max_attempts_per_science_step": 3,
+                "max_extra_orca_executions": 3,
+            },
+        }
+    )
+
+    assert "准备对Hexane  C₆H₁₄  (SMILES:CCCCCC)  执行以下完整计算计划：" in text
+    assert "1. 解析分子；分子查询“hexane”。" in text
+    assert "2. 生成初始结构；molecule来自步骤 1.molecule。" in text
+    assert (
+        "3. 几何优化；方法 r²SCAN-3c；气相；电荷 0；多重度 1；"
+        "geometry来自步骤 2.geometry；目标：优化后的电子能。"
+    ) in text
+    assert "使用 4 核，总内存上限 1024 MB，每核 MaxCore 为 192 MB。" in text
+    assert (
+        "若因优化迭代次数用尽而失败，可从经校验的中间结构继续优化，并将迭代上限提高至最多 1000。"
+        in text
+    )
+    assert "输入 /confirm 开始，也可以先告诉我需要调整什么。" in text
+
+
 def test_confirmation_discloses_the_full_ordered_opt_freq_sp_plan(tmp_path: Path) -> None:
     config = _config(tmp_path)
     registry = build_registry(config)

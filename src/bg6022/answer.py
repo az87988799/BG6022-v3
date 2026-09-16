@@ -34,7 +34,7 @@ def render_confirmation(preview: Mapping[str, Any]) -> str:
     parameters = _mapping(preview.get("parameters"))
     resources = _mapping(preview.get("resources"))
     operation = str(preview.get("operation") or "calculation")
-    system = _system_label(structure, request.get("description"))
+    system = _confirmation_system_label(structure, request.get("description"))
     task = _operation_label(operation, parameters, structure)
     method = _method_label(parameters.get("method_profile"))
     environment = _environment_label(parameters.get("environment"))
@@ -46,14 +46,15 @@ def render_confirmation(preview: Mapping[str, Any]) -> str:
         task_phrase = f"进行{environment}单点计算"
     else:
         task_phrase = f"进行{task}"
-    if atom_count is not None:
+    if atom_count is not None and not _has_complete_confirmation_identity(structure):
         system = f"{system}（{_format_scalar(atom_count)} 个原子）"
+    heading_separator = "  " if _has_complete_confirmation_identity(structure) else ""
     plan_steps = preview.get("plan_steps")
     if isinstance(plan_steps, Sequence) and not isinstance(plan_steps, (str, bytes)) and plan_steps:
-        lines = [f"准备对{system}执行以下完整计算计划："]
+        lines = [f"准备对{system}{heading_separator}执行以下完整计算计划："]
         lines.extend(_confirmation_step_line(step) for step in plan_steps)
     else:
-        lines = [f"准备对{system}{task_phrase}，采用 {method}。"]
+        lines = [f"准备对{system}{heading_separator}{task_phrase}，采用 {method}。"]
         target_line = _result_target_sentence(preview.get("result_targets"), request)
         if target_line:
             lines.append(target_line)
@@ -748,6 +749,30 @@ def _system_label(structure: Mapping[str, Any], description: Any) -> str:
     if isinstance(description, str) and description.strip():
         return description.strip()
     return "该体系"
+
+
+def _confirmation_system_label(structure: Mapping[str, Any], description: Any) -> str:
+    """Show the verified molecule identity in a confirmation heading when available."""
+
+    title = _string_or_none(structure.get("title"))
+    formula = _string_or_none(structure.get("formula"))
+    smiles = _string_or_none(structure.get("isomeric_smiles")) or _string_or_none(
+        structure.get("canonical_smiles")
+    )
+    if title and formula and smiles and title.casefold() not in {"o", "water"}:
+        return f"{title}  {_pretty_formula(formula)}  (SMILES:{smiles})"
+    return _system_label(structure, description)
+
+
+def _has_complete_confirmation_identity(structure: Mapping[str, Any]) -> bool:
+    """Return whether the heading can carry title, formula, and SMILES."""
+
+    title = _string_or_none(structure.get("title"))
+    formula = _string_or_none(structure.get("formula"))
+    smiles = _string_or_none(structure.get("isomeric_smiles")) or _string_or_none(
+        structure.get("canonical_smiles")
+    )
+    return bool(title and formula and smiles and title.casefold() not in {"o", "water"})
 
 
 def _pretty_formula(value: str) -> str:
