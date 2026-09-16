@@ -1,0 +1,156 @@
+{
+  "schema": "bg6022.m3.live-evidence.v1",
+  "status": "awaiting_user_acceptance",
+  "candidate": {
+    "branch": "codex/v3-m3-extension",
+    "implementation_sha": "a6830a57492bf2d5879602994e5987d6f4816e3b",
+    "commits": [
+      "fa0a90a",
+      "3e1f612",
+      "a6830a5"
+    ],
+    "baseline_sha": "f6904328e4227fb60f0438268c222a8a04f8ca6b"
+  },
+  "environment": {
+    "python": "3.11.4",
+    "packages": {
+      "pydantic": "2.13.5",
+      "httpx": "0.28.1",
+      "pytest": "9.1.1",
+      "rdkit": "2026.03.6"
+    },
+    "uv": "unavailable",
+    "orca": {
+      "path": "E:\\orca\\orca.exe",
+      "version": "6.1.1"
+    },
+    "llm": {
+      "model": "deepseek-flash",
+      "status": "not_executed",
+      "reason": "DEEPSEEK_API_KEY was not present"
+    },
+    "resources": {
+      "cores": 4,
+      "memory_mb": 1024,
+      "maxcore_mb": 192,
+      "max_concurrent_jobs": 1
+    },
+    "config_sha256": "1935185b5da3bdb83792021281fbe804adc5f7e8760ed506ef1d1a2be7d09736",
+    "uv_lock_sha256": "4ebcff69853f57680c368e061b57e1ea0a1cd2171ebfb8e426c95a5b40128bf3",
+    "prompt_sha256": {
+      "src/bg6022/prompts/intake.md": "8717035f102e879f25b9c7d3b4b910f0d58f3268234c39aad609c3819660f92",
+      "src/bg6022/prompts/planner.md": "ca3a15d284a306d1675991fad8d523d0ebdec077e136044dbd4284dc1393201e"
+    },
+    "data_root": "E:\\BG6022-v3-data-m3-live-20260916"
+  },
+  "offline": {
+    "m3_tests": "24 passed",
+    "regression": "270 passed, 9 deselected",
+    "ruff": "passed",
+    "compileall": "passed",
+    "package_wheel": "passed",
+    "diff_check": "passed"
+  },
+  "cases": [
+    {
+      "id": "L1",
+      "status": "passed",
+      "run_id": "run_c2392fc441f34f90a694bfbfaa55b8a1",
+      "steps": ["sp"],
+      "values": {"sp_electronic_energy": {"value": -76.320237678723, "unit": "Eh"}},
+      "attempts": [{"step_id": "sp", "attempt": 1, "status": "succeeded", "repairs": []}],
+      "files": {
+        "run.json": {"size": 8683, "sha256": "bbb8dfb2889ea66b82991e56ad7c9a216f1f6bd6600b73b970e093f68c25af6e"},
+        "sp/attempt-01/input.inp": {"size": 110, "sha256": "eb0dd5c4ff970a2b5720b6d4f18972bad69287f950f3e6d6afec876437893f6e"},
+        "sp/attempt-01/geometry.xyz": {"size": 168, "sha256": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2"},
+        "sp/attempt-01/stdout.out": {"size": 53607, "sha256": "b6aac821521599db05d7320cd64189b517bedec9c34e24a8de4b4521ca2927f0"},
+        "sp/attempt-01/result.json": {"size": 9953, "sha256": "98c7b271eaa7e28707f64962beb06f10c2f2f2ce280ff7388d4856f7d3eb6969"}
+      }
+    },
+    {
+      "id": "L2",
+      "status": "passed",
+      "run_id": "run_65ee6e4eff0d45838253c459a6ab578e",
+      "steps": ["opt", "freq", "sp"],
+      "values": {
+        "opt_final_electronic_energy": {"value": -76.321846986879, "unit": "Eh"},
+        "sp_electronic_energy": {"value": -76.321843874159, "unit": "Eh"},
+        "frequency_mode_count": 9,
+        "frequency_complete": "passed",
+        "local_minimum_supported": "passed"
+      },
+      "attempts": [
+        {"step_id": "opt", "attempt": 1, "status": "succeeded", "repairs": []},
+        {"step_id": "freq", "attempt": 1, "status": "succeeded", "repairs": []},
+        {"step_id": "sp", "attempt": 1, "status": "succeeded", "repairs": []}
+      ],
+      "files": {
+        "run.json": {"size": 18200, "sha256": "00113bc1a9938bb887293ab51c56c3b9416c835a883af975a46cb9b0994aebd1"},
+        "opt/attempt-01/input.inp": {"size": 111, "sha256": "81c845da0a8d88ceacd86dbc7f88ba263f2706435023a8daafc8218d9f8ea496"},
+        "opt/attempt-01/geometry.xyz": {"size": 168, "sha256": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2"},
+        "opt/attempt-01/input.xyz": {"size": 370, "sha256": "895ccf4065b1351e2dfbb06e08771f4e1b2744273f08458770954c2c2d322e45"},
+        "opt/attempt-01/stdout.out": {"size": 159059, "sha256": "38ad9f1794c9001211d852220a4ce9b0fc82e14a1321bbbb2f9edf9c77a1fb94"},
+        "opt/attempt-01/result.json": {"size": 12310, "sha256": "94aaaaaad9c471a412ecee1a26502eef143418b85bf6e016b9bfdef303fe5144"},
+        "freq/attempt-01/input.inp": {"size": 112, "sha256": "fe84b24edd2595a87919085f48c1b5b437cb2ac332c26bacba946b84ffc70741"},
+        "freq/attempt-01/geometry.xyz": {"size": 370, "sha256": "895ccf4065b1351e2dfbb06e08771f4e1b2744273f08458770954c2c2d322e45"},
+        "freq/attempt-01/input.hess": {"size": 5932, "sha256": "add8a0de744d8066731b36a8258dfe9a6b88bc64cebc5cf8f822b3cf3fc335d2"},
+        "freq/attempt-01/stdout.out": {"size": 70272, "sha256": "1815ba86c1803e459a86112ef3b6fa267a20349b4bc2ddbcb7f13b0ab0a7346c"},
+        "freq/attempt-01/result.json": {"size": 13731, "sha256": "36e151814e473f89ba9453d0513c8046cfe7eb2ca0dadb03cbaa6d341448ed2d"},
+        "sp/attempt-01/input.inp": {"size": 110, "sha256": "eb0dd5c4ff970a2b5720b6d4f18972bad69287f950f3e6d6afec876437893f6e"},
+        "sp/attempt-01/geometry.xyz": {"size": 370, "sha256": "895ccf4065b1351e2dfbb06e08771f4e1b2744273f08458770954c2c2d322e45"},
+        "sp/attempt-01/stdout.out": {"size": 53606, "sha256": "bfbe214dc100481f2c802fa6cb7bb70e0e594fbc6b33f3a8bfd700a6021f6894"},
+        "sp/attempt-01/result.json": {"size": 9955, "sha256": "c30af4c4bf5c1a772c0d02e9ffb9d67cf17af102208f9c01b94e3733a7eee6a6"}
+      }
+    },
+    {
+      "id": "L3",
+      "status": "passed",
+      "run_id": "run_3abe260e4e06474cb6b474d27f659221",
+      "steps": ["opt", "distance"],
+      "values": {
+        "opt_final_electronic_energy": {"value": -154.835566700447, "unit": "Eh"},
+        "interatomic_distance": {
+          "value": 2.449244495068977,
+          "unit": "angstrom",
+          "atom_indices": [1, 3],
+          "atom_symbols": ["C", "O"],
+          "geometry_artifact_id": "artifact_0c9a1d74ff3d4cbcb7faaf0720fef3e1",
+          "geometry_sha256": "2779e6f944505ec371d9d2c6b5ac9b6e55a55115d325cfcf8c1b6b56520b1115"
+        }
+      },
+      "attempts": [
+        {"step_id": "opt", "attempt": 1, "status": "succeeded", "repairs": []},
+        {"step_id": "distance", "attempt": 1, "status": "succeeded", "repairs": []}
+      ],
+      "files": {
+        "run.json": {"size": 11293, "sha256": "952bd5c7b4fef8221cc988fac8b232a1c1f0fde5d4c70aedc16fd460896cecd3"},
+        "opt/attempt-01/input.inp": {"size": 111, "sha256": "81c845da0a8d88ceacd86dbc7f88ba263f2706435023a8daafc8218d9f8ea496"},
+        "opt/attempt-01/geometry.xyz": {"size": 330, "sha256": "a742d6e40d359118d564bb40fa1e0f1bed1309ea93093a51cb4402989a9f6961"},
+        "opt/attempt-01/input.xyz": {"size": 821, "sha256": "2779e6f944505ec371d9d2c6b5ac9b6e55a55115d325cfcf8c1b6b56520b1115"},
+        "opt/attempt-01/stdout.out": {"size": 1095970, "sha256": "c0eabed68362e295d0035661f14f7efa816f1ba99e1c07d8ddc6b976f581636a"},
+        "opt/attempt-01/result.json": {"size": 22035, "sha256": "e14c81e8a1cf31fbb0ddaf0af9ec7d5eb1b1a06a12359b5e04a339f5d53d8cfb"},
+        "distance/attempt-01/result.json": {"size": 1263, "sha256": "7175d0d53551dfce577279ae4e700cc475be9889f245b1b7e5b077c21c12fda5"}
+      }
+    },
+    {
+      "id": "L4",
+      "status": "passed",
+      "run_id": "run_06e718c86e274a48ab9609ed0d739caa",
+      "steps": ["sp"],
+      "values": {"sp_electronic_energy": {"value": -56.470443697465, "unit": "Eh"}},
+      "attempts": [{"step_id": "sp", "attempt": 1, "status": "succeeded", "repairs": []}],
+      "files": {
+        "run.json": {"size": 8696, "sha256": "cb4229a08e51c1deff788a068cc249140365da206e26c13a86ac5e34e86d5537"},
+        "sp/attempt-01/input.inp": {"size": 110, "sha256": "eb0dd5c4ff970a2b5720b6d4f18972bad69287f950f3e6d6afec876437893f6e"},
+        "sp/attempt-01/geometry.xyz": {"size": 181, "sha256": "e2620b97cae94ab34e92944ad36c21231e4e5ebb7b1d71efbf5033bc8cbf8af9"},
+        "sp/attempt-01/stdout.out": {"size": 54312, "sha256": "ee382006444e5ca34429342da2e8f82f0ae7a9224b3e8cc3ad8f1c73cdc521df"},
+        "sp/attempt-01/result.json": {"size": 9953, "sha256": "7d2557198b1e46e8ca78b2b232e9e2e357bb9fb388fc9ac4c29daa00b0bae481"}
+      }
+    }
+  ],
+  "not_executed": [
+    {"id": "LLM-distance", "status": "not_executed", "reason": "DEEPSEEK_API_KEY unavailable"},
+    {"id": "LLM-b3lyp", "status": "not_executed", "reason": "DEEPSEEK_API_KEY unavailable"},
+    {"id": "L5", "status": "not_executed", "reason": "new live r2SCAN-3c repair-to-distance run not performed"}
+  ]
+}
