@@ -665,7 +665,12 @@ def request_from_intake(
     if any(key in intake.structure_input for key in {"path", "local_path", "file"}):
         raise ValueError("model intake cannot authorize a local file path")
     normalized = normalized_parameters or normalize_user_explicit_parameters(
-        message, intake.explicit_parameters, intake.electronic_state_candidates
+        message,
+        intake.explicit_parameters,
+        intake.electronic_state_candidates,
+        parameter_names=tuple(
+            registry.request_index_parameter_fields(intake.operations, intake.requested_results)
+        ),
     )
     if normalized.clarification_fields:
         raise ValueError(
@@ -705,11 +710,41 @@ def request_from_intake(
         source="chat",
         operations=list(intake.operations),
         missing_fields=list(intake.missing_fields),
-        output_preferences=validate_output_preferences(intake.output_preferences),
+        output_preferences=_request_output_preferences(message, intake.output_preferences),
     )
     _validate_required_geometry_contract(request, registry)
     _require_composite_geometry_sources(request, registry)
     return request
+
+
+def _request_output_preferences(message: str, value: Mapping[str, Any] | None) -> dict[str, str]:
+    """Keep presentation preferences user-authorized and non-scientific.
+
+    ``link_only`` changes whether verified file content is shown.  It is
+    therefore accepted only when the user's message explicitly asks for a
+    link/path-only response; a model suggestion cannot silently hide content.
+    """
+
+    preferences = validate_output_preferences(value)
+    explicit_link_request = bool(
+        re.search(
+            r"(?:仅|只|不要正文|不显示正文|不展示正文|只给).{0,8}(?:链接|链结|路径|文件入口)|"
+            r"(?:link\s*only|path\s*only|only\s+(?:the\s+)?(?:link|path))",
+            message,
+            re.IGNORECASE,
+        )
+        or (
+            re.search(r"链接|链结|文件路径|文件入口|\blink\b|\bpath\b", message, re.IGNORECASE)
+            and not re.search(
+                r"(?:不要|不需要|不用).{0,4}(?:链接|链结|路径|入口|link|path)",
+                message,
+                re.IGNORECASE,
+            )
+        )
+    )
+    if preferences.get("file_content") == "link_only" and not explicit_link_request:
+        preferences["file_content"] = "auto"
+    return preferences
 
 
 def intake_blocking_requirements(intake: IntakeOutput, registry: ToolRegistry) -> tuple[str, ...]:
@@ -748,6 +783,7 @@ def normalize_user_explicit_parameters(
     message: str,
     parameters: Mapping[str, Any],
     candidates: list[ElectronicStateCandidate] | tuple[ElectronicStateCandidate, ...] = (),
+    parameter_names: tuple[str, ...] | list[str] | None = None,
 ) -> ParameterNormalization:
     """Normalize one intake turn, retaining absent/ambiguous/invalid q/M states.
 
@@ -760,7 +796,8 @@ def normalize_user_explicit_parameters(
     patch = {
         name: value for name, value in parameters.items() if name not in {"charge", "multiplicity"}
     }
-    explicit_atoms, atom_issues = _parse_explicit_index_assignments(message, ("atom_i", "atom_j"))
+    index_parameters = ("atom_i", "atom_j") if parameter_names is None else tuple(parameter_names)
+    explicit_atoms, atom_issues = _parse_explicit_index_assignments(message, index_parameters)
     for name in atom_issues:
         patch.pop(name, None)
     patch.update(explicit_atoms)
@@ -1400,7 +1437,14 @@ def _bounded_context(context: Mapping[str, Any] | None) -> Mapping[str, Any]:
         geometry_catalog = []
     delivery = context.get("last_delivery")
     if isinstance(delivery, list):
-        delivery = [dict(item) for item in delivery[-8:] if isinstance(item, Mapping)]
+        # Private locators (run IDs, paths, hashes, and artifact IDs) never
+        # enter the intake prompt. The public result catalog is regenerated
+        # and revalidated for the current turn instead.
+        delivery = [
+            {key: item[key] for key in ("output_ref", "property", "kind") if key in item}
+            for item in delivery[-8:]
+            if isinstance(item, Mapping)
+        ]
     else:
         delivery = []
     return {
@@ -1666,21 +1710,89 @@ def _validate_query_selection(
             clarification="所选任务没有该性质；请从当前任务实际提供的结果中选择。",
         )
         return output.model_copy(update={"query_selection": replacement})
-    if selection.status == "selected" and any(
-        not _query_property_evidence_matches(
-            target.property,
-            target.evidence,
-            message,
-            metadata=_query_property_metadata(target.property, result_catalog),
-        )
-        for target in selection.targets
-    ):
+    recent_pairs: set[tuple[str, str]] = set()
+    for item in result_catalog or []:
+        if not isinstance(item, Mapping) or item.get("recently_delivered") is not True:
+            continue
+        result = item.get("result")
+        if (
+            isinstance(item.get("subject_ref"), str)
+            and isinstance(result, Mapping)
+            and isinstance(result.get("property"), str)
+        ):
+            recent_pairs.add((item["subject_ref"], result["property"]))
+    invalid_evidence = False
+    if selection.status == "selected":
+        for target in selection.targets:
+            followup = (
+                target.reference_mode == "followup"
+                and (target.subject_ref, target.property) in recent_pairs
+                and _followup_reference_is_safe(
+                    target,
+                    message,
+                    result_catalog,
+                )
+            )
+            if followup:
+                continue
+            if not _query_property_evidence_matches(
+                target.property,
+                target.evidence,
+                message,
+                metadata=_query_property_metadata(target.property, result_catalog),
+            ):
+                invalid_evidence = True
+                break
+    if invalid_evidence:
         replacement = QuerySelection(
             status="clarify",
             clarification="请明确说明要查询的科学量；我不会用其他性质的结果代替。",
         )
         return output.model_copy(update={"query_selection": replacement})
     return output
+
+
+def _followup_reference_is_safe(
+    target: QueryTarget,
+    message: str,
+    result_catalog: list[Mapping[str, Any]] | None,
+) -> bool:
+    """Allow a follow-up only for an explicit conversational reference.
+
+    A recent delivery is necessary but not sufficient: a new molecule, file,
+    negation, or scientific property in the current message must be handled
+    as an explicit query instead of inheriting the old result.
+    """
+
+    if not re.search(
+        r"刚才|上次|上一条|前面|刚生成|刚输出|刚才的|同一|这个结果|该结果|"
+        r"previous|earlier|above|that result|same result|again",
+        message,
+        re.IGNORECASE,
+    ):
+        return False
+    for item in result_catalog or []:
+        if not isinstance(item, Mapping):
+            continue
+        result = item.get("result")
+        if not isinstance(result, Mapping):
+            continue
+        property_name = result.get("property")
+        if not isinstance(property_name, str) or property_name == target.property:
+            continue
+        evidence = str(result.get("label") or property_name)
+        if _query_property_evidence_matches(
+            property_name,
+            evidence,
+            message,
+            metadata={
+                key: result[key]
+                for key in ("label", "description")
+                if isinstance(result.get(key), str)
+            },
+        ):
+            return False
+    return True
 
 
 def _query_property_metadata(

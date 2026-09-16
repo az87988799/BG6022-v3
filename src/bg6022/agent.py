@@ -17,7 +17,6 @@ from .answer import (
     AnswerSection,
     compose_answer,
     facts_from_result,
-    render_already_finished,
     render_answer_output,
     render_clarification,
     render_confirmation,
@@ -34,6 +33,7 @@ from .orca.repair_rules import applicable_repairs, applicable_scf_repair
 from .output_contracts import is_compatible_value, public_type_info
 from .planner import (
     QuerySelection,
+    _request_output_preferences,
     electronic_state_clarification,
     intake_blocking_requirements,
     intake_message,
@@ -295,6 +295,11 @@ class Agent:
                 text,
                 intake.explicit_parameters,
                 intake.electronic_state_candidates,
+                parameter_names=tuple(
+                    self.registry.request_index_parameter_fields(
+                        intake.operations, intake.requested_results
+                    )
+                ),
             )
             explicit_parameters = normalized_parameters.explicit_parameters
             blocking = intake_blocking_requirements(intake, self.registry)
@@ -458,7 +463,7 @@ class Agent:
                     text,
                     selection=intake.query_selection,
                     catalog=result_catalog,
-                    preferences=intake.output_preferences,
+                    preferences=_request_output_preferences(text, intake.output_preferences),
                     cancel=request_cancel,
                 )
 
@@ -794,56 +799,70 @@ class Agent:
                 save_run(self.config.data_root_path, run)
 
     def confirm(self, run: Run | str | None = None) -> AgentResponse:
-        current = self._coerce_run(run)
-        if current is None:
-            return AgentResponse("当前没有等待确认的计算。")
-        if current.status in {"succeeded", "failed", "cancelled", "interrupted"}:
-            result = self._latest_result(current)
-            return AgentResponse(
-                render_already_finished(
+        request_token, request_cancel = self._begin_request()
+        origin_session = self.session_id
+        try:
+            current = self._coerce_run(run)
+            if current is None:
+                response = AgentResponse("当前没有等待确认的计算。")
+                self._record_response(
+                    response,
+                    cancel=request_cancel,
+                    request_token=request_token,
+                    session_id=origin_session,
+                )
+                return response
+            if current.status in {"succeeded", "failed", "cancelled", "interrupted"}:
+                result = self._latest_result(current)
+                response = self._response_for_run(
                     current,
                     result,
-                    self.registry,
-                    structure=self._result_structure(current, result),
-                    **self._failure_render_context(current),
-                ),
-                run=current,
-                result=result,
+                    cancel=request_cancel,
+                )
+                self._record_response(
+                    response,
+                    cancel=request_cancel,
+                    request_token=request_token,
+                    session_id=origin_session,
+                )
+                return response
+            if current.waiting_for != "confirmation":
+                response = AgentResponse(self._waiting_text(current), run=current)
+                self._record_response(
+                    response,
+                    cancel=request_cancel,
+                    request_token=request_token,
+                    session_id=origin_session,
+                )
+                return response
+            current.execution_permission = True
+            current.waiting_for = None
+            current.accepted_snapshot = self._acceptance_snapshot(current)
+            current.accepted_execution_sha256 = execution_fingerprint(
+                current.plan,
+                current.resources,
+                current.artifact_index,
+                snapshot=current.accepted_snapshot,
             )
-        if current.waiting_for != "confirmation":
-            return AgentResponse(self._waiting_text(current), run=current)
-        current.execution_permission = True
-        current.waiting_for = None
-        current.accepted_snapshot = self._acceptance_snapshot(current)
-        current.accepted_execution_sha256 = execution_fingerprint(
-            current.plan,
-            current.resources,
-            current.artifact_index,
-            snapshot=current.accepted_snapshot,
-        )
-        save_run(self.config.data_root_path, current)
-        try:
-            result = self.advance(
-                current, cancel=self._cancel_events.setdefault(current.id, Event())
-            )
-        except (PermissionError, ValueError, OSError) as error:
-            current.status = "failed"
-            current.pending_data = {"category": "execution_boundary", "reason": str(error)}
             save_run(self.config.data_root_path, current)
-            response = self._response_for_run(
-                current,
-                self._latest_result(current),
-                cancel=self._cancel_events.setdefault(current.id, Event()),
+            self._cancel_events[current.id] = request_cancel
+            try:
+                result = self.advance(current, cancel=request_cancel)
+            except (PermissionError, ValueError, OSError) as error:
+                current.status = "failed"
+                current.pending_data = {"category": "execution_boundary", "reason": str(error)}
+                save_run(self.config.data_root_path, current)
+                result = self._latest_result(current)
+            response = self._response_for_run(current, result, cancel=request_cancel)
+            self._record_response(
+                response,
+                cancel=request_cancel,
+                request_token=request_token,
+                session_id=origin_session,
             )
-            self._record_response(response)
             return response
-        response = self._response_for_run(
-            current,
-            result,
-            cancel=self._cancel_events.setdefault(current.id, Event()),
-        )
-        self._record_response(response)
-        return response
+        finally:
+            self._finish_request(request_token, request_cancel)
 
     def cancel(self, run: Run | str | None = None) -> AgentResponse:
         active_request = self._active_request
@@ -915,6 +934,7 @@ class Agent:
         self._request_sequence += 1
         self._active_request = None
         self.session_id = new_id("session")
+        self._query_bindings = {}
         self._session = {
             "session_id": self.session_id,
             "recent_messages": [],
@@ -1947,11 +1967,24 @@ class Agent:
                     else f"{default_text}\n{rendered_facts}"
                 )
             elif unavailable:
-                default_text = f"{default_text}\n尚未交付：{'；'.join(unavailable)}。"
+                if run.status == "succeeded":
+                    default_text = (
+                        "计算已完成，但请求的输出当前不可交付；未重新计算。\n"
+                        f"尚未交付：{'；'.join(unavailable)}。"
+                    )
+                else:
+                    default_text = f"{default_text}\n尚未交付：{'；'.join(unavailable)}。"
                 delivery = {
-                    "status": "partial",
+                    "status": "unavailable" if run.status == "succeeded" else "partial",
                     "rendered_refs": [],
                     "unavailable_targets": list(unavailable),
+                    "outputs": [],
+                }
+            elif run.status == "cancelled":
+                delivery = {
+                    "status": "cancelled",
+                    "rendered_refs": [],
+                    "unavailable_targets": [],
                     "outputs": [],
                 }
             return AgentResponse(
@@ -2120,17 +2153,21 @@ class Agent:
         preview_text: str | None = None
         preview_complete = False
         preview_reason: str | None = None
-        previewable = expected_type in {"molecular_geometry", "text_file", "file"} or str(
-            getattr(artifact, "metadata", {}).get("mime_type", "")
-        ).startswith("text/")
+        previewable = expected_type in {
+            "molecular_geometry",
+            "molecule",
+            "text_file",
+            "file",
+        } or str(getattr(artifact, "metadata", {}).get("mime_type", "")).startswith("text/")
         if previewable:
-            try:
-                decoded = bytes(prefix).decode("utf-8")
-            except UnicodeDecodeError:
+            decoded, boundary_truncated = _decode_utf8_preview(bytes(prefix))
+            if decoded is None:
                 preview_reason = "文件不是可严格解码的 UTF-8 文本"
             else:
                 lines = decoded.splitlines(keepends=True)
                 complete_prefix = len(prefix) >= expected_size
+                if boundary_truncated:
+                    complete_prefix = False
                 if len(lines) > MAX_FILE_PREVIEW_LINES:
                     lines = lines[:MAX_FILE_PREVIEW_LINES]
                     complete_prefix = False
@@ -2175,17 +2212,20 @@ class Agent:
         for fact in facts:
             metadata = fact.get("metadata") if isinstance(fact.get("metadata"), Mapping) else {}
             expected_type = fact.get("expected_type")
+            kind = str(fact.get("kind") or "field")
+            contract = public_type_info(str(expected_type or ""), kind=kind)
             file_info = files_by_ref.get(str(fact.get("output_ref")))
             outputs.append(
                 {
                     "ref": fact.get("output_ref"),
-                    "kind": fact.get("kind"),
+                    "kind": kind,
                     "name": fact.get("name"),
                     "property": fact.get("result_property"),
                     "type": expected_type,
-                    "unit": _public_unit(expected_type),
-                    "mime_type": _artifact_mime_type(expected_type, None),
-                    "shape": "check" if fact.get("kind") == "check" else None,
+                    "unit": contract.get("unit"),
+                    "mime_type": contract.get("mime_type"),
+                    "shape": contract.get("shape"),
+                    "supported_views": list(contract.get("supported_views", [])),
                     "label": metadata.get("label"),
                     "description": metadata.get("description"),
                     "caveat": metadata.get("caveat"),
@@ -2208,11 +2248,12 @@ class Agent:
         facts: list[Mapping[str, Any]],
         *,
         files: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] = (),
+        preferences: Mapping[str, Any] | None = None,
     ) -> bool:
         outputs = Agent._answer_output_map(facts, files)
         required = [str(fact.get("output_ref")) for fact in facts if fact.get("output_ref")]
         try:
-            validate_result_answer(draft, outputs, required)
+            validate_result_answer(draft, outputs, required, preferences=preferences)
         except ValueError:
             return False
         return True
@@ -2226,17 +2267,28 @@ class Agent:
             for item in files
             if item.get("output_ref") or item.get("ref")
         }
+        task_keys = {
+            str(fact.get("task_key")) for fact in facts if fact.get("task_key") is not None
+        }
         outputs: dict[str, dict[str, Any]] = {}
         for fact in facts:
             ref = fact.get("output_ref")
             if not isinstance(ref, str) or not ref:
                 continue
+            if isinstance(fact, dict):
+                fact["_include_task_identity"] = len(task_keys) > 1
             outputs[ref] = {
                 "ref": ref,
                 "kind": fact.get("kind"),
                 "type": fact.get("expected_type"),
                 "fact": fact,
                 "file": files_by_ref.get(ref),
+                "supported_views": list(
+                    public_type_info(
+                        str(fact.get("expected_type") or ""),
+                        kind=str(fact.get("kind") or "field"),
+                    ).get("supported_views", [])
+                ),
             }
         return outputs
 
@@ -2248,72 +2300,139 @@ class Agent:
         *,
         unavailable: list[str],
         cancel: Event | None,
+        question: str | None = None,
+        preferences: Mapping[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         for index, fact in enumerate(facts, start=1):
             fact.setdefault("output_ref", f"out_{index}")
-        outputs = self._answer_output_map(facts, files)
-        required = [str(fact["output_ref"]) for fact in facts]
+        file_refs = {
+            str(item.get("output_ref") or item.get("ref"))
+            for item in files
+            if item.get("output_ref") or item.get("ref")
+        }
+        renderable: list[dict[str, Any]] = []
+        unavailable_targets = list(unavailable)
+        for fact in facts:
+            ref = str(fact["output_ref"])
+            if fact.get("kind") == "port" and ref not in file_refs:
+                label = str(_mapping(fact.get("metadata")).get("label") or fact.get("name") or ref)
+                if label not in unavailable_targets:
+                    unavailable_targets.append(label)
+                continue
+            renderable.append(fact)
+        delivery_preferences = dict(
+            preferences if preferences is not None else run.request.output_preferences
+        )
+        required = [str(fact["output_ref"]) for fact in renderable]
+        if not required:
+            if cancel is not None and cancel.is_set():
+                return (
+                    "本次结果呈现已取消。已完成的科学结果仍保留；本次未将其标记为完整交付。",
+                    {
+                        "status": "cancelled",
+                        "rendered_refs": [],
+                        "unavailable_targets": unavailable_targets,
+                        "outputs": [],
+                    },
+                )
+            return (
+                "本次目标暂无可交付的当前文件或结果；未重新计算。",
+                {
+                    "status": "unavailable",
+                    "rendered_refs": [],
+                    "unavailable_targets": unavailable_targets,
+                    "outputs": [],
+                },
+            )
+        outputs = self._answer_output_map(renderable, files)
         draft: AnswerOutput | None = None
         if cancel is None or not cancel.is_set():
             try:
                 draft, _error = self._compose_answer_draft(
-                    run.request.description,
+                    question or run.request.description,
                     mode="result",
-                    available_outputs=self._public_answer_outputs(facts, files),
+                    available_outputs=self._public_answer_outputs(renderable, files),
                     required_outputs=required,
                     context={
                         "run_status": run.status,
-                        "output_preferences": run.request.output_preferences,
+                        "output_preferences": delivery_preferences,
                     },
                     cancel=cancel,
                 )
             except LlmError:
                 draft = None
-        if self._answer_draft_covers_outputs(draft, facts, files=files):
+        cancelled = cancel is not None and cancel.is_set()
+        fallback = AnswerOutput(
+            action="respond",
+            sections=[
+                AnswerSection(
+                    format="auto",
+                    heading="results",
+                    output_refs=required,
+                    detail=str(delivery_preferences.get("detail", "normal")),
+                    text=None,
+                )
+            ],
+        )
+        if cancelled:
+            text = render_answer_output(
+                fallback,
+                outputs_by_ref=outputs,
+                required_refs=required,
+                preferences=delivery_preferences,
+            )
+            text = f"{text}\n本次结果呈现已取消。已完成的科学结果仍保留；本次未将其标记为完整交付。"
+        elif self._answer_draft_covers_outputs(
+            draft,
+            renderable,
+            files=files,
+            preferences=delivery_preferences,
+        ):
             try:
                 text = render_answer_output(
                     draft,
                     outputs_by_ref=outputs,
                     required_refs=required,
-                    preferences=run.request.output_preferences,
+                    preferences=delivery_preferences,
                 )
             except ValueError:
-                text = ""
+                draft = None
+                text = render_answer_output(
+                    fallback,
+                    outputs_by_ref=outputs,
+                    required_refs=required,
+                    preferences=delivery_preferences,
+                )
         else:
-            fallback = AnswerOutput(
-                action="respond",
-                sections=[
-                    AnswerSection(
-                        format="auto",
-                        heading="results",
-                        output_refs=required,
-                        detail=run.request.output_preferences.get("detail", "normal"),
-                        text=None,
-                    )
-                ],
-            )
             text = render_answer_output(
                 fallback,
                 outputs_by_ref=outputs,
                 required_refs=required,
-                preferences=run.request.output_preferences,
+                preferences=delivery_preferences,
             )
-        if unavailable:
-            text = f"{text}\n尚未交付：{'；'.join(unavailable)}。"
+        if unavailable_targets:
+            text = f"{text}\n尚未交付：{'；'.join(unavailable_targets)}；未重新计算。"
         locators: list[dict[str, Any]] = []
-        for fact in facts:
+        for fact in renderable:
             ref = str(fact["output_ref"])
             file_info = next(
                 (item for item in files if str(item.get("output_ref") or item.get("ref")) == ref),
                 None,
             )
+            result = fact.get("_result")
+            fact_run = fact.get("_run")
             locator = {
                 "output_ref": ref,
-                "run_id": run.id,
+                "run_id": fact_run.id if isinstance(fact_run, Run) else run.id,
                 "step_id": fact.get("step_id"),
                 "subject_ref": fact.get("subject_ref"),
                 "kind": fact.get("kind"),
+                "name": fact.get("name"),
                 "property": fact.get("result_property"),
+                "attempt": result.attempt if isinstance(result, Result) else None,
+                "step_fingerprint": (
+                    result.step_fingerprint if isinstance(result, Result) else None
+                ),
             }
             if file_info is not None:
                 locator.update(
@@ -2326,11 +2445,16 @@ class Agent:
                     }
                 )
             locators.append(locator)
-        status = "complete" if not unavailable and len(locators) == len(required) else "partial"
+        if cancelled:
+            status = "cancelled"
+        elif unavailable_targets:
+            status = "partial"
+        else:
+            status = "complete"
         return text, {
             "status": status,
-            "rendered_refs": required,
-            "unavailable_targets": list(unavailable),
+            "rendered_refs": [str(fact["output_ref"]) for fact in renderable],
+            "unavailable_targets": unavailable_targets,
             "outputs": locators,
         }
 
@@ -2421,10 +2545,22 @@ class Agent:
         if save:
             self._save_session()
 
-    def _record_response(self, response: AgentResponse, *, cancel: Event | None = None) -> None:
+    def _record_response(
+        self,
+        response: AgentResponse,
+        *,
+        cancel: Event | None = None,
+        request_token: int | None = None,
+        session_id: str | None = None,
+    ) -> None:
         """Persist a bounded conversational summary and delivery locators."""
 
         if cancel is not None and cancel.is_set():
+            return
+        if request_token is not None:
+            if self._active_request is None or self._active_request[0] != request_token:
+                return
+        if session_id is not None and self.session_id != session_id:
             return
         summary = re.sub(r"```.*?```", "[已交付文件正文省略]", response.text, flags=re.DOTALL)
         self._append_message("assistant", summary, save=False)
@@ -2433,7 +2569,8 @@ class Agent:
             outputs = [
                 dict(item) for item in delivery.get("outputs", []) if isinstance(item, Mapping)
             ]
-            self._session["last_delivery"] = outputs[-8:]
+            if delivery.get("status") == "complete":
+                self._session["last_delivery"] = outputs[-8:]
         self._save_session()
 
     def _record_result_summary(self, run: Run, result: Result) -> None:
@@ -2627,7 +2764,18 @@ class Agent:
                         "property": property_name,
                     }
                     if artifact is not None:
-                        binding["artifact_id"] = artifact.id
+                        binding.update(
+                            {
+                                "artifact_id": artifact.id,
+                                "artifact_sha256": artifact.sha256,
+                                "artifact_size": artifact.size_bytes,
+                            }
+                        )
+                    recently_delivered = self._delivery_locator_matches(
+                        binding,
+                        artifact=artifact,
+                        last_delivery=last_delivery,
+                    )
                     key = (subject_ref, property_name)
                     if key in self._query_bindings:
                         raise ValueError(
@@ -2649,17 +2797,39 @@ class Agent:
                             check_status=(
                                 result.scientific_checks[name].status if kind == "check" else None
                             ),
-                            recently_delivered=any(
-                                item.get("run_id") == run.id
-                                and item.get("step_id") == step.id
-                                and item.get("property") == property_name
-                                for item in last_delivery
-                            ),
+                            recently_delivered=recently_delivered,
                         )
                     )
                     if len(catalog) >= MAX_QUERY_CATALOG_ITEMS:
                         return catalog
         return catalog
+
+    @staticmethod
+    def _delivery_locator_matches(
+        binding: Mapping[str, Any],
+        *,
+        artifact: Any | None,
+        last_delivery: list[Mapping[str, Any]],
+    ) -> bool:
+        """Match a saved delivery only after its current result is revalidated."""
+
+        for item in last_delivery:
+            if any(
+                item.get(key) != binding.get(key)
+                for key in ("run_id", "step_id", "property", "kind")
+            ):
+                continue
+            if item.get("attempt") != binding.get("attempt"):
+                continue
+            if item.get("step_fingerprint") != binding.get("step_fingerprint"):
+                continue
+            if artifact is not None:
+                if item.get("artifact_id") != artifact.id:
+                    continue
+                if item.get("sha256") != artifact.sha256:
+                    continue
+            return True
+        return False
 
     def _build_geometry_catalog(self) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
         """Expose bounded aliases for verified molecular-geometry outputs."""
@@ -2849,6 +3019,7 @@ class Agent:
                 "type": contract["type"],
                 "unit": contract["unit"],
                 "mime_type": contract["mime_type"],
+                "supported_views": list(contract.get("supported_views", [])),
                 "artifact_type": expected_type if kind == "port" else None,
                 "caveat": metadata.get("caveat"),
                 "validity": "verified",
@@ -2919,7 +3090,14 @@ class Agent:
             value = result.values[name]
         elif kind == "port":
             artifact = self._query_port_artifact(run, step, result, name, expected_type)
-            if artifact is None or artifact.id != resolved.get("artifact_id"):
+            if (
+                artifact is None
+                or artifact.id != resolved.get("artifact_id")
+                or (
+                    resolved.get("artifact_sha256") is not None
+                    and artifact.sha256 != resolved.get("artifact_sha256")
+                )
+            ):
                 return None
             value = {"artifact_id": artifact.id}
         else:
@@ -3222,6 +3400,8 @@ class Agent:
             ):
                 return None
             path = artifact_path(self.config.data_root_path, run, artifact)
+            if not _artifact_integrity_matches(path, artifact):
+                return None
             if expected_type == "molecular_geometry":
                 parse_xyz_bytes(path.read_bytes())
             return artifact
@@ -3330,7 +3510,15 @@ class Agent:
         cancel: Event | None = None,
     ) -> AgentResponse:
         if cancel is not None and cancel.is_set():
-            return AgentResponse("当前请求已取消。")
+            return AgentResponse(
+                "当前请求已取消。",
+                delivery={
+                    "status": "cancelled",
+                    "rendered_refs": [],
+                    "unavailable_targets": [],
+                    "outputs": [],
+                },
+            )
         if draft is not None and draft.action == "respond":
             text = render_answer_output(draft)
             if not text:
@@ -3355,7 +3543,15 @@ class Agent:
         cancel: Event | None = None,
     ) -> AgentResponse:
         if cancel is not None and cancel.is_set():
-            return AgentResponse("当前请求已取消。")
+            return AgentResponse(
+                "当前请求已取消。",
+                delivery={
+                    "status": "cancelled",
+                    "rendered_refs": [],
+                    "unavailable_targets": [],
+                    "outputs": [],
+                },
+            )
         if selection is None:
             text = render_clarification({"status": "unavailable", "missing_description": question})
             response = AgentResponse(text)
@@ -3396,95 +3592,31 @@ class Agent:
         for index, fact in enumerate(facts, start=1):
             fact["output_ref"] = f"out_{index}"
         files = self._files_for_facts(facts, cancel=cancel)
-        output_map = self._answer_output_map(facts, files)
-        required = [str(fact["output_ref"]) for fact in facts]
-        draft: AnswerOutput | None = None
-        if cancel is None or not cancel.is_set():
-            try:
-                draft, _error = self._compose_answer_draft(
-                    question,
-                    mode="query",
-                    available_outputs=self._public_answer_outputs(facts, files),
-                    required_outputs=required,
-                    context={
-                        "run_status": facts[0].get("run_status") if facts else None,
-                        "output_preferences": dict(preferences or {}),
-                    },
-                    cancel=cancel,
-                )
-            except LlmError:
-                draft = None
-        fallback = AnswerOutput(
-            action="respond",
-            sections=[
-                AnswerSection(
-                    format="auto",
-                    heading="results",
-                    output_refs=required,
-                    detail=str((preferences or {}).get("detail", "normal")),
-                    text=None,
-                )
-            ],
-        )
-        if self._answer_draft_covers_outputs(draft, facts, files=files):
-            try:
-                text = render_answer_output(
-                    draft,
-                    outputs_by_ref=output_map,
-                    required_refs=required,
-                    preferences=preferences,
-                )
-            except ValueError:
-                text = render_answer_output(
-                    fallback,
-                    outputs_by_ref=output_map,
-                    required_refs=required,
-                    preferences=preferences,
-                )
-        else:
-            text = render_answer_output(
-                fallback,
-                outputs_by_ref=output_map,
-                required_refs=required,
-                preferences=preferences,
-            )
         first = facts[0] if facts else {}
         run = first.get("_run")
         result = first.get("_result")
-        delivery = {
-            "status": "complete",
-            "rendered_refs": required,
-            "unavailable_targets": [],
-            "outputs": [
-                {
-                    "output_ref": ref,
-                    "run_id": fact.get("_run").id if isinstance(fact.get("_run"), Run) else None,
-                    "step_id": fact.get("step_id"),
-                    "subject_ref": fact.get("subject_ref"),
-                    "property": fact.get("result_property"),
-                    **(
-                        {
-                            "artifact_id": file_info.get("artifact_id"),
-                            "path": file_info.get("path"),
-                            "sha256": file_info.get("sha256"),
-                            "filename": file_info.get("filename"),
-                        }
-                        if (
-                            file_info := next(
-                                (
-                                    item
-                                    for item in files
-                                    if str(item.get("output_ref") or item.get("ref")) == ref
-                                ),
-                                None,
-                            )
-                        )
-                        else {}
-                    ),
-                }
-                for ref, fact in ((str(item["output_ref"]), item) for item in facts)
-            ],
-        }
+        if not isinstance(run, Run):
+            response = AgentResponse(
+                "所选结果的来源任务已无法重新验证；未重新计算。",
+                files=tuple(files),
+                delivery={
+                    "status": "unavailable",
+                    "rendered_refs": [],
+                    "unavailable_targets": [question],
+                    "outputs": [],
+                },
+            )
+            self._record_response(response, cancel=cancel)
+            return response
+        text, delivery = self._render_verified_delivery(
+            run,
+            facts,
+            files,
+            unavailable=[],
+            cancel=cancel,
+            question=question,
+            preferences=preferences,
+        )
         response = AgentResponse(
             text,
             run=run,
@@ -3535,13 +3667,43 @@ def _public_unit(expected_type: Any) -> str | None:
 
 
 def _artifact_mime_type(expected_type: Any, suffix: str | None) -> str:
-    if expected_type in {"molecular_geometry", "text_file", "file"}:
+    if expected_type == "molecular_geometry":
+        return "chemical/x-xyz"
+    if expected_type == "molecule":
+        return "application/json"
+    if expected_type == "text_file":
         return "text/plain"
     if expected_type == "orca_hessian":
         return "text/plain"
     if suffix == ".json":
         return "application/json"
     return "application/octet-stream"
+
+
+def _artifact_integrity_matches(path: Path, artifact: Any) -> bool:
+    try:
+        if path.stat().st_size != artifact.size_bytes:
+            return False
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(64 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest() == artifact.sha256
+    except OSError:
+        return False
+
+
+def _decode_utf8_preview(data: bytes) -> tuple[str | None, bool]:
+    """Decode a bounded UTF-8 prefix without treating a split code point as invalid."""
+
+    for trim in range(0, min(4, len(data) + 1)):
+        candidate = data[: len(data) - trim] if trim else data
+        try:
+            return candidate.decode("utf-8"), trim > 0
+        except UnicodeDecodeError as error:
+            if error.reason != "unexpected end of data":
+                return None, False
+    return None, False
 
 
 def _normalize_explicit_plan(

@@ -99,12 +99,19 @@ def public_type_info(expected_type: str, *, kind: str) -> dict[str, Any]:
         shape = "check"
     else:
         shape = "unknown"
+    if kind == "port" or shape in {"file", "text_file"}:
+        supported_views = ["auto", "code", "link"]
+    elif shape in {"record", "record_list", "json"}:
+        supported_views = ["auto", "plain", "table", "json", "code"]
+    else:
+        supported_views = ["auto", "plain", "table", "json"]
     return {
         "type": expected_type,
         "unit": unit,
         "mime_type": mime_type,
         "kind": kind,
         "shape": shape,
+        "supported_views": supported_views,
     }
 
 
@@ -295,14 +302,16 @@ def _meaningful_tokens(value: str) -> list[str]:
     return [item for item in tokens if len(item) >= 2] or [value]
 
 
-_SEMANTIC_ALIASES = {
-    "角度": {"角度", "夹角", "angle", "degree"},
-    "夹角": {"角度", "夹角", "angle", "degree"},
-    "报告": {"报告", "report", "csv", "file", "文件"},
-    "report": {"报告", "report", "csv", "file", "文件"},
-    "csv": {"报告", "report", "csv", "file", "文件"},
-    "文件": {"报告", "report", "csv", "file", "文件"},
-}
+# Generic public-output concepts, rather than Tool-specific vocabulary.  Tool
+# labels and descriptions still provide the primary evidence; these small
+# groups only bridge ordinary language to the public contract (for example
+# ``角度`` and ``夹角`` or ``报告`` and ``文件``).
+_SEMANTIC_CONCEPTS = (
+    frozenset({"角度", "夹角", "angle", "degree"}),
+    frozenset({"报告", "report", "csv", "file", "文件", "表格"}),
+    frozenset({"结构", "geometry", "structure", "xyz", "坐标"}),
+    frozenset({"距离", "间距", "distance", "length", "长度"}),
+)
 
 
 def _semantic_terms(value: str) -> set[str]:
@@ -311,10 +320,12 @@ def _semantic_terms(value: str) -> set[str]:
     for token in _meaningful_tokens(value):
         token_folded = token.casefold()
         terms.add(token_folded)
-        terms.update(_SEMANTIC_ALIASES.get(token_folded, set()))
-    for token, aliases in _SEMANTIC_ALIASES.items():
-        if token in folded:
-            terms.update(aliases)
+        for concept in _SEMANTIC_CONCEPTS:
+            if token_folded in concept:
+                terms.update(concept)
+    for concept in _SEMANTIC_CONCEPTS:
+        if any(token.casefold() in folded for token in concept):
+            terms.update(concept)
     return terms
 
 

@@ -23,6 +23,23 @@ class ToolRegistry:
         self._tools = {tool.name: tool for tool in tool_list}
         if len(self._tools) != len(tool_list):
             raise ValueError("tool names must be unique")
+        property_contracts: dict[str, tuple[Any, ...]] = {}
+        property_sources: dict[str, str] = {}
+        for tool in tool_list:
+            for output in tool.public_outputs():
+                property_name = str(output["property"])
+                contract = tuple(
+                    output.get(key) for key in ("kind", "type", "unit", "shape", "mime_type")
+                )
+                previous = property_contracts.get(property_name)
+                if previous is not None and previous != contract:
+                    raise ValueError(
+                        "incompatible public property contract: "
+                        f"{property_name!r} is declared by {property_sources[property_name]} "
+                        f"as {previous}, and {tool.name}.{output['name']} as {contract}"
+                    )
+                property_contracts[property_name] = contract
+                property_sources[property_name] = f"{tool.name}.{output['name']}"
 
     def get(self, name: str) -> Tool:
         try:
@@ -144,6 +161,38 @@ class ToolRegistry:
             for tool in self.tools_for_request(operations, requested_results)
             for field in tool.request_parameters
         }
+
+    def request_index_parameter_fields(
+        self,
+        operations: Iterable[str],
+        requested_results: Iterable[str | ResultTarget] = (),
+    ) -> set[str]:
+        """Return declared integer/index request fields for user normalization.
+
+        The selection comes from each Tool's public parameter schema.  The
+        Agent does not carry a fixed ``atom_i/atom_j`` list, so a new
+        geometry-measurement Tool can add another index field without a core
+        parser change.
+        """
+
+        fields: set[str] = set()
+        for tool in self.tools_for_request(operations, requested_results):
+            properties = tool.parameter_schema.get("properties", {})
+            if not isinstance(properties, dict):
+                continue
+            for name in tool.request_parameters:
+                schema = properties.get(name)
+                if not isinstance(schema, dict):
+                    continue
+                type_name = schema.get("type")
+                semantic_name = (
+                    f"{name} {schema.get('title', '')} {schema.get('description', '')}"
+                ).casefold()
+                if type_name == "integer" and any(
+                    token in semantic_name for token in ("index", "atom", "原子", "索引")
+                ):
+                    fields.add(name)
+        return fields
 
     def resolve_result_target(
         self,

@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 
 from bg6022.llm import LlmClient
 from bg6022.models import Result, Run
+from bg6022.output_contracts import public_type_info
 from bg6022.planner import load_prompt
 
 if TYPE_CHECKING:
@@ -141,6 +142,7 @@ def validate_result_answer(
     output: AnswerOutput | None,
     outputs_by_ref: Mapping[str, Mapping[str, Any]],
     required_refs: Sequence[str],
+    preferences: Mapping[str, Any] | None = None,
 ) -> tuple[str, ...]:
     """Validate the reference-only result/query presentation contract."""
 
@@ -156,6 +158,11 @@ def validate_result_answer(
             if ref not in outputs_by_ref:
                 raise ValueError(f"unknown output reference: {ref}")
             _check_supported_view(outputs_by_ref[ref], section.format)
+            if (
+                section.format == "link"
+                and str(_mapping(preferences).get("file_content") or "auto") != "link_only"
+            ):
+                raise ValueError("link view requires an explicit link-only file request")
             used.append(ref)
     if len(used) != len(set(used)):
         raise ValueError("duplicate output rendering")
@@ -181,7 +188,12 @@ def render_answer_output(
     if output is None:
         return ""
     if outputs_by_ref is not None:
-        used = validate_result_answer(output, outputs_by_ref, required_refs)
+        used = validate_result_answer(
+            output,
+            outputs_by_ref,
+            required_refs,
+            preferences=preferences,
+        )
         section_by_ref: dict[str, AnswerSection] = {
             ref: section for section in output.sections for ref in section.output_refs
         }
@@ -226,27 +238,14 @@ def _check_supported_view(entry: Mapping[str, Any], requested: str) -> None:
     expected_type = str(
         entry.get("type") or entry.get("expected_type") or fact.get("expected_type") or ""
     )
-    supported = {
-        "plain": {"field", "check", "port"},
-        "table": {"field", "check", "port"},
-        "json": {"field", "port", "check"},
-        "code": {"port", "field"},
-        "link": {"port", "field"},
-    }
-    if kind not in supported.get(requested, set()):
-        raise ValueError(f"view {requested!r} is unsupported for {kind or expected_type!r}")
-    if (
-        requested == "code"
-        and kind == "field"
-        and expected_type
-        not in {
-            "text",
-            "json",
-            "record",
-            "record_list",
-        }
-    ):
-        raise ValueError("code view is unsupported for scalar output")
+    declared = entry.get("supported_views")
+    if not isinstance(declared, list):
+        declared = public_type_info(expected_type, kind=kind).get("supported_views", [])
+    if requested not in declared:
+        raise ValueError(
+            f"view {requested!r} is unsupported for {kind or expected_type!r}; "
+            f"supported views: {', '.join(str(item) for item in declared)}"
+        )
 
 
 def _render_public_output(
@@ -262,23 +261,55 @@ def _render_public_output(
         fact = entry
     kind = str(fact.get("kind") or entry.get("kind") or "field")
     expected_type = fact.get("expected_type") or entry.get("type")
+    if view == "auto":
+        layout = str(_mapping(preferences).get("layout") or "auto")
+        supported = public_type_info(str(expected_type or ""), kind=kind).get("supported_views", [])
+        if layout in {"plain", "table"} and layout in supported:
+            view = layout
+        elif expected_type in {"record", "record_list"} and "table" in supported:
+            view = "table"
+        elif expected_type == "json" and "json" in supported:
+            view = "json"
     label = str(_mapping(fact.get("metadata")).get("label") or fact.get("name") or "结果")
     if kind == "port":
-        return _render_file_output(label, file_info, preferences=preferences, detail=detail)
-    if kind == "check":
-        return _fact_sentence(fact)
-    value = fact.get("value")
-    if view == "json" or (view == "code" and isinstance(value, (dict, list))):
-        return f"{label}：\n```json\n{json.dumps(value, ensure_ascii=False, indent=2)}\n```"
-    if view == "table" or expected_type in {"record_list", "record"}:
-        return _render_record_value(label, value)
-    return _fact_sentence(fact)
+        body = _render_file_output(
+            label,
+            file_info,
+            fact=fact,
+            view=view,
+            preferences=preferences,
+            detail=detail,
+        )
+    elif kind == "check":
+        body = _fact_sentence(fact)
+    else:
+        value = fact.get("value")
+        if view == "json" or (view == "code" and isinstance(value, (dict, list))):
+            body = f"{label}：\n```json\n{json.dumps(value, ensure_ascii=False, indent=2)}\n```"
+        elif view == "table":
+            body = (
+                _render_record_value(label, value)
+                if expected_type in {"record_list", "record"}
+                else _render_scalar_table(label, value)
+            )
+        elif expected_type in {"record_list", "record"}:
+            body = _render_record_value(label, value)
+        else:
+            body = _fact_sentence(fact)
+    context = _fact_context(fact, include_task_identity=bool(fact.get("_include_task_identity")))
+    lines = [f"{context}：", body] if context else [body]
+    caveat = _string_or_none(_mapping(fact.get("metadata")).get("caveat"))
+    if caveat:
+        lines.append(f"说明：{caveat}。")
+    return "\n".join(lines)
 
 
 def _render_file_output(
     label: str,
     file_info: Mapping[str, Any],
     *,
+    fact: Mapping[str, Any],
+    view: str,
     preferences: Mapping[str, Any] | None,
     detail: str,
 ) -> str:
@@ -288,7 +319,7 @@ def _render_file_output(
     path = str(file_info.get("path") or "")
     lines = [f"{label}（{display_name}）"]
     file_content = str(_mapping(preferences).get("file_content") or "auto")
-    show_content = file_content != "link_only"
+    show_content = view != "link" and file_content != "link_only"
     preview = file_info.get("preview_text")
     if show_content and isinstance(preview, str) and preview:
         fence = _code_fence(preview)
@@ -297,6 +328,17 @@ def _render_file_output(
             lines.append("（以上为预览前缀，完整文件见下方入口。）")
     elif show_content and file_info.get("preview_reason"):
         lines.append(f"正文暂不可预览：{file_info['preview_reason']}。")
+    role = _string_or_none(file_info.get("role"))
+    if role:
+        role_label = {
+            "initial_geometry": "初始结构",
+            "optimized_geometry": "优化后的结构",
+            "verified_hessian": "已验证 Hessian",
+        }.get(role, role.replace("_", " "))
+        lines.append(f"来源：{role_label}。")
+    source = _string_or_none(file_info.get("source"))
+    if source and detail == "full":
+        lines.append(f"来源记录：{source}")
     if path:
         lines.append(f"文件：{path}")
     if detail == "full" and file_info.get("sha256"):
@@ -317,6 +359,17 @@ def _render_record_value(label: str, value: Any) -> str:
     divider = " | ".join("---" for _ in keys)
     rows = [" | ".join(_format_scalar(record.get(key)) for key in keys) for record in records]
     return f"{label}：\n| {header} |\n| {divider} |\n" + "\n".join(f"| {row} |" for row in rows)
+
+
+def _render_scalar_table(label: str, value: Any) -> str:
+    """Render a scalar or scalar-shaped value as a stable two-column table."""
+
+    if isinstance(value, Mapping):
+        rows = [(str(key), _format_scalar(item)) for key, item in value.items()]
+    else:
+        rows = [("值", _format_scalar(value))]
+    body = "\n".join(f"| {key} | {item} |" for key, item in rows)
+    return f"{label}：\n| 字段 | 值 |\n| --- | --- |\n{body}"
 
 
 def _code_fence(text: str) -> tuple[str, str]:
@@ -832,6 +885,12 @@ def _fact_context(fact: Mapping[str, Any], *, include_task_identity: bool = Fals
         if tool == "single_point"
         else "距离测量"
         if tool == "geometry_distance"
+        else "频率计算"
+        if tool == "frequency"
+        else "初始结构生成"
+        if tool == "generate_geometry"
+        else "分子解析"
+        if tool == "resolve_molecule"
         else ""
     )
     method = _method_label(fact.get("method_profile"))

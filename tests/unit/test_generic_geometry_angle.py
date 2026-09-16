@@ -108,3 +108,12 @@ def test_geometry_angle_proves_scalar_records_and_csv_delivery(tmp_path: Path) -
     assert "原子坐标 CSV" in response.text
     assert "atom_index,element,x,y,z,raw_line" in response.text
     assert "file_1" not in response.text
+
+    # A missing current artifact is a delivery failure, not a successful
+    # rerun or a fabricated file link.
+    report_path = Path(config.data_root_path, "runs", run.id, report.relative_path)
+    report_path.unlink()
+    missing = agent._response_for_run(run, result)
+    assert missing.delivery["status"] == "partial"
+    assert "未重新计算" in missing.text
+    assert "尚未交付" in missing.text
