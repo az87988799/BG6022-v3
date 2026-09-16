@@ -185,9 +185,20 @@ def render_clarification(pending_data: Mapping[str, Any] | None) -> str:
     status = data.get("status")
     if status == "clarify":
         question = data.get("clarification") or data.get("question")
+        reason = data.get("reason")
+        prefix = ""
+        if reason == "ambiguous_subject":
+            prefix = "当前有多个可能的结果。"
+        elif reason == "ambiguous_property":
+            prefix = "当前结果中有多个性质可能匹配。"
+        elif reason == "invalid_binding":
+            prefix = "所选任务尚未得到所问性质；已保存的其他性质不能替代它。"
         if isinstance(question, str) and question.strip():
-            return f"我找到了多个可能的结果。{question.strip()}"
-        return "我找到了多个可能的结果，请说明要查询哪个任务或哪一种性质。"
+            separator = "" if prefix.endswith(("。", "；")) else ""
+            return f"{prefix}{separator}{question.strip()}"
+        if prefix:
+            return f"{prefix}请说明要查询哪个任务或哪一种性质。"
+        return "请说明要查询哪个任务或哪一种性质。"
     if status == "unavailable":
         description = data.get("missing_description") or data.get("question")
         suffix = f"（{description}）" if isinstance(description, str) and description else ""
@@ -493,7 +504,9 @@ def facts_from_result(
                 kind="field",
                 value=value,
                 expected_type=(tool.results.get(name) if tool is not None else None),
-                result_property=(tool.result_properties.get(name) if tool is not None else None),
+                result_property=(
+                    tool.result_properties.get(name, name) if tool is not None else name
+                ),
                 metadata=metadata,
                 structure=structure,
             )
@@ -512,7 +525,9 @@ def facts_from_result(
                 kind="port",
                 value={"artifact_id": artifact_id},
                 expected_type=(tool.output_ports.get(name) if tool is not None else None),
-                result_property=(tool.result_properties.get(name) if tool is not None else None),
+                result_property=(
+                    tool.result_properties.get(name, name) if tool is not None else name
+                ),
                 metadata=metadata,
                 structure=structure,
             )
@@ -527,10 +542,23 @@ def facts_from_result(
                 kind="check",
                 value={"status": check.status, "reason": check.reason},
                 expected_type="scientific_check",
-                result_property=None,
+                result_property=(
+                    tool.result_properties.get(name, name) if tool is not None else name
+                ),
                 metadata={
-                    "label": name.replace("_", " "),
-                    "description": "程序根据已验证计算文件得出的科学目标检查",
+                    **(_metadata(tool, name) if tool is not None else {}),
+                    "label": (
+                        _metadata(tool, name).get("label", name.replace("_", " "))
+                        if tool is not None
+                        else name.replace("_", " ")
+                    ),
+                    "description": (
+                        _metadata(tool, name).get(
+                            "description", "程序根据已验证计算文件得出的科学目标检查"
+                        )
+                        if tool is not None
+                        else "程序根据已验证计算文件得出的科学目标检查"
+                    ),
                 },
                 structure=structure,
             )

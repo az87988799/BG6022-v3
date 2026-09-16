@@ -223,10 +223,7 @@ class Agent:
 
             answer_stage_eligible = intake.intent in {"chemistry_qa", "daily_qa"} or (
                 intake.intent == "context_query"
-                and (
-                    intake.query_selection is None
-                    or intake.query_selection.status != "selected"
-                )
+                and (intake.query_selection is None or intake.query_selection.status != "selected")
             )
             if answer_stage_eligible:
                 llm_stage = "answer"
@@ -244,9 +241,7 @@ class Agent:
                     and answer_draft.action == "needs_tools"
                     and not route_review_used
                 ):
-                    route_targets = self._validated_tool_targets(
-                        answer_draft, capability_catalog
-                    )
+                    route_targets = self._validated_tool_targets(answer_draft, capability_catalog)
                     if route_targets:
                         route_review_used = True
                         llm_stage = "intake"
@@ -293,12 +288,20 @@ class Agent:
             )
             explicit_parameters = normalized_parameters.explicit_parameters
             blocking = intake_blocking_requirements(intake, self.registry)
+            if normalized_parameters.parameter_issues:
+                response = AgentResponse(
+                    _parameter_issue_clarification(normalized_parameters.parameter_issues),
+                    run=current,
+                )
+                self._append_message("assistant", response.text)
+                return response
             if blocking:
                 if (
                     current is not None
                     and current.status == "waiting"
-                    and _has_explicit_atom_index_update(text)
-                    and explicit_parameters
+                    and _is_parameter_continuation(current, intake, text, explicit_parameters)
+                    and not intake.unresolved_results
+                    and _pending_missing_fields_are_scoped(current, intake, self.registry)
                 ):
                     response = self._apply_parameter_update(
                         current, explicit_parameters, cancel=request_cancel
@@ -1507,8 +1510,7 @@ class Agent:
                         "name": name,
                         "artifact_role": artifact.role if artifact is not None else "待绑定结构",
                         "history_geometry": bool(
-                            artifact is not None
-                            and artifact.source.startswith("history:verified_")
+                            artifact is not None and artifact.source.startswith("history:verified_")
                         ),
                     }
                 )
@@ -1995,9 +1997,7 @@ class Agent:
                             files.append(file_info)
         return facts, files
 
-    def _target_producer(
-        self, run: Run, target: Any, kind: str, name: str
-    ) -> Step | None:
+    def _target_producer(self, run: Run, target: Any, kind: str, name: str) -> Step | None:
         candidates = [
             step
             for step in run.plan.steps
@@ -2080,12 +2080,8 @@ class Agent:
     ) -> bool:
         if draft is None or draft.action != "respond":
             return False
-        required = {
-            str(fact.get("output_ref")) for fact in facts if fact.get("output_ref")
-        }
-        valid = required | {
-            str(item.get("ref")) for item in files if item.get("ref")
-        }
+        required = {str(fact.get("output_ref")) for fact in facts if fact.get("output_ref")}
+        valid = required | {str(item.get("ref")) for item in files if item.get("ref")}
         cited = {ref for section in draft.sections for ref in section.output_refs}
         return required <= cited and cited <= valid
 
@@ -2218,7 +2214,12 @@ class Agent:
             task_key = f"{run.id}:{step.id}"
             if task_key in subject_refs:
                 return subject_refs[task_key]
-            ref = f"t{len(subject_refs) + 1}"
+            if step.tool == "resolve_molecule":
+                molecule_count = sum(ref.startswith("m") for ref in subject_refs.values())
+                ref = f"m{molecule_count + 1}"
+            else:
+                task_count = sum(ref.startswith("t") for ref in subject_refs.values())
+                ref = f"t{task_count + 1}"
             subject_refs[task_key] = ref
             return ref
 
@@ -2285,14 +2286,32 @@ class Agent:
                 except ValueError:
                     continue
                 structure = self._query_structure(run, step, result)
-                for name, expected_type in tool.results.items():
-                    if name in tool.output_ports or name not in result.values:
-                        continue
-                    property_name = tool.result_properties.get(name)
-                    if property_name is None:
-                        continue
-                    value = result.values[name]
-                    if not _query_value_is_compatible(value, expected_type):
+                for output in tool.public_outputs():
+                    kind = str(output["kind"])
+                    name = str(output["name"])
+                    expected_type = str(output["type"])
+                    property_name = str(output["property"])
+                    artifact = None
+                    if kind == "field":
+                        if name not in result.values:
+                            continue
+                        if not _query_value_is_compatible(result.values[name], expected_type):
+                            continue
+                    elif kind == "port":
+                        artifact = self._query_port_artifact(run, step, result, name, expected_type)
+                        if artifact is None:
+                            continue
+                    elif kind == "check":
+                        check = result.scientific_checks.get(name)
+                        if check is None or not is_compatible_value(
+                            check.model_dump(mode="python"), "scientific_check"
+                        ):
+                            continue
+                        if not _result_check_input_is_bound(
+                            self.config.data_root_path, run, result, check
+                        ):
+                            continue
+                    else:
                         continue
                     subject_ref = _subject_ref(run, step)
                     binding = {
@@ -2302,47 +2321,19 @@ class Agent:
                         "result_path": relative,
                         "attempt": result.attempt,
                         "step_fingerprint": _step_fingerprint(step),
-                        "kind": "field",
+                        "kind": kind,
                         "name": name,
                         "property": property_name,
                     }
-                    self._query_bindings[(subject_ref, property_name)] = binding
-                    catalog.append(
-                        self._public_query_entry(
-                            subject_ref,
-                            run,
-                            step,
-                            tool,
-                            name=name,
-                            kind="field",
-                            expected_type=expected_type,
-                            property_name=property_name,
-                            structure=structure,
+                    if artifact is not None:
+                        binding["artifact_id"] = artifact.id
+                    key = (subject_ref, property_name)
+                    if key in self._query_bindings:
+                        raise ValueError(
+                            "ambiguous query binding: "
+                            f"subject {subject_ref!r} exposes property {property_name!r} twice"
                         )
-                    )
-                    if len(catalog) >= MAX_QUERY_CATALOG_ITEMS:
-                        return catalog
-                for name, expected_type in tool.output_ports.items():
-                    property_name = tool.result_properties.get(name)
-                    if property_name is None:
-                        continue
-                    artifact = self._query_port_artifact(run, step, result, name, expected_type)
-                    if artifact is None:
-                        continue
-                    subject_ref = _subject_ref(run, step)
-                    binding = {
-                        "session_id": self.session_id,
-                        "run_id": run.id,
-                        "step_id": step.id,
-                        "result_path": relative,
-                        "attempt": result.attempt,
-                        "step_fingerprint": _step_fingerprint(step),
-                        "kind": "port",
-                        "name": name,
-                        "artifact_id": artifact.id,
-                        "property": property_name,
-                    }
-                    self._query_bindings[(subject_ref, property_name)] = binding
+                    self._query_bindings[key] = binding
                     catalog.append(
                         self._public_query_entry(
                             subject_ref,
@@ -2350,10 +2341,13 @@ class Agent:
                             step,
                             tool,
                             name=name,
-                            kind="port",
+                            kind=kind,
                             expected_type=expected_type,
                             property_name=property_name,
                             structure=structure,
+                            check_status=(
+                                result.scientific_checks[name].status if kind == "check" else None
+                            ),
                         )
                     )
                     if len(catalog) >= MAX_QUERY_CATALOG_ITEMS:
@@ -2486,16 +2480,12 @@ class Agent:
         port = binding.get("port")
         if not isinstance(port, str) or source_tool.output_ports.get(port) != "molecular_geometry":
             raise ValueError("history geometry binding does not name a geometry output port")
-        artifact = self._query_port_artifact(
-            source_run, step, result, port, "molecular_geometry"
-        )
+        artifact = self._query_port_artifact(source_run, step, result, port, "molecular_geometry")
         if (
             artifact is None
             or artifact.id != binding.get("artifact_id")
             or artifact.role not in {"initial_geometry", "optimized_geometry"}
-            or (
-                binding.get("role") is not None and artifact.role != binding.get("role")
-            )
+            or (binding.get("role") is not None and artifact.role != binding.get("role"))
             or artifact.step_id != step.id
             or artifact.attempt != result.attempt
             or artifact.sha256 != binding.get("sha256")
@@ -2517,6 +2507,7 @@ class Agent:
         expected_type: str,
         property_name: str,
         structure: dict[str, Any],
+        check_status: str | None = None,
     ) -> dict[str, Any]:
         metadata = dict(tool.result_metadata.get(name, {}))
         metadata.setdefault("label", name.replace("_", " "))
@@ -2552,6 +2543,7 @@ class Agent:
                 "artifact_type": expected_type if kind == "port" else None,
                 "caveat": metadata.get("caveat"),
                 "validity": "verified",
+                **({"check_status": check_status} if kind == "check" else {}),
             },
         }
         return item
@@ -2596,11 +2588,19 @@ class Agent:
             return None
         name = resolved.get("name")
         kind = resolved.get("kind")
-        if not isinstance(name, str) or kind not in {"field", "port"}:
+        if not isinstance(name, str) or kind not in {"field", "port", "check"}:
             return None
-        expected_type = tool.results.get(name) if kind == "field" else tool.output_ports.get(name)
-        if not isinstance(expected_type, str) or tool.result_properties.get(name) != property_name:
+        descriptor = next(
+            (
+                item
+                for item in tool.public_outputs()
+                if item["kind"] == kind and item["name"] == name
+            ),
+            None,
+        )
+        if descriptor is None or descriptor["property"] != property_name:
             return None
+        expected_type = str(descriptor["type"])
         value: Any
         if kind == "field":
             if name not in result.values or not _query_value_is_compatible(
@@ -2608,11 +2608,20 @@ class Agent:
             ):
                 return None
             value = result.values[name]
-        else:
+        elif kind == "port":
             artifact = self._query_port_artifact(run, step, result, name, expected_type)
             if artifact is None or artifact.id != resolved.get("artifact_id"):
                 return None
             value = {"artifact_id": artifact.id}
+        else:
+            check = result.scientific_checks.get(name)
+            if check is None or not is_compatible_value(
+                check.model_dump(mode="python"), "scientific_check"
+            ):
+                return None
+            if not _result_check_input_is_bound(self.config.data_root_path, run, result, check):
+                return None
+            value = check.model_dump(mode="python")
         structure = self._query_structure(run, step, result)
         metadata = dict(tool.result_metadata.get(name, {}))
         metadata.setdefault("label", name.replace("_", " "))
@@ -3151,10 +3160,6 @@ def _is_parameter_continuation(
 ) -> bool:
     if intake.intent != "chemistry_compute" or not explicit_parameters:
         return False
-    # A scoped numeric edit is authoritative enough to continue a waiting Run.
-    # Do not let a stochastic intake response turn it into a new plan request.
-    if _has_explicit_atom_index_update(message):
-        return run.waiting_for in {"clarification", "confirmation"}
     if (
         intake.molecule_query
         or intake.structure_input
@@ -3168,6 +3173,19 @@ def _is_parameter_continuation(
     if _looks_like_molecule_change(message) and not _looks_like_parameter_only_change(message):
         return False
     return run.waiting_for in {"clarification", "confirmation"}
+
+
+def _pending_missing_fields_are_scoped(run: Run, intake: Any, registry: ToolRegistry) -> bool:
+    """Allow a waiting update only for fields owned by the current plan."""
+
+    known = set(run.request.missing_fields)
+    pending = run.pending_data.get("missing_fields")
+    if isinstance(pending, list):
+        known.update(item for item in pending if isinstance(item, str))
+    known.update(
+        field for step in run.plan.steps for field in registry.get(step.tool).request_parameters
+    )
+    return set(intake.missing_fields) <= known
 
 
 def _selected_artifact_aliases(
@@ -3309,6 +3327,18 @@ def _looks_like_parameter_only_change(message: str) -> bool:
         return False
     remainder = parameter_change.sub("", message)
     return not _looks_like_molecule_change(remainder)
+
+
+def _parameter_issue_clarification(issues: Mapping[str, str]) -> str:
+    labels = {
+        "atom_i": "第一个原子索引",
+        "atom_j": "第二个原子索引",
+        "atom_k": "第三个原子索引",
+    }
+    details = "；".join(
+        f"{labels.get(name, name)}：{reason}" for name, reason in sorted(issues.items())
+    )
+    return f"本轮参数没有更新，也没有启动计算。请提供完整的 1-based 整数索引（{details}）。"
 
 
 def _has_explicit_atom_index_update(message: str) -> bool:

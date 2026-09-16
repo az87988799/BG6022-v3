@@ -30,6 +30,8 @@ _KNOWN_TYPES = frozenset(
         "molecular_geometry",
         "orca_hessian",
         "file",
+        "text_file",
+        "scientific_check",
         "record",
         "record_list",
         "json",
@@ -57,8 +59,10 @@ def validate_declared_type(name: str, expected_type: str, *, kind: str) -> None:
             f"output {name!r} uses unsupported public type {expected_type!r}; "
             "add a local output contract before exposing it"
         )
-    if kind not in {"field", "port"}:
+    if kind not in {"field", "port", "check"}:
         raise ValueError(f"unsupported output declaration kind: {kind!r}")
+    if kind == "check" and expected_type != "scientific_check":
+        raise ValueError("scientific checks must use the scientific_check public type")
 
 
 def public_type_info(expected_type: str, *, kind: str) -> dict[str, Any]:
@@ -75,13 +79,32 @@ def public_type_info(expected_type: str, *, kind: str) -> dict[str, Any]:
         mime_type = "chemical/x-xyz"
     elif expected_type == "molecule":
         mime_type = "application/json"
+    elif expected_type == "text_file":
+        mime_type = "text/plain"
     elif kind == "port" or expected_type in {"file", "orca_hessian"}:
         mime_type = "application/octet-stream"
+    if expected_type in {"Eh", "angstrom", "degree", "frequency", "integer", "text", "boolean"}:
+        shape = "scalar"
+    elif expected_type == "record":
+        shape = "record"
+    elif expected_type == "record_list":
+        shape = "record_list"
+    elif expected_type == "json":
+        shape = "json"
+    elif expected_type in {"molecular_geometry", "molecule", "text_file"}:
+        shape = "text_file"
+    elif expected_type in {"orca_hessian", "file"}:
+        shape = "file"
+    elif expected_type == "scientific_check":
+        shape = "check"
+    else:
+        shape = "unknown"
     return {
         "type": expected_type,
         "unit": unit,
         "mime_type": mime_type,
         "kind": kind,
+        "shape": shape,
     }
 
 
@@ -168,11 +191,72 @@ def is_compatible_value(value: Any, declared_type: str) -> bool:
         if isinstance(value, Mapping):
             value = value.get("value")
         return type(value) is bool
-    if declared_type in {"molecule", "molecular_geometry", "orca_hessian", "file"}:
+    if declared_type in {
+        "molecule",
+        "molecular_geometry",
+        "orca_hessian",
+        "file",
+        "text_file",
+    }:
         return isinstance(value, Mapping)
-    if declared_type in {"record", "record_list", "json"}:
+    if declared_type == "record":
+        return isinstance(value, Mapping) and _finite_json(value)
+    if declared_type == "record_list":
+        return isinstance(value, list) and all(
+            isinstance(row, Mapping) and _finite_json(row) for row in value
+        )
+    if declared_type == "json":
         return _finite_json(value)
+    if declared_type == "scientific_check":
+        return (
+            isinstance(value, Mapping)
+            and value.get("status") in {"passed", "not_met", "unverified"}
+            and _finite_json(value)
+        )
     return False
+
+
+def canonical_public_outputs(tool: Any) -> list[dict[str, Any]]:
+    """Return one canonical public descriptor for every Tool output.
+
+    A port wins when an old Tool declares the same name in both ``results`` and
+    ``output_ports``.  The descriptor deliberately falls back to the declared
+    name when no semantic property mapping was supplied, so a valid output is
+    never silently removed from the public directory.
+    """
+
+    declared: list[tuple[str, str, str]] = [
+        ("port", name, expected_type) for name, expected_type in tool.output_ports.items()
+    ]
+    declared.extend(
+        ("field", name, expected_type)
+        for name, expected_type in tool.results.items()
+        if name not in tool.output_ports
+    )
+    declared.extend(("check", name, "scientific_check") for name in tool.scientific_checks)
+    seen: dict[str, tuple[str, str]] = {}
+    outputs: list[dict[str, Any]] = []
+    for kind, name, expected_type in declared:
+        property_name = tool.result_properties.get(name, name)
+        if property_name in seen:
+            previous_kind, previous_name = seen[property_name]
+            raise ValueError(
+                "ambiguous public property: "
+                f"{property_name!r} is declared by {previous_kind} {previous_name!r} "
+                f"and {kind} {name!r}"
+            )
+        seen[property_name] = (kind, name)
+        metadata = dict(tool.result_metadata.get(name, {}))
+        descriptor = {
+            "kind": kind,
+            "name": name,
+            "property": property_name,
+            "type": expected_type,
+            "metadata": metadata,
+        }
+        descriptor.update(public_type_info(expected_type, kind=kind))
+        outputs.append(descriptor)
+    return outputs
 
 
 def property_evidence_matches(
@@ -182,14 +266,15 @@ def property_evidence_matches(
 
     if not isinstance(evidence, str) or not evidence or evidence not in message:
         return False
+    evidence_position = message.find(evidence)
+    if _is_negated(evidence, 0) or _is_negated(message, evidence_position):
+        return False
     details = metadata or {}
-    phrases: list[str] = []
+    phrases: list[str] = [property_name.replace("_", " ")]
     for key in ("label", "description"):
         value = details.get(key)
         if isinstance(value, str) and value.strip():
             phrases.append(value.strip())
-    if not phrases:
-        phrases.append(property_name.replace("_", " "))
     evidence_folded = evidence.casefold()
     for phrase in phrases:
         for token in _meaningful_tokens(phrase):
@@ -198,12 +283,39 @@ def property_evidence_matches(
                 evidence, evidence_folded.find(token_folded)
             ):
                 return True
+    evidence_terms = _semantic_terms(evidence)
+    declared_terms = set().union(*(_semantic_terms(phrase) for phrase in phrases))
+    if evidence_terms & declared_terms:
+        return True
     return False
 
 
 def _meaningful_tokens(value: str) -> list[str]:
-    tokens = [item for item in re.split(r"[\s,，。；;:：()（）/]+", value) if len(item) >= 2]
-    return tokens or [value]
+    tokens = [item for item in re.split(r"[\s,，。；;:：()（）/]+", value) if item]
+    return [item for item in tokens if len(item) >= 2] or [value]
+
+
+_SEMANTIC_ALIASES = {
+    "角度": {"角度", "夹角", "angle", "degree"},
+    "夹角": {"角度", "夹角", "angle", "degree"},
+    "报告": {"报告", "report", "csv", "file", "文件"},
+    "report": {"报告", "report", "csv", "file", "文件"},
+    "csv": {"报告", "report", "csv", "file", "文件"},
+    "文件": {"报告", "report", "csv", "file", "文件"},
+}
+
+
+def _semantic_terms(value: str) -> set[str]:
+    folded = value.casefold()
+    terms = {folded}
+    for token in _meaningful_tokens(value):
+        token_folded = token.casefold()
+        terms.add(token_folded)
+        terms.update(_SEMANTIC_ALIASES.get(token_folded, set()))
+    for token, aliases in _SEMANTIC_ALIASES.items():
+        if token in folded:
+            terms.update(aliases)
+    return terms
 
 
 def _is_negated(value: str, position: int) -> bool:
@@ -224,6 +336,7 @@ def _finite_json(value: Any) -> bool:
 
 
 __all__ = [
+    "canonical_public_outputs",
     "is_compatible_value",
     "property_evidence_matches",
     "public_type_info",

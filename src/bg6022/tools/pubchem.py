@@ -65,6 +65,11 @@ def make_resolve_molecule_tool(config: AppConfig | None = None) -> Tool:
         parameter_type=ResolveMoleculeParameters,
         output_ports={"molecule": "molecule"},
         results={"molecule_formula": "text", "formal_charge": "integer"},
+        result_properties={
+            "molecule": "molecular_identity",
+            "molecule_formula": "molecular_formula",
+            "formal_charge": "formal_charge",
+        },
         result_metadata={
             "molecule": {
                 "label": "已验证分子结构记录",

@@ -372,7 +372,7 @@ class Tool(StrictModel):
         are machine-readable; neither mapping can add an undeclared result.
         """
 
-        declared = set(self.results) | set(self.output_ports)
+        declared = set(self.results) | set(self.output_ports) | set(self.scientific_checks)
         undeclared_properties = sorted(set(self.result_properties) - declared)
         if undeclared_properties:
             raise ValueError(f"result properties have undeclared keys: {undeclared_properties}")
@@ -384,9 +384,14 @@ class Tool(StrictModel):
         for kind, outputs in (("field", self.results), ("port", self.output_ports)):
             for name, expected_type in outputs.items():
                 validate_declared_type(name, expected_type, kind=kind)
+        for name in self.scientific_checks:
+            validate_declared_type(name, "scientific_check", kind="check")
 
         for name, property_name in self.result_properties.items():
-            if name in self.output_ports:
+            if name in self.scientific_checks:
+                expected_type = "scientific_check"
+                kind = "check"
+            elif name in self.output_ports:
                 expected_type = self.output_ports[name]
                 kind = "port"
             else:
@@ -438,6 +443,12 @@ class Tool(StrictModel):
                     "request_parameters are not fields of the parameter model: "
                     f"{unknown_request_parameters}"
                 )
+        # Resolve the canonical public directory during registration.  This
+        # catches property collisions (including a collision with a check)
+        # before a Tool can be exposed to Intake or query handling.
+        from bg6022.output_contracts import canonical_public_outputs
+
+        canonical_public_outputs(self)
         return self
 
     def execute(self, step: Step, run: Run, *, cancel: Any) -> Result:
@@ -488,7 +499,16 @@ class Tool(StrictModel):
         return selected
 
     def description_json(self) -> dict[str, Any]:
-        return self.model_dump(mode="json", exclude={"execute_function"})
+        description = self.model_dump(mode="json", exclude={"execute_function"})
+        description["public_outputs"] = self.public_outputs()
+        return description
+
+    def public_outputs(self) -> list[dict[str, Any]]:
+        """Return the Tool's single canonical public output directory."""
+
+        from bg6022.output_contracts import canonical_public_outputs
+
+        return canonical_public_outputs(self)
 
 
 __all__ = [

@@ -416,9 +416,7 @@ class LlmClient:
                 )
                 record_call(category)
                 if response_format is None and finish_reason == "length":
-                    raise LlmError(
-                        "language-model output was truncated", category="truncated"
-                    )
+                    raise LlmError("language-model output was truncated", category="truncated")
                 if not content.strip() and response_format is None:
                     raise LlmError(
                         "language-model returned an empty message", category="empty_response"

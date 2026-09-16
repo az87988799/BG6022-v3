@@ -166,13 +166,31 @@ def make_frequency_tool(config: AppConfig | None = None) -> Tool:
         parameter_model=FrequencyParameters,
         output_ports={"hessian": "orca_hessian"},
         results={"vibrational_frequencies": "frequency"},
-        result_properties={"vibrational_frequencies": "frequency"},
+        result_properties={
+            "hessian": "vibrational_hessian",
+            "vibrational_frequencies": "frequency",
+            "frequency_complete": "frequency_complete",
+            "local_minimum_supported": "local_minimum_supported",
+        },
         result_metadata={
+            "hessian": {
+                "label": "振动 Hessian 文件",
+                "description": "与本次输入几何和频率结果绑定的已验证 Hessian 文件",
+            },
             "vibrational_frequencies": {
                 "label": "振动频率",
                 "description": "ORCA 本次 Hessian 计算的有符号频率，单位 cm⁻¹",
                 "caveat": "负频率会保留；频率本身不证明全局最低点或热力学自由能",
-            }
+            },
+            "frequency_complete": {
+                "label": "完整频率检查",
+                "description": "频率模式和 Hessian 均完整且与输入几何匹配",
+            },
+            "local_minimum_supported": {
+                "label": "局部极小值检查",
+                "description": "在当前适用检查范围内没有负频率并支持局部极小值判断",
+                "caveat": "该检查不证明全局最低点",
+            },
         },
         scientific_checks={
             "frequency_complete": (

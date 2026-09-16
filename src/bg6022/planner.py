@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import Any, Literal
 
 from pydantic import (
@@ -36,6 +37,13 @@ from bg6022.tools.registry import ToolRegistry, merge_explicit_step_parameters
 
 Intent = Literal["chemistry_compute", "chemistry_qa", "daily_qa", "context_query"]
 QuerySelectionStatus = Literal["selected", "clarify", "unavailable"]
+QuerySelectionReason = Literal[
+    "ambiguous_subject",
+    "ambiguous_property",
+    "unavailable_source",
+    "invalid_binding",
+    "missing_requirement",
+]
 ElectronicStateField = Literal["charge", "multiplicity"]
 ElectronicStateStatus = Literal["absent", "set", "ambiguous", "invalid"]
 
@@ -56,6 +64,7 @@ class QueryTarget(BaseModel):
     subject_ref: StrictStr
     property: ResultProperty
     evidence: StrictStr
+    reference_mode: Literal["explicit", "followup"] = "explicit"
 
 
 class QuerySelection(BaseModel):
@@ -72,6 +81,7 @@ class QuerySelection(BaseModel):
     targets: list[QueryTarget] = Field(default_factory=list)
     clarification: StrictStr | None = None
     missing_description: StrictStr | None = None
+    reason: QuerySelectionReason | None = None
 
     @field_validator("targets")
     @classmethod
@@ -104,6 +114,7 @@ class ElectronicStateInput:
 class ParameterNormalization:
     explicit_parameters: dict[str, Any]
     states: dict[str, ElectronicStateInput]
+    parameter_issues: dict[str, str] = dataclass_field(default_factory=dict)
 
     @property
     def clarification_fields(self) -> tuple[str, ...]:
@@ -292,6 +303,7 @@ def intake_message(
     schema = _intake_schema(
         candidate_refs,
         capabilities,
+        result_catalog=catalog,
         registry=registry,
     )
     value = client.complete_json(
@@ -740,7 +752,10 @@ def normalize_user_explicit_parameters(
     patch = {
         name: value for name, value in parameters.items() if name not in {"charge", "multiplicity"}
     }
-    patch.update(_parse_explicit_atom_parameters(message))
+    explicit_atoms, atom_issues = _parse_explicit_index_assignments(message, ("atom_i", "atom_j"))
+    for name in atom_issues:
+        patch.pop(name, None)
+    patch.update(explicit_atoms)
     states: dict[str, ElectronicStateInput] = {}
     for name in ("charge", "multiplicity"):
         state = _parse_electronic_state(message, name)
@@ -752,23 +767,70 @@ def normalize_user_explicit_parameters(
         states[name] = state
         if state.status == "set":
             patch[name] = state.value
-    return ParameterNormalization(explicit_parameters=patch, states=states)
+    return ParameterNormalization(
+        explicit_parameters=patch,
+        states=states,
+        parameter_issues=atom_issues,
+    )
 
 
 def _parse_explicit_atom_parameters(message: str) -> dict[str, int]:
     """Parse only unambiguous atom-index assignments made by the user."""
 
+    parsed, _issues = _parse_explicit_index_assignments(message, ("atom_i", "atom_j"))
+    return parsed
+
+
+def strict_positive_index(raw: str) -> int:
+    """Parse one complete 1-based integer token without prefix coercion."""
+
+    token = raw.strip()
+    if re.fullmatch(r"[+]?[0-9]+", token) is None:
+        raise ValueError("atom index must be a complete integer token")
+    value = int(token)
+    if value < 1:
+        raise ValueError("atom index must be 1-based")
+    return value
+
+
+def _parse_explicit_index_assignments(
+    message: str, parameter_names: tuple[str, ...]
+) -> tuple[dict[str, int], dict[str, str]]:
+    """Parse complete assignment tokens for a configurable index set.
+
+    The right-hand side is captured up to a natural separator before the
+    integer parser is called.  Thus ``2.5``, ``2e0`` and ``2/3`` are rejected
+    as whole tokens instead of being truncated to ``2``.
+    """
+
     parsed: dict[str, int] = {}
-    for name in ("atom_i", "atom_j"):
+    issues: dict[str, str] = {}
+    assignment = "=|:|改成|改为|设为|设置为"
+    for name in parameter_names:
         pattern = re.compile(
-            rf"(?<![A-Za-z0-9_]){name}(?![A-Za-z0-9_]).{{0,16}}?"
-            r"(?:=|:|改成|改为|设为|设置为)\s*([+-]?\d+)(?!\d)",
+            rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_]).{{0,16}}?"
+            rf"(?:{assignment})\s*(?P<raw>[^\s,，。；;:：]+)",
             re.IGNORECASE,
         )
-        values = {int(match.group(1)) for match in pattern.finditer(message)}
-        if len(values) == 1:
+        values: set[int] = set()
+        saw_assignment = False
+        for match in pattern.finditer(message):
+            saw_assignment = True
+            if _is_negated_statement(message, match.start()):
+                issues[name] = "assignment is negated"
+                continue
+            raw = match.group("raw")
+            try:
+                values.add(strict_positive_index(raw))
+            except ValueError as error:
+                issues[name] = str(error)
+        if len(values) > 1:
+            issues[name] = "conflicting atom-index assignments"
+        elif values and name not in issues:
             parsed[name] = values.pop()
-    return parsed
+        elif saw_assignment and name not in issues:
+            issues[name] = "atom index assignment is not usable"
+    return parsed, issues
 
 
 def electronic_state_clarification(normalized: ParameterNormalization) -> str:
@@ -1339,6 +1401,7 @@ def _intake_schema(
     candidate_refs: tuple[str, ...],
     capability_catalog: list[Mapping[str, Any]],
     *,
+    result_catalog: list[Mapping[str, Any]] | None = None,
     registry: ToolRegistry | None = None,
 ) -> type[BaseModel]:
     """Constrain query subjects and calculation targets for one intake round."""
@@ -1346,11 +1409,24 @@ def _intake_schema(
     allowed_subjects = frozenset(candidate_refs)
     capabilities = [dict(item) for item in capability_catalog]
     allowed_targets = tuple(sorted({str(item["name"]) for item in capabilities}))
+    allowed_query_pairs = _allowed_query_pairs(result_catalog)
 
     def _targets_are_candidates(value: list[QueryTarget]) -> list[QueryTarget]:
         unknown = sorted({target.subject_ref for target in value} - allowed_subjects)
         if unknown:
             raise ValueError(f"query subject references are outside this catalog: {unknown}")
+        if allowed_query_pairs:
+            invalid = sorted(
+                {
+                    (target.subject_ref, target.property)
+                    for target in value
+                    if (target.subject_ref, target.property) not in allowed_query_pairs
+                }
+            )
+            if invalid:
+                raise ValueError(
+                    f"query subject/property pairs are outside this catalog: {invalid}"
+                )
         return value
 
     def _requested_results_are_available(value: list[str], info: ValidationInfo) -> list[str]:
@@ -1508,7 +1584,23 @@ def _coerce_intake_output(
     )
     try:
         output = schema.model_validate(payload, strict=True)
-    except (TypeError, ValueError) as error:
+    except ValueError as error:
+        # Test doubles and older clients may return a raw dict without running
+        # the dynamic schema first.  Keep the user-facing path safe and
+        # actionable for an invalid subject/property binding while strict
+        # clients still reject the payload at schema validation time.
+        if "subject/property pairs are outside this catalog" in str(error):
+            output = IntakeOutput(
+                intent="context_query",
+                query_selection=QuerySelection(
+                    status="clarify",
+                    reason="invalid_binding",
+                    clarification="所选任务没有该性质；请从当前任务实际提供的结果中选择。",
+                ),
+            )
+        else:
+            raise ValueError(f"intake output failed local validation: {error}") from error
+    except TypeError as error:
         raise ValueError(f"intake output failed local validation: {error}") from error
     if not isinstance(output, IntakeOutput):
         raise ValueError("intake output has an unexpected model type")
@@ -1545,6 +1637,21 @@ def _validate_query_selection(
         raise ValueError(f"query subject references are outside this catalog: {unknown}")
     if not candidate_set and selection.status == "selected":
         raise ValueError("cannot select a result from an empty catalog")
+    allowed_pairs = _allowed_query_pairs(result_catalog)
+    invalid_pairs = sorted(
+        {
+            (target.subject_ref, target.property)
+            for target in selection.targets
+            if allowed_pairs and (target.subject_ref, target.property) not in allowed_pairs
+        }
+    )
+    if invalid_pairs:
+        replacement = QuerySelection(
+            status="clarify",
+            reason="invalid_binding",
+            clarification="所选任务没有该性质；请从当前任务实际提供的结果中选择。",
+        )
+        return output.model_copy(update={"query_selection": replacement})
     if selection.status == "selected" and any(
         not _query_property_evidence_matches(
             target.property,
@@ -1572,11 +1679,26 @@ def _query_property_metadata(
         if not isinstance(result, Mapping) or result.get("property") != property_name:
             continue
         return {
-            key: result[key]
-            for key in ("label", "description")
-            if isinstance(result.get(key), str)
+            key: result[key] for key in ("label", "description") if isinstance(result.get(key), str)
         }
     return None
+
+
+def _allowed_query_pairs(
+    result_catalog: list[Mapping[str, Any]] | None,
+) -> frozenset[tuple[str, str]]:
+    pairs: set[tuple[str, str]] = set()
+    for item in result_catalog or []:
+        if not isinstance(item, Mapping):
+            continue
+        subject_ref = item.get("subject_ref")
+        result = item.get("result")
+        if not isinstance(subject_ref, str) or not isinstance(result, Mapping):
+            continue
+        property_name = result.get("property")
+        if isinstance(property_name, str) and property_name:
+            pairs.add((subject_ref, property_name))
+    return frozenset(pairs)
 
 
 def _query_property_evidence_matches(
@@ -1685,7 +1807,7 @@ def _geometry_output_requested(evidence: str) -> bool:
         r"给我|给出|输出|提供|返回|展示|显示|列出|也要|还要|同时要|要看|看看|"
         r"show|return|output|provide|give|include|need|want|display|list|fetch"
     )
-    geometry = r"结构|几何|geometry|structure"
+    geometry = r"结构|几何|geometry|structure|xyz|坐标"
     joint = re.search(
         rf"(?:{other_property}).{{0,8}}(?:和|及|以及|、|and|&)\s*(?:{geometry})|"
         rf"(?:{geometry}).{{0,8}}(?:和|及|以及|、|and|&)\s*(?:{other_property})",
@@ -1707,6 +1829,12 @@ def _geometry_output_requested(evidence: str) -> bool:
             has_action_after and not followed_by_property
         ):
             return True
+    if re.search(r"(?i)xyz|坐标", evidence) and not re.search(other_property, evidence, re.I):
+        # A short property-only request such as ``xyz`` or ``水分子xyz`` is
+        # already an explicit request for the geometry output.  Do not apply
+        # this shortcut when the geometry is only the subject of another
+        # property, e.g. ``这个XYZ的能量``.
+        return True
     return False
 
 
@@ -1729,6 +1857,7 @@ __all__ = [
     "ParameterNormalization",
     "filter_user_explicit_parameters",
     "normalize_user_explicit_parameters",
+    "strict_positive_index",
     "electronic_state_clarification",
     "intake_message",
     "load_prompt",
