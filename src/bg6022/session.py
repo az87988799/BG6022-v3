@@ -279,6 +279,9 @@ def save_session(data_root: str | Path, session_id: str, payload: dict[str, Any]
             recent_by_run = [entry for entry in recent_by_run if entry.get("run_id") != run_id]
             recent_by_run.append(item)
         bounded["recent_results"] = recent_by_run[-MAX_RECENT_RUNS:]
+    delivery = bounded.get("last_delivery")
+    if isinstance(delivery, list):
+        bounded["last_delivery"] = [dict(item) for item in delivery[-8:] if isinstance(item, dict)]
     path = session_path(data_root, session_id)
     atomic_write_json(path, bounded)
     return path
@@ -291,6 +294,7 @@ def load_session(data_root: str | Path, session_id: str) -> dict[str, Any]:
             "session_id": session_id,
             "recent_messages": [],
             "recent_results": [],
+            "last_delivery": [],
             "active_run_id": None,
             "pending_prompt": None,
         }

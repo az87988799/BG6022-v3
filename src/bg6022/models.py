@@ -31,9 +31,41 @@ ResultStatus = Literal["succeeded", "failed", "cancelled", "interrupted", "needs
 Operation = Literal["SP", "Opt", "Freq"]
 ScientificCheckStatus = Literal["passed", "not_met", "unverified"]
 
+_OUTPUT_PREFERENCE_DEFAULTS = {
+    "layout": "auto",
+    "file_content": "auto",
+    "detail": "normal",
+}
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
+
+
+def validate_output_preferences(value: Any) -> dict[str, str]:
+    """Validate the small non-scientific presentation preference contract."""
+
+    if value is None:
+        return dict(_OUTPUT_PREFERENCE_DEFAULTS)
+    if not isinstance(value, dict):
+        raise TypeError("output_preferences must be an object")
+    allowed = {
+        "layout": {"auto", "plain", "table"},
+        "file_content": {"auto", "show", "link_only"},
+        "detail": {"brief", "normal", "full"},
+    }
+    unknown = sorted(set(value) - set(allowed))
+    if unknown:
+        raise ValueError(f"unknown output preference(s): {unknown}")
+    normalized = dict(_OUTPUT_PREFERENCE_DEFAULTS)
+    for name, options in allowed.items():
+        if name not in value:
+            continue
+        item = value[name]
+        if type(item) is not str or item not in options:
+            raise ValueError(f"invalid output preference {name!r}: {item!r}")
+        normalized[name] = item
+    return normalized
 
 
 class ResultTarget(StrictModel):
@@ -94,6 +126,9 @@ class Request(StrictModel):
     user_modifications: dict[str, Any] = Field(default_factory=dict)
     structure_input: dict[str, Any] = Field(default_factory=dict)
     missing_fields: list[str] = Field(default_factory=list)
+    output_preferences: dict[str, str] = Field(
+        default_factory=lambda: dict(_OUTPUT_PREFERENCE_DEFAULTS)
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -143,6 +178,11 @@ class Request(StrictModel):
         if len(identities) != len(set(identities)):
             raise ValueError("required geometry bindings must be unique per calculation input")
         return value
+
+    @field_validator("output_preferences", mode="before")
+    @classmethod
+    def _validate_output_preferences(cls, value: Any) -> dict[str, str]:
+        return validate_output_preferences(value)
 
     @property
     def operation(self) -> Operation | None:

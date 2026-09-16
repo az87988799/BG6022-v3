@@ -7,12 +7,14 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from threading import Event
 from typing import Any
 
 from .answer import (
     AnswerOutput,
+    AnswerSection,
     compose_answer,
     facts_from_result,
     render_already_finished,
@@ -21,8 +23,8 @@ from .answer import (
     render_confirmation,
     render_result,
     render_run,
-    render_selected_facts,
     select_facts_for_question,
+    validate_result_answer,
 )
 from .config import AppConfig, validate_execution_environment
 from .llm import LlmClient, LlmError
@@ -69,6 +71,9 @@ from .tools.registry import ToolRegistry, merge_explicit_step_parameters
 INPUT_GEOMETRY_PLACEHOLDER = "__input_geometry__"
 MAX_QUERY_CATALOG_ITEMS = 24
 MAX_HISTORY_GEOMETRIES = 8
+MAX_FILE_PREVIEW_BYTES = 16 * 1024
+MAX_FILE_PREVIEW_LINES = 256
+MAX_TOTAL_FILE_PREVIEW_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -77,6 +82,7 @@ class AgentResponse:
     run: Run | None = None
     result: Result | None = None
     files: tuple[dict[str, Any], ...] = ()
+    delivery: dict[str, Any] = dataclass_field(default_factory=dict)
 
 
 class Agent:
@@ -106,9 +112,11 @@ class Agent:
                 "session_id": self.session_id,
                 "recent_messages": [],
                 "recent_results": [],
+                "last_delivery": [],
                 "active_run_id": None,
                 "pending_prompt": "session record is invalid; use /new or /exit",
             }
+        self._session.setdefault("last_delivery", [])
 
     def execute_plan(
         self,
@@ -210,6 +218,7 @@ class Agent:
                 context={
                     "recent_messages": self._session.get("recent_messages", []),
                     "recent_results": self._session.get("recent_results", []),
+                    "last_delivery": self._session.get("last_delivery", []),
                 },
                 result_catalog=result_catalog,
                 geometry_catalog=geometry_catalog,
@@ -251,6 +260,7 @@ class Agent:
                             context={
                                 "recent_messages": self._session.get("recent_messages", []),
                                 "recent_results": self._session.get("recent_results", []),
+                                "last_delivery": self._session.get("last_delivery", []),
                             },
                             result_catalog=result_catalog,
                             geometry_catalog=geometry_catalog,
@@ -293,7 +303,7 @@ class Agent:
                     _parameter_issue_clarification(normalized_parameters.parameter_issues),
                     run=current,
                 )
-                self._append_message("assistant", response.text)
+                self._record_response(response, cancel=request_cancel)
                 return response
             if blocking:
                 if (
@@ -306,14 +316,14 @@ class Agent:
                     response = self._apply_parameter_update(
                         current, explicit_parameters, cancel=request_cancel
                     )
-                    self._append_message("assistant", response.text)
+                    self._record_response(response, cancel=request_cancel)
                     return response
                 response = AgentResponse(
                     "本次请求还有尚未支持或尚未明确的要求："
                     + "；".join(blocking)
                     + "。请明确这些要求，或重新指定只计算已支持的部分。"
                 )
-                self._append_message("assistant", response.text)
+                self._record_response(response, cancel=request_cancel)
                 return response
 
             selected_geometry_alias = intake.history_geometry_alias
@@ -341,7 +351,7 @@ class Agent:
                         "当前会话有多个可复用的成功结构，请明确选择一个结构别名后再继续：\n"
                         f"{options}\n回复如“复用 geometry_1”。"
                     )
-                    self._append_message("assistant", response.text)
+                    self._record_response(response, cancel=request_cancel)
                     return response
                 selected_geometry_alias = explicit_alias
                 intake = intake.model_copy(
@@ -356,13 +366,13 @@ class Agent:
                     response = AgentResponse(
                         "当前会话没有找到可安全复用的成功结构；我没有改用新结构或启动计算。"
                     )
-                    self._append_message("assistant", response.text)
+                    self._record_response(response, cancel=request_cancel)
                     return response
                 if len(geometry_catalog) > 1:
                     response = AgentResponse(
                         "当前会话有多个可复用的成功结构，请说明要使用哪一个分子或任务。"
                     )
-                    self._append_message("assistant", response.text)
+                    self._record_response(response, cancel=request_cancel)
                     return response
                 selected_geometry_alias = str(geometry_catalog[0]["alias"])
                 intake = intake.model_copy(
@@ -393,7 +403,7 @@ class Agent:
                 response = AgentResponse(
                     electronic_state_clarification(normalized_parameters), run=current
                 )
-                self._append_message("assistant", response.text)
+                self._record_response(response, cancel=request_cancel)
                 return response
             if (
                 current is not None
@@ -409,7 +419,7 @@ class Agent:
                     intake.molecule_input_kind,
                     cancel=request_cancel,
                 )
-                self._append_message("assistant", response.text)
+                self._record_response(response, cancel=request_cancel)
                 return response
             if (
                 current is not None
@@ -419,7 +429,7 @@ class Agent:
                 response = self._apply_parameter_update(
                     current, explicit_parameters, cancel=request_cancel
                 )
-                self._append_message("assistant", response.text)
+                self._record_response(response, cancel=request_cancel)
                 return response
             if (
                 current is not None
@@ -433,7 +443,7 @@ class Agent:
                     intake.molecule_input_kind,
                     cancel=request_cancel,
                 )
-                self._append_message("assistant", response.text)
+                self._record_response(response, cancel=request_cancel)
                 return response
 
             if intake.intent in {"chemistry_qa", "daily_qa"}:
@@ -448,6 +458,7 @@ class Agent:
                     text,
                     selection=intake.query_selection,
                     catalog=result_catalog,
+                    preferences=intake.output_preferences,
                     cancel=request_cancel,
                 )
 
@@ -471,6 +482,7 @@ class Agent:
                     context={
                         "recent_messages": self._session.get("recent_messages", []),
                         "recent_results": self._session.get("recent_results", []),
+                        "last_delivery": self._session.get("last_delivery", []),
                         "geometry_catalog": (
                             [
                                 item
@@ -523,8 +535,8 @@ class Agent:
             self._session["active_run_id"] = run.id
             self._save_session()
             result = self.advance(run, cancel=request_cancel)
-            response = self._response_for_run(run, result)
-            self._append_message("assistant", response.text)
+            response = self._response_for_run(run, result, cancel=request_cancel)
+            self._record_response(response, cancel=request_cancel)
             return response
         except LlmError as error:
             stage = error.purpose or llm_stage
@@ -536,7 +548,20 @@ class Agent:
                 failure_category=error.category,
             )
             if error.category == "cancelled" or request_cancel.is_set():
-                response = AgentResponse("当前请求已取消，尚未执行。")
+                completed_run = locals().get("run")
+                if isinstance(completed_run, Run) and completed_run.status in {
+                    "succeeded",
+                    "failed",
+                    "cancelled",
+                    "interrupted",
+                }:
+                    response = self._response_for_run(
+                        completed_run,
+                        self._latest_result(completed_run),
+                        cancel=request_cancel,
+                    )
+                else:
+                    response = AgentResponse("当前请求已取消，尚未执行。")
             else:
                 stage_label = {
                     "intake": "请求解析阶段",
@@ -557,11 +582,11 @@ class Agent:
                     response = AgentResponse(
                         f"模型调用未获得有效响应（{error.category}）；任务已停止。"
                     )
-            self._append_message("assistant", response.text)
+            self._record_response(response, cancel=request_cancel)
             return response
         except (ValueError, OSError) as error:
             response = AgentResponse(f"请求无法规划：{error}")
-            self._append_message("assistant", response.text)
+            self._record_response(response, cancel=request_cancel)
             return response
         finally:
             self._finish_request(request_token, request_cancel)
@@ -805,9 +830,19 @@ class Agent:
             current.status = "failed"
             current.pending_data = {"category": "execution_boundary", "reason": str(error)}
             save_run(self.config.data_root_path, current)
-            return self._response_for_run(current, self._latest_result(current))
-        response = self._response_for_run(current, result)
-        self._append_message("assistant", response.text)
+            response = self._response_for_run(
+                current,
+                self._latest_result(current),
+                cancel=self._cancel_events.setdefault(current.id, Event()),
+            )
+            self._record_response(response)
+            return response
+        response = self._response_for_run(
+            current,
+            result,
+            cancel=self._cancel_events.setdefault(current.id, Event()),
+        )
+        self._record_response(response)
         return response
 
     def cancel(self, run: Run | str | None = None) -> AgentResponse:
@@ -884,6 +919,7 @@ class Agent:
             "session_id": self.session_id,
             "recent_messages": [],
             "recent_results": [],
+            "last_delivery": [],
             "active_run_id": None,
             "pending_prompt": None,
         }
@@ -1191,7 +1227,7 @@ class Agent:
             run.pending_data = {"category": "execution_boundary", "reason": str(error)}
             save_run(self.config.data_root_path, run)
             return AgentResponse(f"计算无法继续：{error}", run=run)
-        return self._response_for_run(run, result)
+        return self._response_for_run(run, result, cancel=cancel)
 
     def _apply_molecule_clarification(
         self,
@@ -1253,7 +1289,7 @@ class Agent:
             run,
             cancel=cancel or self._cancel_events.setdefault(run.id, Event()),
         )
-        return self._response_for_run(run, result)
+        return self._response_for_run(run, result, cancel=cancel)
 
     def _try_repair(self, run: Run, step: Step, result: Result, cancel: Event) -> bool:
         if not self.config.repair.enabled:
@@ -1872,18 +1908,23 @@ class Agent:
         )
         return limit - run.current_active_seconds()
 
-    def _response_for_run(self, run: Run, result: Result | None) -> AgentResponse:
+    def _response_for_run(
+        self, run: Run, result: Result | None, *, cancel: Event | None = None
+    ) -> AgentResponse:
         # A successful preparation step is not the user's requested scientific
         # result.  Waiting state always wins over the last intermediate Result.
         if run.status == "waiting":
             return AgentResponse(self._waiting_text(run), run=run, result=result)
         structure = self._result_structure(run, result)
         if run.status in {"succeeded", "failed", "cancelled", "interrupted"}:
+            unavailable: list[str] = []
             if run.status == "succeeded":
-                facts, files = self._collect_requested_outputs(run, result)
+                facts, files, unavailable = self._collect_requested_outputs(
+                    run, result, cancel=cancel
+                )
             else:
                 facts = self._current_run_facts(run)
-                files = self._files_for_facts(facts)
+                files = self._files_for_facts(facts, cancel=cancel)
             default_text = render_run(
                 run,
                 result,
@@ -1891,24 +1932,34 @@ class Agent:
                 structure=structure,
                 **self._failure_render_context(run),
             )
-            if run.status == "succeeded" and facts:
-                default_text = render_selected_facts(facts)
-                draft, _error = self._compose_answer_draft(
-                    run.request.description,
-                    mode="result",
-                    available_outputs=self._public_answer_outputs(facts, files),
-                    required_outputs=[str(fact["output_ref"]) for fact in facts],
-                    context={"run_status": run.status},
+            delivery: dict[str, Any] = {}
+            if facts:
+                rendered_facts, delivery = self._render_verified_delivery(
+                    run,
+                    facts,
+                    files,
+                    unavailable=unavailable,
+                    cancel=cancel,
                 )
-                if self._answer_draft_covers_outputs(draft, facts, files=files):
-                    prose = render_answer_output(draft)
-                    if prose:
-                        default_text = f"{prose}\n\n{default_text}"
+                default_text = (
+                    rendered_facts
+                    if run.status == "succeeded"
+                    else f"{default_text}\n{rendered_facts}"
+                )
+            elif unavailable:
+                default_text = f"{default_text}\n尚未交付：{'；'.join(unavailable)}。"
+                delivery = {
+                    "status": "partial",
+                    "rendered_refs": [],
+                    "unavailable_targets": list(unavailable),
+                    "outputs": [],
+                }
             return AgentResponse(
                 default_text,
                 run=run,
                 result=result,
                 files=tuple(files),
+                delivery=delivery,
             )
         if result is not None:
             return AgentResponse(
@@ -1919,27 +1970,37 @@ class Agent:
         return AgentResponse(render_run(run, registry=self.registry), run=run)
 
     def _collect_requested_outputs(
-        self, run: Run, result: Result | None = None
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Select every current, verified producer named by the Plan targets."""
+        self, run: Run, result: Result | None = None, *, cancel: Event | None = None
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+        """Select every current, verified producer named by the Plan targets.
+
+        The third return value is deliberately separate from the collected
+        facts.  A missing Artifact must not silently shrink the user's target
+        set and then be reported as a complete result.
+        """
 
         facts: list[dict[str, Any]] = []
         files: list[dict[str, Any]] = []
+        unavailable: list[str] = []
         targets = list(run.plan.requested_results)
         if not targets and result is not None:
-            return facts_from_result(run, result, self.registry), []
+            return facts_from_result(run, result, self.registry), [], []
         for target_index, target in enumerate(targets, start=1):
             kind, name = _normalized_run_target(run, target, self.registry)
             if kind is None or name is None:
+                unavailable.append(_target_identity(target, kind, name))
                 continue
             step = self._target_producer(run, target, kind, name)
             if step is None:
+                unavailable.append(_target_identity(target, kind, name))
                 continue
             relative = run.current_results.get(step.id)
             if not isinstance(relative, str):
+                unavailable.append(_target_identity(target, kind, name))
                 continue
             bound = _load_bound_result(self.config.data_root_path, run, relative)
             if bound is None or not self._query_result_is_valid(run, step, bound, relative):
+                unavailable.append(_target_identity(target, kind, name))
                 continue
             tool = self.registry.get(step.tool)
             structure = self._query_structure(run, step, bound)
@@ -1948,6 +2009,7 @@ class Agent:
                 if name not in bound.values or not _query_value_is_compatible(
                     bound.values[name], tool.results.get(name, "")
                 ):
+                    unavailable.append(_target_identity(target, kind, name))
                     continue
                 selected = bound.model_copy(
                     update={
@@ -1961,6 +2023,7 @@ class Agent:
                     run, step, bound, name, tool.output_ports.get(name, "")
                 )
                 if artifact is None:
+                    unavailable.append(_target_identity(target, kind, name))
                     continue
                 selected = bound.model_copy(
                     update={
@@ -1972,6 +2035,7 @@ class Agent:
             else:
                 check = bound.scientific_checks.get(name)
                 if check is None or check.status != "passed":
+                    unavailable.append(_target_identity(target, kind, name))
                     continue
                 selected = bound.model_copy(
                     update={"values": {}, "output_ports": {}, "scientific_checks": {name: check}}
@@ -1991,11 +2055,23 @@ class Agent:
                         except ValueError:
                             continue
                         file_info = self._artifact_file_descriptor(
-                            run, step, bound, artifact, ref=f"file_{target_index}"
+                            run,
+                            step,
+                            bound,
+                            artifact,
+                            ref=output_ref,
+                            expected_type=str(fact.get("expected_type") or artifact.artifact_type),
+                            display_name=str(
+                                _mapping(fact.get("metadata")).get("label") or path_label(artifact)
+                            ),
+                            cancel=cancel,
                         )
                         if file_info is not None:
                             files.append(file_info)
-        return facts, files
+                        else:
+                            unavailable.append(_target_identity(target, kind, name))
+        self._limit_total_previews(files)
+        return facts, files, unavailable
 
     def _target_producer(self, run: Run, target: Any, kind: str, name: str) -> Step | None:
         candidates = [
@@ -2015,60 +2091,115 @@ class Agent:
         artifact: Any,
         *,
         ref: str,
+        expected_type: str | None = None,
+        display_name: str | None = None,
+        cancel: Event | None = None,
     ) -> dict[str, Any] | None:
         try:
             path = artifact_path(self.config.data_root_path, run, artifact)
-            raw = path.read_bytes()
+            expected_size = path.stat().st_size
         except (OSError, ValueError):
             return None
-        if len(raw) > self.config.output_limit_bytes:
+        digest = hashlib.sha256()
+        prefix = bytearray()
+        try:
+            with path.open("rb") as handle:
+                while True:
+                    if cancel is not None and cancel.is_set():
+                        return None
+                    chunk = handle.read(64 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    if len(prefix) < MAX_FILE_PREVIEW_BYTES:
+                        prefix.extend(chunk[: MAX_FILE_PREVIEW_BYTES - len(prefix)])
+        except OSError:
             return None
-        if hashlib.sha256(raw).hexdigest() != artifact.sha256:
+        if digest.hexdigest() != artifact.sha256 or expected_size != artifact.size_bytes:
             return None
+        preview_text: str | None = None
+        preview_complete = False
+        preview_reason: str | None = None
+        previewable = expected_type in {"molecular_geometry", "text_file", "file"} or str(
+            getattr(artifact, "metadata", {}).get("mime_type", "")
+        ).startswith("text/")
+        if previewable:
+            try:
+                decoded = bytes(prefix).decode("utf-8")
+            except UnicodeDecodeError:
+                preview_reason = "文件不是可严格解码的 UTF-8 文本"
+            else:
+                lines = decoded.splitlines(keepends=True)
+                complete_prefix = len(prefix) >= expected_size
+                if len(lines) > MAX_FILE_PREVIEW_LINES:
+                    lines = lines[:MAX_FILE_PREVIEW_LINES]
+                    complete_prefix = False
+                if len(prefix) >= MAX_FILE_PREVIEW_BYTES:
+                    complete_prefix = False
+                preview_text = "".join(lines)
+                preview_complete = complete_prefix
+                if not preview_complete:
+                    preview_reason = "文件正文超过单次预览上限"
+        else:
+            preview_reason = "该 Artifact 类型不支持正文预览"
+        mime_type = _artifact_mime_type(expected_type, path.suffix)
         return {
             "ref": ref,
+            "output_ref": ref,
             "artifact_id": artifact.id,
             "filename": path.name,
+            "display_name": display_name or path.name,
             "path": str(path),
             "sha256": artifact.sha256,
-            "size_bytes": len(raw),
+            "size_bytes": expected_size,
             "role": artifact.role,
             "source": artifact.source,
             "step_id": step.id,
             "attempt": result.attempt,
+            "mime_type": mime_type,
+            "preview_text": preview_text,
+            "preview_complete": preview_complete,
+            "preview_reason": preview_reason,
         }
 
     @staticmethod
     def _public_answer_outputs(
         facts: list[Mapping[str, Any]], files: list[Mapping[str, Any]]
     ) -> list[dict[str, Any]]:
+        files_by_ref = {
+            str(item.get("output_ref") or item.get("ref")): item
+            for item in files
+            if item.get("output_ref") or item.get("ref")
+        }
         outputs: list[dict[str, Any]] = []
         for fact in facts:
             metadata = fact.get("metadata") if isinstance(fact.get("metadata"), Mapping) else {}
+            expected_type = fact.get("expected_type")
+            file_info = files_by_ref.get(str(fact.get("output_ref")))
             outputs.append(
                 {
                     "ref": fact.get("output_ref"),
                     "kind": fact.get("kind"),
                     "name": fact.get("name"),
                     "property": fact.get("result_property"),
-                    "type": fact.get("expected_type"),
+                    "type": expected_type,
+                    "unit": _public_unit(expected_type),
+                    "mime_type": _artifact_mime_type(expected_type, None),
+                    "shape": "check" if fact.get("kind") == "check" else None,
                     "label": metadata.get("label"),
                     "description": metadata.get("description"),
                     "caveat": metadata.get("caveat"),
+                    "file": (
+                        {
+                            "available": True,
+                            "supports_view": ["auto", "code", "link"],
+                            "preview_complete": bool(file_info.get("preview_complete")),
+                        }
+                        if file_info is not None
+                        else None
+                    ),
                 }
             )
-        outputs.extend(
-            {
-                "ref": item.get("ref"),
-                "kind": "file",
-                "name": item.get("filename"),
-                "property": None,
-                "type": "file",
-                "label": item.get("role"),
-                "description": "已验证并可交付的本地产物文件",
-            }
-            for item in files
-        )
         return outputs
 
     @staticmethod
@@ -2078,14 +2209,134 @@ class Agent:
         *,
         files: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] = (),
     ) -> bool:
-        if draft is None or draft.action != "respond":
+        outputs = Agent._answer_output_map(facts, files)
+        required = [str(fact.get("output_ref")) for fact in facts if fact.get("output_ref")]
+        try:
+            validate_result_answer(draft, outputs, required)
+        except ValueError:
             return False
-        required = {str(fact.get("output_ref")) for fact in facts if fact.get("output_ref")}
-        valid = required | {str(item.get("ref")) for item in files if item.get("ref")}
-        cited = {ref for section in draft.sections for ref in section.output_refs}
-        return required <= cited and cited <= valid
+        return True
 
-    def _files_for_facts(self, facts: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    @staticmethod
+    def _answer_output_map(
+        facts: list[Mapping[str, Any]], files: list[Mapping[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        files_by_ref = {
+            str(item.get("output_ref") or item.get("ref")): item
+            for item in files
+            if item.get("output_ref") or item.get("ref")
+        }
+        outputs: dict[str, dict[str, Any]] = {}
+        for fact in facts:
+            ref = fact.get("output_ref")
+            if not isinstance(ref, str) or not ref:
+                continue
+            outputs[ref] = {
+                "ref": ref,
+                "kind": fact.get("kind"),
+                "type": fact.get("expected_type"),
+                "fact": fact,
+                "file": files_by_ref.get(ref),
+            }
+        return outputs
+
+    def _render_verified_delivery(
+        self,
+        run: Run,
+        facts: list[dict[str, Any]],
+        files: list[dict[str, Any]],
+        *,
+        unavailable: list[str],
+        cancel: Event | None,
+    ) -> tuple[str, dict[str, Any]]:
+        for index, fact in enumerate(facts, start=1):
+            fact.setdefault("output_ref", f"out_{index}")
+        outputs = self._answer_output_map(facts, files)
+        required = [str(fact["output_ref"]) for fact in facts]
+        draft: AnswerOutput | None = None
+        if cancel is None or not cancel.is_set():
+            try:
+                draft, _error = self._compose_answer_draft(
+                    run.request.description,
+                    mode="result",
+                    available_outputs=self._public_answer_outputs(facts, files),
+                    required_outputs=required,
+                    context={
+                        "run_status": run.status,
+                        "output_preferences": run.request.output_preferences,
+                    },
+                    cancel=cancel,
+                )
+            except LlmError:
+                draft = None
+        if self._answer_draft_covers_outputs(draft, facts, files=files):
+            try:
+                text = render_answer_output(
+                    draft,
+                    outputs_by_ref=outputs,
+                    required_refs=required,
+                    preferences=run.request.output_preferences,
+                )
+            except ValueError:
+                text = ""
+        else:
+            fallback = AnswerOutput(
+                action="respond",
+                sections=[
+                    AnswerSection(
+                        format="auto",
+                        heading="results",
+                        output_refs=required,
+                        detail=run.request.output_preferences.get("detail", "normal"),
+                        text=None,
+                    )
+                ],
+            )
+            text = render_answer_output(
+                fallback,
+                outputs_by_ref=outputs,
+                required_refs=required,
+                preferences=run.request.output_preferences,
+            )
+        if unavailable:
+            text = f"{text}\n尚未交付：{'；'.join(unavailable)}。"
+        locators: list[dict[str, Any]] = []
+        for fact in facts:
+            ref = str(fact["output_ref"])
+            file_info = next(
+                (item for item in files if str(item.get("output_ref") or item.get("ref")) == ref),
+                None,
+            )
+            locator = {
+                "output_ref": ref,
+                "run_id": run.id,
+                "step_id": fact.get("step_id"),
+                "subject_ref": fact.get("subject_ref"),
+                "kind": fact.get("kind"),
+                "property": fact.get("result_property"),
+            }
+            if file_info is not None:
+                locator.update(
+                    {
+                        "artifact_id": file_info.get("artifact_id"),
+                        "path": file_info.get("path"),
+                        "sha256": file_info.get("sha256"),
+                        "filename": file_info.get("filename"),
+                        "preview_complete": file_info.get("preview_complete"),
+                    }
+                )
+            locators.append(locator)
+        status = "complete" if not unavailable and len(locators) == len(required) else "partial"
+        return text, {
+            "status": status,
+            "rendered_refs": required,
+            "unavailable_targets": list(unavailable),
+            "outputs": locators,
+        }
+
+    def _files_for_facts(
+        self, facts: list[Mapping[str, Any]], *, cancel: Event | None = None
+    ) -> list[dict[str, Any]]:
         files: list[dict[str, Any]] = []
         for index, fact in enumerate(facts, start=1):
             run = fact.get("_run")
@@ -2103,12 +2354,42 @@ class Agent:
                 artifact = find_artifact(run, artifact_id)
             except ValueError:
                 continue
+            output_ref = str(fact.get("output_ref") or f"out_{index}")
             descriptor = self._artifact_file_descriptor(
-                run, step, result, artifact, ref=f"file_{index}"
+                run,
+                step,
+                result,
+                artifact,
+                ref=output_ref,
+                expected_type=str(fact.get("expected_type") or artifact.artifact_type),
+                display_name=str(
+                    _mapping(fact.get("metadata")).get("label") or path_label(artifact)
+                ),
+                cancel=cancel,
             )
             if descriptor is not None:
                 files.append(descriptor)
+        self._limit_total_previews(files)
         return files
+
+    @staticmethod
+    def _limit_total_previews(files: list[dict[str, Any]]) -> None:
+        remaining = MAX_TOTAL_FILE_PREVIEW_BYTES
+        for item in files:
+            preview = item.get("preview_text")
+            if not isinstance(preview, str):
+                continue
+            encoded = preview.encode("utf-8")
+            if len(encoded) <= remaining:
+                remaining -= len(encoded)
+                continue
+            prefix = encoded[:remaining].decode("utf-8", errors="ignore")
+            lines = prefix.splitlines(keepends=True)
+            complete_lines = lines if not lines or lines[-1].endswith(("\n", "\r")) else lines[:-1]
+            item["preview_text"] = "".join(complete_lines)
+            item["preview_complete"] = False
+            item["preview_reason"] = "总文件预览上限为 64 KiB"
+            remaining = 0
 
     def _waiting_text(self, run: Run) -> str:
         if run.waiting_for == "confirmation":
@@ -2132,10 +2413,27 @@ class Agent:
         if event.is_set() or self._active_request != (token, event):
             raise LlmError("request cancelled", category="cancelled")
 
-    def _append_message(self, role: str, content: str) -> None:
+    def _append_message(self, role: str, content: str, *, save: bool = True) -> None:
         messages = self._session.setdefault("recent_messages", [])
-        messages.append({"role": role, "content": content})
+        bounded_content = content if len(content) <= 4000 else content[:3997] + "..."
+        messages.append({"role": role, "content": bounded_content})
         self._session["recent_messages"] = messages[-12:]
+        if save:
+            self._save_session()
+
+    def _record_response(self, response: AgentResponse, *, cancel: Event | None = None) -> None:
+        """Persist a bounded conversational summary and delivery locators."""
+
+        if cancel is not None and cancel.is_set():
+            return
+        summary = re.sub(r"```.*?```", "[已交付文件正文省略]", response.text, flags=re.DOTALL)
+        self._append_message("assistant", summary, save=False)
+        delivery = response.delivery
+        if isinstance(delivery, Mapping) and delivery.get("outputs"):
+            outputs = [
+                dict(item) for item in delivery.get("outputs", []) if isinstance(item, Mapping)
+            ]
+            self._session["last_delivery"] = outputs[-8:]
         self._save_session()
 
     def _record_result_summary(self, run: Run, result: Result) -> None:
@@ -2209,6 +2507,9 @@ class Agent:
 
         self._query_bindings = {}
         subject_refs: dict[str, str] = {}
+        last_delivery = [
+            item for item in self._session.get("last_delivery", []) if isinstance(item, Mapping)
+        ]
 
         def _subject_ref(run: Run, step: Step) -> str:
             task_key = f"{run.id}:{step.id}"
@@ -2347,6 +2648,12 @@ class Agent:
                             structure=structure,
                             check_status=(
                                 result.scientific_checks[name].status if kind == "check" else None
+                            ),
+                            recently_delivered=any(
+                                item.get("run_id") == run.id
+                                and item.get("step_id") == step.id
+                                and item.get("property") == property_name
+                                for item in last_delivery
                             ),
                         )
                     )
@@ -2508,6 +2815,7 @@ class Agent:
         property_name: str,
         structure: dict[str, Any],
         check_status: str | None = None,
+        recently_delivered: bool = False,
     ) -> dict[str, Any]:
         metadata = dict(tool.result_metadata.get(name, {}))
         metadata.setdefault("label", name.replace("_", " "))
@@ -2516,6 +2824,7 @@ class Agent:
         item = {
             "subject_ref": subject_ref,
             "active_task": run.id == self._session.get("active_run_id"),
+            "recently_delivered": recently_delivered,
             "task": {
                 "description": run.request.description,
                 "status": run.status,
@@ -3020,7 +3329,8 @@ class Agent:
         error: str | None = None,
         cancel: Event | None = None,
     ) -> AgentResponse:
-        del cancel
+        if cancel is not None and cancel.is_set():
+            return AgentResponse("当前请求已取消。")
         if draft is not None and draft.action == "respond":
             text = render_answer_output(draft)
             if not text:
@@ -3032,7 +3342,7 @@ class Agent:
         else:
             text = "当前配置的模型没有生成可展示的回答。"
         response = AgentResponse(text)
-        self._append_message("assistant", text)
+        self._record_response(response, cancel=cancel)
         return response
 
     def _answer_context(
@@ -3041,6 +3351,7 @@ class Agent:
         *,
         selection: QuerySelection | None,
         catalog: list[Mapping[str, Any]],
+        preferences: Mapping[str, Any] | None = None,
         cancel: Event | None = None,
     ) -> AgentResponse:
         if cancel is not None and cancel.is_set():
@@ -3048,12 +3359,12 @@ class Agent:
         if selection is None:
             text = render_clarification({"status": "unavailable", "missing_description": question})
             response = AgentResponse(text)
-            self._append_message("assistant", text)
+            self._record_response(response, cancel=cancel)
             return response
         if selection.status != "selected":
             text = render_clarification(selection.model_dump(mode="python"))
             response = AgentResponse(text)
-            self._append_message("assistant", text)
+            self._record_response(response, cancel=cancel)
             return response
 
         catalog_refs = {
@@ -3064,7 +3375,7 @@ class Agent:
         if any(target.subject_ref not in catalog_refs for target in selection.targets):
             text = render_clarification({"binding_invalid": True})
             response = AgentResponse(text)
-            self._append_message("assistant", text)
+            self._record_response(response, cancel=cancel)
             return response
         selected_facts: list[dict[str, Any]] = []
         for target in selection.targets:
@@ -3072,7 +3383,7 @@ class Agent:
             if fact is None:
                 text = "所选任务尚未得到所问性质；已保存的其他性质不能替代它。"
                 response = AgentResponse(text)
-                self._append_message("assistant", text)
+                self._record_response(response, cancel=cancel)
                 return response
             selected_facts.append(fact)
         targets = [target.model_dump(mode="python") for target in selection.targets]
@@ -3080,37 +3391,108 @@ class Agent:
         if not covered:
             text = "本次任务尚未得到所问性质；已保存的其他性质不能替代它。"
             response = AgentResponse(text)
-            self._append_message("assistant", text)
+            self._record_response(response, cancel=cancel)
             return response
         for index, fact in enumerate(facts, start=1):
             fact["output_ref"] = f"out_{index}"
-        files = self._files_for_facts(facts)
-        default_text = render_selected_facts(facts)
-        draft, _error = self._compose_answer_draft(
-            question,
-            mode="query",
-            available_outputs=self._public_answer_outputs(facts, files),
-            required_outputs=[str(fact["output_ref"]) for fact in facts],
-            context={
-                "run_status": facts[0].get("run_status") if facts else None,
-            },
-            cancel=cancel,
+        files = self._files_for_facts(facts, cancel=cancel)
+        output_map = self._answer_output_map(facts, files)
+        required = [str(fact["output_ref"]) for fact in facts]
+        draft: AnswerOutput | None = None
+        if cancel is None or not cancel.is_set():
+            try:
+                draft, _error = self._compose_answer_draft(
+                    question,
+                    mode="query",
+                    available_outputs=self._public_answer_outputs(facts, files),
+                    required_outputs=required,
+                    context={
+                        "run_status": facts[0].get("run_status") if facts else None,
+                        "output_preferences": dict(preferences or {}),
+                    },
+                    cancel=cancel,
+                )
+            except LlmError:
+                draft = None
+        fallback = AnswerOutput(
+            action="respond",
+            sections=[
+                AnswerSection(
+                    format="auto",
+                    heading="results",
+                    output_refs=required,
+                    detail=str((preferences or {}).get("detail", "normal")),
+                    text=None,
+                )
+            ],
         )
-        text = default_text
         if self._answer_draft_covers_outputs(draft, facts, files=files):
-            prose = render_answer_output(draft)
-            if prose:
-                text = f"{prose}\n\n{default_text}"
+            try:
+                text = render_answer_output(
+                    draft,
+                    outputs_by_ref=output_map,
+                    required_refs=required,
+                    preferences=preferences,
+                )
+            except ValueError:
+                text = render_answer_output(
+                    fallback,
+                    outputs_by_ref=output_map,
+                    required_refs=required,
+                    preferences=preferences,
+                )
+        else:
+            text = render_answer_output(
+                fallback,
+                outputs_by_ref=output_map,
+                required_refs=required,
+                preferences=preferences,
+            )
         first = facts[0] if facts else {}
         run = first.get("_run")
         result = first.get("_result")
+        delivery = {
+            "status": "complete",
+            "rendered_refs": required,
+            "unavailable_targets": [],
+            "outputs": [
+                {
+                    "output_ref": ref,
+                    "run_id": fact.get("_run").id if isinstance(fact.get("_run"), Run) else None,
+                    "step_id": fact.get("step_id"),
+                    "subject_ref": fact.get("subject_ref"),
+                    "property": fact.get("result_property"),
+                    **(
+                        {
+                            "artifact_id": file_info.get("artifact_id"),
+                            "path": file_info.get("path"),
+                            "sha256": file_info.get("sha256"),
+                            "filename": file_info.get("filename"),
+                        }
+                        if (
+                            file_info := next(
+                                (
+                                    item
+                                    for item in files
+                                    if str(item.get("output_ref") or item.get("ref")) == ref
+                                ),
+                                None,
+                            )
+                        )
+                        else {}
+                    ),
+                }
+                for ref, fact in ((str(item["output_ref"]), item) for item in facts)
+            ],
+        }
         response = AgentResponse(
             text,
             run=run,
             result=result,
             files=tuple(files),
+            delivery=delivery,
         )
-        self._append_message("assistant", text)
+        self._record_response(response, cancel=cancel)
         return response
 
 
@@ -3123,6 +3505,43 @@ def _bind_input_geometry(plan: Plan, artifact_id: str) -> Plan:
             inputs["geometry"] = InputReference(artifact_id=artifact_id)
         steps.append(step.model_copy(update={"inputs": inputs}))
     return plan.model_copy(update={"steps": steps})
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _target_identity(target: Any, kind: str | None, name: str | None) -> str:
+    step_id = getattr(target, "step_id", None) or "unbound"
+    return f"{step_id}:{kind or 'unknown'}:{name or 'unknown'}"
+
+
+def path_label(artifact: Any) -> str:
+    role = getattr(artifact, "role", None)
+    return {
+        "initial_geometry": "初始 XYZ 结构文件",
+        "optimized_geometry": "优化后的 XYZ 结构文件",
+        "verified_hessian": "已验证 Hessian 文件",
+    }.get(str(role), str(role or "已验证文件"))
+
+
+def _public_unit(expected_type: Any) -> str | None:
+    return {
+        "Eh": "Eh",
+        "angstrom": "Å",
+        "degree": "°",
+        "frequency": "cm⁻¹",
+    }.get(str(expected_type))
+
+
+def _artifact_mime_type(expected_type: Any, suffix: str | None) -> str:
+    if expected_type in {"molecular_geometry", "text_file", "file"}:
+        return "text/plain"
+    if expected_type == "orca_hessian":
+        return "text/plain"
+    if suffix == ".json":
+        return "application/json"
+    return "application/octet-stream"
 
 
 def _normalize_explicit_plan(

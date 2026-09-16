@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from bg6022.models import Tool
+from bg6022.answer import AnswerOutput, AnswerSection, render_answer_output, validate_result_answer
+from bg6022.models import Request, Tool
 from bg6022.output_contracts import (
     canonical_public_outputs,
     is_compatible_value,
@@ -116,4 +117,71 @@ def test_query_schema_rejects_subject_property_cross_binding() -> None:
                 },
             },
             strict=True,
+        )
+
+
+def test_result_answer_rejects_free_prose_and_renders_verified_file_content() -> None:
+    outputs = {
+        "out_1": {
+            "kind": "port",
+            "type": "text_file",
+            "fact": {
+                "kind": "port",
+                "name": "report",
+                "expected_type": "text_file",
+                "metadata": {"label": "原子坐标 CSV"},
+            },
+            "file": {
+                "display_name": "原子坐标.csv",
+                "filename": "原子坐标.csv",
+                "path": r"C:\data\原子坐标.csv",
+                "preview_text": "atom_index,element\n1,H\n",
+                "preview_complete": True,
+                "sha256": "a" * 64,
+            },
+        }
+    }
+    injected = AnswerOutput(
+        action="respond",
+        sections=[
+            AnswerSection(
+                format="auto",
+                output_refs=["out_1"],
+                text="优化已经完成，能量是 -999 Eh。",
+            )
+        ],
+    )
+    with pytest.raises(ValueError, match="free model prose"):
+        validate_result_answer(injected, outputs, ["out_1"])
+
+    safe = AnswerOutput(
+        action="respond",
+        sections=[AnswerSection(format="auto", output_refs=["out_1"], text=None)],
+    )
+    rendered = render_answer_output(
+        safe,
+        outputs_by_ref=outputs,
+        required_refs=["out_1"],
+        preferences={"file_content": "show", "detail": "normal"},
+    )
+    assert "atom_index,element" in rendered
+    assert "-999" not in rendered
+
+
+def test_request_output_preferences_are_small_and_non_scientific() -> None:
+    request = Request(
+        id="request_preferences",
+        description="show a file",
+        output_preferences={"layout": "table", "file_content": "show", "detail": "brief"},
+    )
+    assert request.output_preferences == {
+        "layout": "table",
+        "file_content": "show",
+        "detail": "brief",
+    }
+    with pytest.raises(ValueError, match="unknown output preference"):
+        Request(
+            id="request_bad_preferences",
+            description="bad",
+            output_preferences={"run_tool": "yes"},
         )

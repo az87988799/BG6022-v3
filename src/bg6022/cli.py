@@ -337,10 +337,6 @@ def _chat_loop(agent: Agent) -> int:
             except queue.Empty:
                 continue
             print(response.text)
-            for file_info in response.files:
-                path = file_info.get("path") if isinstance(file_info, dict) else None
-                if isinstance(path, str) and path:
-                    print(f"文件：{path}")
             if response.text.startswith("Exiting after"):
                 exiting = True
                 stop_input.set()

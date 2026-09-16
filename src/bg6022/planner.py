@@ -30,6 +30,7 @@ from bg6022.models import (
     ResultProperty,
     ResultTarget,
     Step,
+    validate_output_preferences,
 )
 from bg6022.output_contracts import property_evidence_matches
 from bg6022.tools.molecule import parse_xyz_bytes
@@ -139,6 +140,7 @@ class IntakeOutput(BaseModel):
     unresolved_results: list[StrictStr] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
     query_selection: QuerySelection | None = None
+    output_preferences: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
@@ -173,6 +175,11 @@ class IntakeOutput(BaseModel):
         if len(set(value)) != len(value):
             raise ValueError("requested operations must be unique")
         return value
+
+    @field_validator("output_preferences", mode="before")
+    @classmethod
+    def _validate_output_preferences(cls, value: Any) -> dict[str, str]:
+        return validate_output_preferences(value)
 
     @property
     def operation(self) -> Operation | None:
@@ -698,6 +705,7 @@ def request_from_intake(
         source="chat",
         operations=list(intake.operations),
         missing_fields=list(intake.missing_fields),
+        output_preferences=validate_output_preferences(intake.output_preferences),
     )
     _validate_required_geometry_contract(request, registry)
     _require_composite_geometry_sources(request, registry)
@@ -1390,10 +1398,16 @@ def _bounded_context(context: Mapping[str, Any] | None) -> Mapping[str, Any]:
         ]
     else:
         geometry_catalog = []
+    delivery = context.get("last_delivery")
+    if isinstance(delivery, list):
+        delivery = [dict(item) for item in delivery[-8:] if isinstance(item, Mapping)]
+    else:
+        delivery = []
     return {
         "recent_messages": recent or [],
         "recent_results": results or [],
         "geometry_catalog": geometry_catalog,
+        "last_delivery": delivery,
     }
 
 

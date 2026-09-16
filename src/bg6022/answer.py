@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -35,9 +36,13 @@ class AnswerSection(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    text: StrictStr
-    format: Literal["plain", "table"] = "plain"
-    output_refs: list[StrictStr] = Field(default_factory=list)
+    format: Literal["auto", "plain", "table", "json", "code", "link"] = "auto"
+    heading: Literal["results", "files", "checks", "notes"] | None = None
+    output_refs: list[StrictStr] = Field(default_factory=list, max_length=24)
+    detail: Literal["brief", "normal", "full"] = "normal"
+    # Free prose is retained only for knowledge/clarification answers.  The
+    # result/query renderer rejects it before any verified fact is displayed.
+    text: StrictStr | None = None
 
 
 class AnswerOutput(BaseModel):
@@ -97,27 +102,231 @@ def compose_answer(
         ],
         AnswerOutput,
         purpose="answer",
-        example={
-            "action": "respond",
-            "requested_results": [],
-            "clarification": None,
-            "sections": [
-                {"text": "下面是与用户目标直接相关的说明。", "format": "plain", "output_refs": []}
-            ],
-        },
+        example=(
+            {
+                "action": "respond",
+                "requested_results": [],
+                "clarification": None,
+                "sections": [
+                    {
+                        "format": "plain",
+                        "heading": "notes",
+                        "output_refs": [],
+                        "detail": "normal",
+                        "text": "下面是与用户目标直接相关的说明。",
+                    }
+                ],
+            }
+            if mode == "knowledge"
+            else {
+                "action": "respond",
+                "requested_results": [],
+                "clarification": None,
+                "sections": [
+                    {
+                        "format": "auto",
+                        "heading": "results",
+                        "output_refs": list(required_outputs)[:1],
+                        "detail": "normal",
+                        "text": None,
+                    }
+                ],
+            }
+        ),
         cancel=cancel,
     )
 
 
-def render_answer_output(output: AnswerOutput | None) -> str:
-    """Render only model prose; scientific facts are appended separately."""
+def validate_result_answer(
+    output: AnswerOutput | None,
+    outputs_by_ref: Mapping[str, Mapping[str, Any]],
+    required_refs: Sequence[str],
+) -> tuple[str, ...]:
+    """Validate the reference-only result/query presentation contract."""
+
+    if output is None or output.action != "respond" or output.clarification:
+        raise ValueError("completed result presentation must use respond")
+    used: list[str] = []
+    for section in output.sections:
+        if section.text is not None:
+            raise ValueError("free model prose is not allowed in result/query mode")
+        if not section.output_refs:
+            raise ValueError("a result section must reference verified outputs")
+        for ref in section.output_refs:
+            if ref not in outputs_by_ref:
+                raise ValueError(f"unknown output reference: {ref}")
+            _check_supported_view(outputs_by_ref[ref], section.format)
+            used.append(ref)
+    if len(used) != len(set(used)):
+        raise ValueError("duplicate output rendering")
+    required = {str(ref) for ref in required_refs}
+    if not required <= set(used):
+        raise ValueError("answer omits a requested output")
+    return tuple(used)
+
+
+def render_answer_output(
+    output: AnswerOutput | None,
+    *,
+    outputs_by_ref: Mapping[str, Mapping[str, Any]] | None = None,
+    required_refs: Sequence[str] = (),
+    preferences: Mapping[str, Any] | None = None,
+) -> str:
+    """Render knowledge prose or reference-only verified result outputs.
+
+    In result/query mode all visible facts are read from ``outputs_by_ref``;
+    the model chooses only section order and supported view, never the text.
+    """
 
     if output is None:
         return ""
-    sections = [section.text.strip() for section in output.sections if section.text.strip()]
+    if outputs_by_ref is not None:
+        used = validate_result_answer(output, outputs_by_ref, required_refs)
+        section_by_ref: dict[str, AnswerSection] = {
+            ref: section for section in output.sections for ref in section.output_refs
+        }
+        lines: list[str] = []
+        heading_labels = {
+            "results": "结果",
+            "files": "文件",
+            "checks": "科学检查",
+            "notes": "说明",
+        }
+        emitted_headings: set[str] = set()
+        for ref in used:
+            section = section_by_ref[ref]
+            if section.heading and section.heading not in emitted_headings:
+                lines.append(f"{heading_labels[section.heading]}：")
+                emitted_headings.add(section.heading)
+            entry = outputs_by_ref[ref]
+            rendered = _render_public_output(
+                entry,
+                section.format,
+                detail=section.detail,
+                preferences=preferences,
+            )
+            if rendered:
+                lines.append(rendered)
+        return "\n".join(lines)
+    sections = [
+        section.text.strip()
+        for section in output.sections
+        if section.text is not None and section.text.strip()
+    ]
     if output.clarification and output.clarification.strip():
         sections.insert(0, output.clarification.strip())
     return "\n\n".join(sections)
+
+
+def _check_supported_view(entry: Mapping[str, Any], requested: str) -> None:
+    if requested == "auto":
+        return
+    fact = _mapping(entry.get("fact"))
+    kind = str(entry.get("kind") or fact.get("kind") or "")
+    expected_type = str(
+        entry.get("type") or entry.get("expected_type") or fact.get("expected_type") or ""
+    )
+    supported = {
+        "plain": {"field", "check", "port"},
+        "table": {"field", "check", "port"},
+        "json": {"field", "port", "check"},
+        "code": {"port", "field"},
+        "link": {"port", "field"},
+    }
+    if kind not in supported.get(requested, set()):
+        raise ValueError(f"view {requested!r} is unsupported for {kind or expected_type!r}")
+    if (
+        requested == "code"
+        and kind == "field"
+        and expected_type
+        not in {
+            "text",
+            "json",
+            "record",
+            "record_list",
+        }
+    ):
+        raise ValueError("code view is unsupported for scalar output")
+
+
+def _render_public_output(
+    entry: Mapping[str, Any],
+    view: str,
+    *,
+    detail: str,
+    preferences: Mapping[str, Any] | None,
+) -> str:
+    fact = _mapping(entry.get("fact"))
+    file_info = _mapping(entry.get("file"))
+    if not fact:
+        fact = entry
+    kind = str(fact.get("kind") or entry.get("kind") or "field")
+    expected_type = fact.get("expected_type") or entry.get("type")
+    label = str(_mapping(fact.get("metadata")).get("label") or fact.get("name") or "结果")
+    if kind == "port":
+        return _render_file_output(label, file_info, preferences=preferences, detail=detail)
+    if kind == "check":
+        return _fact_sentence(fact)
+    value = fact.get("value")
+    if view == "json" or (view == "code" and isinstance(value, (dict, list))):
+        return f"{label}：\n```json\n{json.dumps(value, ensure_ascii=False, indent=2)}\n```"
+    if view == "table" or expected_type in {"record_list", "record"}:
+        return _render_record_value(label, value)
+    return _fact_sentence(fact)
+
+
+def _render_file_output(
+    label: str,
+    file_info: Mapping[str, Any],
+    *,
+    preferences: Mapping[str, Any] | None,
+    detail: str,
+) -> str:
+    if not file_info:
+        return f"{label}：文件入口暂不可用。"
+    display_name = str(file_info.get("display_name") or file_info.get("filename") or label)
+    path = str(file_info.get("path") or "")
+    lines = [f"{label}（{display_name}）"]
+    file_content = str(_mapping(preferences).get("file_content") or "auto")
+    show_content = file_content != "link_only"
+    preview = file_info.get("preview_text")
+    if show_content and isinstance(preview, str) and preview:
+        fence = _code_fence(preview)
+        lines.extend([f"{fence[0]}", preview.rstrip("\r\n"), fence[1]])
+        if file_info.get("preview_complete") is False:
+            lines.append("（以上为预览前缀，完整文件见下方入口。）")
+    elif show_content and file_info.get("preview_reason"):
+        lines.append(f"正文暂不可预览：{file_info['preview_reason']}。")
+    if path:
+        lines.append(f"文件：{path}")
+    if detail == "full" and file_info.get("sha256"):
+        lines.append(f"SHA-256：{file_info['sha256']}")
+    return "\n".join(lines)
+
+
+def _render_record_value(label: str, value: Any) -> str:
+    records = value if isinstance(value, list) else [value]
+    if not records or not all(isinstance(item, Mapping) for item in records):
+        return f"{label}：{_format_scalar(value)}"
+    keys: list[str] = []
+    for record in records:
+        for key in record:
+            if str(key) not in keys:
+                keys.append(str(key))
+    header = " | ".join(keys)
+    divider = " | ".join("---" for _ in keys)
+    rows = [" | ".join(_format_scalar(record.get(key)) for key in keys) for record in records]
+    return f"{label}：\n| {header} |\n| {divider} |\n" + "\n".join(f"| {row} |" for row in rows)
+
+
+def _code_fence(text: str) -> tuple[str, str]:
+    longest = 0
+    for line in text.splitlines():
+        match = re.search(r"`+", line)
+        if match:
+            longest = max(longest, len(match.group(0)))
+    fence = "`" * max(3, longest + 1)
+    return fence, fence
 
 
 def render_confirmation(preview: Mapping[str, Any]) -> str:
@@ -1095,6 +1304,7 @@ __all__ = [
     "fact_matches_question",
     "render_already_finished",
     "render_answer_output",
+    "validate_result_answer",
     "render_clarification",
     "render_confirmation",
     "facts_from_result",
