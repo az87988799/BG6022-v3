@@ -9,7 +9,7 @@
 |---|---|
 | 分支 | `codex/v3-m2-implementation` |
 | 代码提交 | `b4d79e50c072e23a3d8f0939b379db4bfb808630` |
-| 验收记录提交 | `b750a1f4b3329001c0bd59e8b0553773ef94dd2d` |
+| 最新验收记录提交 | `e222ebf15ee842fa4cfef0d6b67f3858dbea3261` |
 | 修复范围 | 确认页身份展示；未修改 ORCA、Planner、结构绑定或修复执行链 |
 | Python / RDKit | Python 3.11.4 / RDKit 2026.03.6 |
 | LLM | `deepseek-flash`；真实调用元数据保存在隔离会话记录中 |
@@ -79,9 +79,10 @@ uv build                             passed
 git diff --check                     passed
 ```
 
-确认展示专项测试为 `10 passed`。候选提交的 Windows CI：
-[offline 工作流 35057582412](https://github.com/az87988799/BG6022-v3/actions/runs/35057582412)，
-依赖安装、pytest、Ruff、编译和构建全部成功。
+确认展示专项测试为 `10 passed`。代码提交 `b4d79e5` 的 Windows CI
+35057582412，以及包含本验收记录的最新候选 HEAD `e222ebf` 的 CI
+[35057760444](https://github.com/az87988799/BG6022-v3/actions/runs/35057760444)
+均通过；依赖安装、pytest、Ruff、编译和构建全部成功。
 
 ## 判定
 
