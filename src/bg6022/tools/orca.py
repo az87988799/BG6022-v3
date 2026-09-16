@@ -22,7 +22,7 @@ from bg6022.models import (
     Step,
     Tool,
 )
-from bg6022.orca.checks import evaluate_success
+from bg6022.orca.checks import CheckOutcome, evaluate_success
 from bg6022.orca.input import OrcaInputSpec, render_input
 from bg6022.orca.parser import EnergyObservation, inspect_attempt
 from bg6022.orca.profiles import get_profile
@@ -106,6 +106,13 @@ def make_single_point_tool(config: AppConfig | None = None) -> Tool:
                 "caveat": "这是固定几何的单点结果，不代表几何优化或频率验证",
             }
         },
+        request_parameters=[
+            "method_profile",
+            "environment",
+            "charge",
+            "multiplicity",
+            "scf_maxiter",
+        ],
     )
 
 
@@ -136,6 +143,14 @@ def make_optimize_tool(config: AppConfig | None = None) -> Tool:
                 "caveat": "频率稳定性、全局最低点和热力学性质未验证",
             },
         },
+        request_parameters=[
+            "method_profile",
+            "environment",
+            "charge",
+            "multiplicity",
+            "scf_maxiter",
+            "geom_maxiter",
+        ],
     )
 
 
@@ -168,6 +183,13 @@ def make_frequency_tool(config: AppConfig | None = None) -> Tool:
                 "and no negative vibrational modes after ORCA's supported external-mode check."
             ),
         },
+        request_parameters=[
+            "method_profile",
+            "environment",
+            "charge",
+            "multiplicity",
+            "scf_maxiter",
+        ],
     )
 
 
@@ -183,6 +205,7 @@ def _make_tool(
     result_properties: dict[str, ResultProperty],
     result_metadata: dict[str, dict[str, str]],
     scientific_checks: dict[str, str] | None = None,
+    request_parameters: list[str],
 ) -> Tool:
     def execute(step: Step, run: Run, cancel: Event) -> Result:
         if config is None:
@@ -237,8 +260,29 @@ def _make_tool(
         parameter_preparation="orca_electronic_state",
         execution_budget="orca",
         deferred_parameters=["charge", "multiplicity"],
+        request_parameters=request_parameters,
+        repair_capabilities_function=lambda parameters: _profile_repair_capabilities(
+            parameters,
+            operation=operation,
+            declared={
+                "Opt": ["restart_optimization", "increase_scf_maxiter"],
+                "SP": ["increase_scf_maxiter"],
+                "Freq": [],
+            }[operation],
+        ),
         execute_function=execute if config is not None else None,
     )
+
+
+def _profile_repair_capabilities(
+    parameters: dict[str, Any], *, operation: str, declared: list[str]
+) -> list[str]:
+    try:
+        profile = get_profile(str(parameters.get("method_profile", "r2scan3c")))
+    except ValueError:
+        return []
+    allowed = set(profile.repair_options_by_operation.get(operation, ()))
+    return [action for action in declared if action in allowed]
 
 
 def execute_orca_step(
@@ -442,6 +486,19 @@ def _execute_prepared_attempt(
         effective_scf_maxiter=parameters.scf_maxiter,
     )
     outcome = evaluate_success(facts, operation=operation)
+    if profile_versions := get_profile(parameters.method_profile).validated_orca_versions:
+        version_supported = facts.orca_version in profile_versions
+        outcome = CheckOutcome(
+            success=outcome.success and version_supported,
+            checks={**outcome.checks, "orca_version_supported": version_supported},
+            failure_category=(
+                None
+                if outcome.success and version_supported
+                else "unsupported_orca_version"
+                if not version_supported
+                else outcome.failure_category
+            ),
+        )
     artifact_ids: list[str] = []
     for path, artifact_type, role in (
         (attempt_dir / "input.inp", "orca_input", "input"),

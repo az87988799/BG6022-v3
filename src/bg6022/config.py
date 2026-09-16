@@ -184,10 +184,28 @@ def load_config(path: str | Path, *, create_data_root: bool = False) -> AppConfi
         raise ValueError(f"configuration is missing {error.args[0]!r}") from error
     except Exception as error:
         raise ValueError(f"invalid configuration: {error}") from error
-    if model.defaults.method_profile != "r2scan3c":
-        raise ValueError(f"unsupported default method profile: {model.defaults.method_profile}")
-    if model.defaults.environment != "gas":
-        raise ValueError(f"unsupported default environment: {model.defaults.environment}")
+    # Import locally: profiles -> molecule -> config is a valid runtime
+    # dependency, while configuration parsing itself must remain import-safe.
+    from bg6022.orca.profiles import get_profile, normalize_method_profile
+
+    try:
+        profile = get_profile(model.defaults.method_profile)
+    except ValueError as error:
+        raise ValueError(
+            f"unsupported default method profile: {model.defaults.method_profile}"
+        ) from error
+    if model.defaults.environment not in profile.supported_environments:
+        raise ValueError(
+            f"default environment {model.defaults.environment!r} is not supported by "
+            f"method profile {profile.name!r}"
+        )
+    canonical_method = normalize_method_profile(model.defaults.method_profile)
+    if canonical_method != model.defaults.method_profile:
+        model = model.model_copy(
+            update={
+                "defaults": model.defaults.model_copy(update={"method_profile": canonical_method})
+            }
+        )
     validate_runtime_capacity(model)
     return model
 

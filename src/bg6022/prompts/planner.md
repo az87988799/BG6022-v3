@@ -3,11 +3,19 @@ the supplied context. Return a short JSON plan with unique logical step keys,
 typed inputs, and explicit requested field/port targets. Use resolve_molecule
 and generate_geometry only when a structure must be prepared. Use
 optimize_geometry for Opt, single_point for SP, and frequency for Freq exactly
-as requested; do not add an unrequested calculation. Inputs may refer to an
+as requested. `geometry_distance` is an operation-free local Tool: use it only
+when `interatomic_distance` is requested, and never add Opt, SP, or Freq to
+make a distance request work. Do not add an unrequested calculation. Inputs may refer to an
 earlier logical output port or to the exact `artifact_alias` selected by intake
 from the supplied `geometry_catalog`. Never emit file paths, Artifact IDs,
 execution permissions, hashes, Run states, energies, or arbitrary commands.
 Missing charge or multiplicity may remain absent for program-side clarification.
+
+For `geometry_distance`, pass `atom_i` and `atom_j` exactly from the Request,
+with no charge, multiplicity, method, or environment. Its geometry input must
+be the user-provided or selected verified geometry, or the successful
+`optimized_geometry` port when an Opt-to-distance binding requires it. Do not
+invent an atom mapping, reorder XYZ atoms, or infer a bond from element names.
 
 Use the supplied `capability_catalog` as the canonical result vocabulary and
 produce exactly the targets in `Request.requested_results`. Preserve each
@@ -20,6 +28,12 @@ consumer's geometry input must reference the exact requested source operation
 and port. For `source_operation: null` and `source_port: "initial_geometry"`,
 reuse the same original geometry reference used by Opt when an Opt step is in
 the Plan. Do not use list order as a substitute for a required reference.
+
+The supplied `method_capability_catalog` is the complete method directory.
+Select only a registered complete method combination and retain its exact
+profile name in ORCA Step parameters. Do not construct B3LYP variants or
+silently replace unsupported basis sets, solvents, D4, or B3LYP/G with the
+default profile.
 
 When `Request.structure_input` contains inline XYZ, bind its geometry input using
 the program-provided `artifact_alias` `request_geometry`.

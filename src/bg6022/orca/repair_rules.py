@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from bg6022.models import Artifact, Result, Run, Step
+from bg6022.orca.profiles import get_profile
 
 MAX_ITERATION = 1000
 DEFAULT_RESTART_GEOM_MAXITER = 100
@@ -35,7 +36,11 @@ class RepairOption:
 def applicable_repairs(run: Run, step: Step, result: Result) -> list[RepairOption]:
     """Return only actions supported by concrete facts from one failed attempt."""
 
-    if result.status != "failed" or step.tool != "optimize_geometry":
+    if (
+        result.status != "failed"
+        or step.tool != "optimize_geometry"
+        or not _profile_allows(step, "restart_optimization")
+    ):
         return []
     diagnostics = result.diagnostics
     facts = diagnostics.get("facts") if isinstance(diagnostics.get("facts"), dict) else {}
@@ -80,7 +85,11 @@ def applicable_repairs(run: Run, step: Step, result: Result) -> list[RepairOptio
 def applicable_scf_repair(run: Run, step: Step, result: Result) -> list[RepairOption]:
     """Expose SCF repair only when an explicit verified near-convergence fact exists."""
 
-    if step.tool not in {"single_point", "optimize_geometry"} or result.status != "failed":
+    if (
+        step.tool not in {"single_point", "optimize_geometry"}
+        or result.status != "failed"
+        or not _profile_allows(step, "increase_scf_maxiter")
+    ):
         return []
     facts = result.diagnostics.get("facts", {})
     process = result.diagnostics.get("process", {})
@@ -264,6 +273,23 @@ def _scope_allows_patch(run: Run, step: Step, *, action: str, patch: Mapping[str
     if type(maximum) is not int:
         return False
     return all(type(value) is int and 1 <= value <= maximum for value in patch.values())
+
+
+def _profile_allows(step: Step, action: str) -> bool:
+    operation = {
+        "single_point": "SP",
+        "optimize_geometry": "Opt",
+    }.get(step.tool)
+    if operation is None:
+        return False
+    method_profile = step.parameters.get("method_profile", "r2scan3c")
+    if not isinstance(method_profile, str):
+        return False
+    try:
+        profile = get_profile(method_profile)
+    except ValueError:
+        return False
+    return action in profile.repair_options_by_operation.get(operation, ())
 
 
 __all__ = [
