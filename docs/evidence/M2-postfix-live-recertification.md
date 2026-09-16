@@ -81,6 +81,6 @@ parameter extraction from that colloquial wording.
 ## Status
 
 The post-fix real-entry scenarios in the M2 repair plan have been exercised on
-the candidate. This document records implementation and test evidence only;
-**M2 remains awaiting the user's acceptance**. M1 acceptance remains separately
-pending.
+the candidate. The user reviewed this implementation and test evidence and
+explicitly accepted M2 on 2026-09-16 (Asia/Hong_Kong); M1 was accepted in the
+same instruction.

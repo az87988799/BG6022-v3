@@ -54,14 +54,22 @@ uv run python -m bg6022 --config config.toml run-tool optimize_geometry --xyz ex
 The historical one-core fixture, fake processes, and offline parser tests never
 count as the two required four-core real calculations.
 
+## Current milestone acceptance (2026-09-16)
+
+The user explicitly requested “验收M1和M2” after reviewing the pushed
+implementations and evidence. Both milestones are accepted on 2026-09-16
+(Asia/Hong_Kong). Their detailed records are [`docs/milestones/M1.md`](milestones/M1.md),
+[`docs/milestones/M2.md`](milestones/M2.md), and the linked evidence indexes.
+M3 has not started.
+
 ## M1 implementation status
 
-M1 implementation and evidence have been verified, but M1 is not marked
-accepted. Real Agent-path L1/L2 DeepSeek/PubChem/ORCA evidence was collected on
-2026-09-15; the user must review the pushed commit and evidence described in
+M1 implementation and evidence were verified, and the real Agent-path L1/L2
+DeepSeek/PubChem/ORCA evidence was collected on 2026-09-15. The user reviewed
+the pushed commit and evidence described in
 [`docs/milestones/M1.md`](milestones/M1.md) and
-[`docs/evidence/M1-agent-evidence.md`](evidence/M1-agent-evidence.md) before
-M1 is recorded as complete.
+[`docs/evidence/M1-agent-evidence.md`](evidence/M1-agent-evidence.md) and
+explicitly accepted M1 on 2026-09-16.
 
 The 2026-09-15 parameter/query repair follow-up was pushed as
 `09ccd60d9b9456a33fa55019dc93e3158458c80a`; its offline suite passed (104
@@ -130,12 +138,12 @@ Live subchecks were run separately from L1/L2:
 | ORCA Opt | Run `run_855cc60f6a8a4b538473be3db704e4f5`; `-76.418938721015 Eh`; convergence and geometry checks | passed |
 | Budget and cleanup | Both Runs record 4 cores / 1024 MB / MaxCore 192 / concurrency 1, matching `%pal nprocs 4` and `%maxcore 192`; both have `process_tree_empty=true` | passed |
 | ORCA probe | `doctor --probe-orca`; version 6.1.1, expected missing-input exit 2, clean process tree | passed |
-| Natural-language L1/L2 | See the 2026-09-15 live Agent-path evidence below; real DeepSeek plans and ORCA runs passed | passed; awaiting user acceptance |
+| Natural-language L1/L2 | See the 2026-09-15 live Agent-path evidence below; real DeepSeek plans and ORCA runs passed | passed; accepted by user on 2026-09-16 |
 
 The ORCA runs in the preceding table used direct Tool commands and are separate
 from L1/L2. Full real-Agent evidence and raw paths are recorded in
-[`docs/evidence/M1-agent-evidence.md`](evidence/M1-agent-evidence.md). M1
-remains pending the user's explicit acceptance.
+[`docs/evidence/M1-agent-evidence.md`](evidence/M1-agent-evidence.md). M1 was
+pending the user's explicit acceptance until the acceptance recorded above.
 
 ## 2026-09-15 live Agent-path acceptance evidence
 
@@ -158,7 +166,7 @@ started concurrently.
 | L1 normal Opt | Run `run_fee3692d4fa34244b4f68452062cb2e2`; PubChem water CID 962, 3-atom RDKit ETKDGv3 seed 61453 geometry, real LLM Plan, confirmation, ORCA 6.1.1; `-76.418938720831 Eh`; convergence, geometry consistency, input hashes, and process cleanup verified | passed |
 | L2 controlled failure and repair | Run `run_24854da4f43346cabe67a730bfa00891`; PubChem ethanol CID 702, 9-atom structure; real ORCA attempt 1 used `geom_maxiter=1`, exited normally but did not converge; validated restart candidate and clean process; real LLM selected the allowed `restart_optimization` patch to `geom_maxiter=100`; attempt 2 in the same Run converged at `-155.002350062010 Eh` with consistent geometry and clean process | passed |
 | Resource agreement | Both Runs: 4 cores, 1024 MB total, `%maxcore 192`, concurrency 1; generated inputs agree (`nprocs 4`, `%maxcore 192`) | passed |
-| Remaining M1 status | L1/L2 evidence exists; M1 has not been accepted by the user | awaiting user acceptance |
+| M1 status | L1/L2 evidence exists and was accepted by the user on 2026-09-16 | accepted |
 
 The L2 artifacts retain the initial failed result, restart-candidate hash,
 LLM-selected repair record, and both ORCA attempts. Earlier non-passing live
@@ -180,8 +188,8 @@ record user acceptance. The verified baseline is branch `codex/v3-m1-agent` at
 | ORCA installation | `E:\\orca\\orca.exe` exists; recorded run outputs identify ORCA 6.1.1 | verified |
 | L1 artifact integrity | For water Run `run_fee3692d4fa34244b4f68452062cb2e2`, every artifact's size and SHA-256 match its raw `run.json` index; the optimization succeeded, energy and geometry checks passed, and resources agree at 4 cores / 1024 MB / `%maxcore 192` / concurrency 1 | passed |
 | L2 artifact integrity and repair | For ethanol Run `run_24854da4f43346cabe67a730bfa00891`, every artifact's size and SHA-256 match its raw `run.json` index. Attempt 1 with `geom_maxiter=1` failed without success outputs or values and retained a hashed `restart_candidate`; the bounded restart changed only `geom_maxiter` to 100; attempt 2 succeeded and `current_results` binds to attempt 2. Resources agree at 4 cores / 1024 MB / `%maxcore 192` / concurrency 1 | passed |
-| M1 acceptance | Evidence has been verified, but the user has not accepted M1 | awaiting user acceptance |
-| Resource baseline | The master plan's 2048 MB / `%maxcore 384` is superseded for current work by the user's active project instructions: 1024 MB / `%maxcore 192`; Run snapshots and generated inputs agree | verified; M1 acceptance remains pending |
+| M1 acceptance | Evidence was verified and the user explicitly accepted M1 on 2026-09-16 | accepted |
+| Resource baseline | The master plan's 2048 MB / `%maxcore 384` is superseded for current work by the user's active project instructions: 1024 MB / `%maxcore 192`; Run snapshots and generated inputs agree | verified |
 
 ## M2 status
 
@@ -189,8 +197,8 @@ M2 has offline O1–O8 and final-candidate real Agent/ORCA recertification. The
 root-cause repairs pass 245 offline tests; P1–P4 and the final R1/R2 chains are
 recorded with credential-free file hashes. Safe stops for malformed state
 punctuation, unsupported targets, and ambiguous historical geometry remain in
-the evidence and are not counted as passes. M2 remains pending the user's
-acceptance; see
+the evidence and are not counted as passes. The user reviewed these records and
+explicitly accepted M2 on 2026-09-16; see
 [`docs/milestones/M2.md`](milestones/M2.md) and
 [`docs/evidence/M2-final-minimal-fix-acceptance.md`](evidence/M2-final-minimal-fix-acceptance.md),
 plus the [machine-readable run index](evidence/M2-final-live-run-index.json).

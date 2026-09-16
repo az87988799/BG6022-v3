@@ -1,7 +1,8 @@
 # BG6022-v3 M2 阶段验收记录
 
-**状态：等待用户验收。** 本记录完成候选版本的修复、验证和证据整理，
-不替用户将 M2 标记为已验收，也不授权进入 M3。
+**状态：M2 已由用户验收（2026-09-16，Asia/Hong_Kong）。** 本记录完成候选
+版本的修复、验证和证据整理；用户在本轮明确指令“验收M1和M2”后接受 M2。
+M1 的独立验收状态记录在 [`../milestones/M1.md`](../milestones/M1.md)。
 
 ## 验收候选与环境
 
@@ -9,7 +10,7 @@
 |---|---|
 | 分支 | `codex/v3-m2-implementation` |
 | 代码提交 | `b4d79e50c072e23a3d8f0939b379db4bfb808630` |
-| 最新验收记录提交 | `e222ebf15ee842fa4cfef0d6b67f3858dbea3261` |
+| 验收前候选提交 | `4055072d39b593325bf6fe58f8eff73fdb79462e`（本次用户验收记录随后的提交） |
 | 修复范围 | 确认页身份展示；未修改 ORCA、Planner、结构绑定或修复执行链 |
 | Python / RDKit | Python 3.11.4 / RDKit 2026.03.6 |
 | LLM | `deepseek-flash`；真实调用元数据保存在隔离会话记录中 |
@@ -60,7 +61,7 @@ Windows `doctor --probe-orca` 在上述隔离目录通过，记录了 ORCA 6.1.1
 | P1–P7 真实规划与确认边界 | [`M2-final-minimal-fix-acceptance.md`](M2-final-minimal-fix-acceptance.md) 及 [`M2-postfix-live-recertification.md`](M2-postfix-live-recertification.md)；未确认不启动 ORCA，历史结构和初始结构边界通过 |
 | B1–B8 修复回归与边界 | 同上证据和现有参数、LLM、执行契约测试；有限修复、虚频、预算、取消和重复确认均通过 |
 | R1–R5 真实 ORCA | 水 Opt→SP Run `run_8af28d593f034d0ea29ae933c88adf15`；乙醇失败→修复→Freq→SP Run `run_0f3504469c0740e5867fdf31eefa94a8`；其他 R1–R3 见 `M2-postfix-live-recertification.md`。原始 ORCA 输出、输入、结构、Hessian、Result、修复记录和进程清理均已核对 |
-| M1 前置能力 | [`M1-agent-evidence.md`](M1-agent-evidence.md)；真实自然语言计算、确认和有界修复证据存在，M1 仍等待用户验收 |
+| M1 前置能力 | [`M1-agent-evidence.md`](M1-agent-evidence.md)；真实自然语言计算、确认和有界修复证据存在，M1 已在本轮一并验收 |
 
 `fffadc7` 和本提交相对上一验收基线只涉及确认展示及测试；因此不因纯
 展示修复重算乙醇链或篡改原始 ORCA 证据。真实核心证据的代码、配置、
@@ -80,8 +81,8 @@ git diff --check                     passed
 ```
 
 确认展示专项测试为 `10 passed`。代码提交 `b4d79e5` 的 Windows CI
-35057582412，以及包含本验收记录的最新候选 HEAD `e222ebf` 的 CI
-[35057760444](https://github.com/az87988799/BG6022-v3/actions/runs/35057760444)
+35057582412，以及候选 HEAD `4055072` 的 CI
+[35057864871](https://github.com/az87988799/BG6022-v3/actions/runs/35057864871)
 均通过；依赖安装、pytest、Ruff、编译和构建全部成功。
 
 ## 判定
@@ -89,4 +90,6 @@ git diff --check                     passed
 - U1-1 至 U1-5：通过。
 - M2 核心离线、真实规划边界、真实 ORCA 和有界修复：沿已核对证据通过。
 - 阻断项：当前没有发现新的代码或证据阻断项。
-- 未完成事项：等待用户验收 M1 和 M2；本记录不声明用户已接受，也不将 M2 标记为完成。
+- M2 本轮交付结论：通过，已由用户验收。
+- 验收人及日期：用户；2026-09-16（Asia/Hong_Kong）。
+- 后续阶段：M3 尚未启动；M1 已在本轮一并验收。

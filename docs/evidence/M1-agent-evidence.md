@@ -1,7 +1,9 @@
 # M1 Agent evidence index
 
-This is an implementation-stage evidence index. It does not record user
-acceptance and does not claim a new live DeepSeek, PubChem, or ORCA run.
+This index records the implementation and live acceptance evidence. The user
+reviewed the pushed implementation and explicitly accepted M1 on 2026-09-16
+(Asia/Hong_Kong). It does not claim a new live DeepSeek, PubChem, or ORCA run
+beyond the runs listed below.
 
 ## Offline evidence
 
@@ -63,8 +65,8 @@ The required acceptance sequence is:
    `restart_optimization`, and verify a successful second ORCA attempt in the
    same Run.
 
-Until that sequence is reviewed and accepted by the user, M1 remains
-“implementation complete; live acceptance pending”.
+That sequence is recorded below and was reviewed by the user; M1 is now
+“implementation complete; accepted”.
 
 ## 2026-09-15 parameter/query repair follow-up
 
@@ -93,8 +95,9 @@ changed: 4 cores, 1024 MB total, `%maxcore 192`, concurrency 1.
 Environment check on 2026-09-15: the effective local config names
 `DEEPSEEK_API_KEY`, and that environment variable is unset. An ORCA executable
 path is configured, but no LLM, PubChem, or ORCA acceptance sequence was
-attempted for this follow-up. No L1/L2 live evidence is added here; M1 remains
-pending user review and acceptance.
+attempted for this follow-up. No L1/L2 live evidence is added here; M1 remained
+pending user review and acceptance in that dated follow-up, before the live
+evidence and current acceptance record below.
 
 ## 2026-09-15 acceptance-review repair and live subchecks
 
@@ -180,7 +183,8 @@ L2 (actual `geom_maxiter=1` failure, real diagnostic/restart candidate, real
 LLM-selected allowed repair, same-Run successful retry) remain unrun. The
 controlled historical failure in the M0 records and the direct ORCA runs above
 do not substitute for L2. SCF iteration-increase repair also remains without
-live validation. M1 is not marked complete; user acceptance remains required.
+live validation; it is outside the accepted L1/L2 evidence scope and remains
+bounded by the documented offline admission tests.
 
 ## 2026-09-15 credential-check correction and live Agent-path L1/L2
 
@@ -205,7 +209,7 @@ not started concurrently; no lock was bypassed and no user process was stopped.
 | L1 normal Opt | Run `run_fee3692d4fa34244b4f68452062cb2e2`; water from PubChem CID 962, H₂O, 3 atoms; RDKit 2026.03.6 ETKDGv3 seed 61453; real Plan and confirmation; ORCA 6.1.1 Opt result `-76.418938720831 Eh`; SCF/Opt convergence, geometry consistency, input hashes, exit code 0, `process_tree_empty=true`, and `stop_confirmed=true` | passed |
 | L2 controlled failure and restart | Run `run_24854da4f43346cabe67a730bfa00891`; ethanol from PubChem CID 702, C₂H₆O, 9 atoms; attempt 1 used `geom_maxiter=1`, ORCA exited normally but did not converge; parser recorded the iteration limit, consistent candidate, matching hashes, and clean process; real LLM selected the validated `restart_optimization` action with `geom_maxiter=100`; attempt 2 succeeded in the same Run at `-155.002350062010 Eh`, with convergence, geometry consistency, matching hashes, exit code 0, and clean process | passed |
 | Resource agreement | Both Run snapshots and inputs use 4 cores, 1024 MB total, `%maxcore 192`, concurrency 1; `%pal` / `nprocs 4` and `%maxcore 192` verified in both attempts | passed |
-| User milestone acceptance | Implementation and live L1/L2 evidence are ready for review; user has not yet accepted M1 | pending |
+| User milestone acceptance | Implementation and live L1/L2 evidence were ready for review; user acceptance was recorded on 2026-09-16 | accepted |
 
 All Run JSON, Results, source/geometry artifacts, repair record, and raw ORCA
 inputs/stdout/stderr are retained under
@@ -227,7 +231,15 @@ exposed missing `electronic_energy` and `molecular_geometry` semantic aliases;
 both are now covered by SP/Opt target-validation tests.
 
 Final offline validation after these live-discovered fixes: `119 passed, 3
-live deselected`; Ruff lint and format checks and `compileall` passed. These
-evidence additions do not mark M1 accepted. SCF-iteration-increase repair has
-not received separate live validation; M1 awaits the user's explicit review
-and acceptance.
+live deselected`; Ruff lint and format checks and `compileall` passed. The
+SCF-iteration-increase repair has not received separate live validation; it is
+outside the accepted L1/L2 evidence scope and remains bounded by the documented
+offline admission tests.
+
+## User acceptance record (2026-09-16)
+
+The user explicitly accepted M1 after reviewing the real DeepSeek/PubChem/ORCA
+L1 normal Opt and L2 controlled-failure/restart evidence, the artifact
+integrity checks, resource agreement, process cleanup, and offline validation.
+M2 was accepted in the same instruction; its acceptance record is
+[`M2-acceptance-b4d79e5.md`](M2-acceptance-b4d79e5.md).

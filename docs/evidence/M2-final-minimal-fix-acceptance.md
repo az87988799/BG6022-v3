@@ -106,5 +106,7 @@ records and raw artifacts with size and SHA-256 metadata.
 ## Acceptance state
 
 Implementation, offline validation, and final-candidate live evidence are
-recorded. M2 is **awaiting user acceptance** and is not marked complete. M1
-acceptance remains a separate pending decision.
+recorded. The user explicitly accepted M2 on 2026-09-16 (Asia/Hong_Kong), and
+M1 was accepted in the same instruction. This historical evidence document
+retains its original candidate details; the current acceptance record is
+[`M2-acceptance-b4d79e5.md`](M2-acceptance-b4d79e5.md).

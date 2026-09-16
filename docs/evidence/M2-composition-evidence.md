@@ -21,7 +21,7 @@ from the post-fix offline evidence.
 | Pre-fix local offline validation | `ruff check src tests`; `ruff format --check src tests`; `python -m compileall -q src start_chat.py tests`; `pytest -q -m "not live_llm and not live_pubchem and not live_orca"` → 182 passed, 3 deselected; `uv build` | passed on pre-fix baseline |
 | Pre-fix GitHub Actions | [offline run 34994186571](https://github.com/az87988799/BG6022-v3/actions/runs/34994186571), tested commit `9da71b0d8adae70a812a00704eb6544911d53e1b` | passed on baseline |
 | Final GitHub Actions | [offline run 35051882558](https://github.com/az87988799/BG6022-v3/actions/runs/35051882558), tested commit `01ceed43447cba48fb2f8b68c888f0c9e286e3f2` | passed |
-| User acceptance | M2 acceptance owner and date | pending user review |
+| User acceptance | M2 acceptance owner and date | User; 2026-09-16 (Asia/Hong_Kong) |
 
 Evidence root: `E:\BG6022-v3-data\m2_final_candidate_20260915_freqfix`.
 Machine-readable run index and file hashes:
@@ -133,13 +133,14 @@ the offline Freq-only Agent test and does not replace any R1–R4 Agent scenario
 | Pre-fix M2 implementation and offline/live evidence | historical baseline; not post-fix recertification |
 | Root-cause repair candidate commit | `cc11043` (final candidate; pushed; this cleanup follows it) |
 | Post-fix offline verification | 245 passed, 2 skipped, 1 deselected; lint, format, compile, package build, and diff checks passed |
-| Post-fix fresh real-entry recertification | final candidate recorded in [`M2-final-minimal-fix-acceptance.md`](M2-final-minimal-fix-acceptance.md); awaiting user acceptance |
+| Post-fix fresh real-entry recertification | final candidate recorded in [`M2-final-minimal-fix-acceptance.md`](M2-final-minimal-fix-acceptance.md); accepted by user on 2026-09-16 |
 | Evidence commits | `dd0ee54eb0d6b4fed714b73a065f0505b18ff0e1`, `03a421438af09154b567d0c49d7c50c2aacc0b30`, `e7b33d74d1e59f045ec66dbabcf2865bcdb0cda7` (post-fix live recertification; pushed) |
-| M2 user acceptance owner and date | pending user review |
-| M1 user acceptance | remains separately pending |
+| M2 user acceptance owner and date | User; 2026-09-16 (Asia/Hong_Kong) |
+| M1 user acceptance | User; 2026-09-16 (Asia/Hong_Kong) |
 
-Do not mark M2 accepted until the user has reviewed the pushed candidate and
-explicitly accepts it.
+The user reviewed the pushed candidate and explicitly accepted M2 on
+2026-09-16. This evidence index records that acceptance; it does not change
+the historical baseline evidence above.
 
 ## Post-fix live recertification
 
@@ -147,5 +148,5 @@ Fresh DeepSeek and ORCA results for P1–P4 and the final R1/R2 chains are
 recorded in [`M2-final-minimal-fix-acceptance.md`](M2-final-minimal-fix-acceptance.md),
 with every evidence-root file indexed by SHA-256 in
 [`M2-final-live-run-index.json`](M2-final-live-run-index.json). The earlier
-post-fix document remains historical evidence. This record does not constitute
-user acceptance of M2.
+post-fix document remains historical evidence. The user acceptance recorded in
+the current M2 acceptance record applies to this evidence set as well.
