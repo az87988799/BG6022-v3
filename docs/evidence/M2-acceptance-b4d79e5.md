@@ -8,7 +8,8 @@
 | 项目 | 值 |
 |---|---|
 | 分支 | `codex/v3-m2-implementation` |
-| 完整提交 | `b4d79e50c072e23a3d8f0939b379db4bfb808630` |
+| 代码提交 | `b4d79e50c072e23a3d8f0939b379db4bfb808630` |
+| 验收记录提交 | `b750a1f4b3329001c0bd59e8b0553773ef94dd2d` |
 | 修复范围 | 确认页身份展示；未修改 ORCA、Planner、结构绑定或修复执行链 |
 | Python / RDKit | Python 3.11.4 / RDKit 2026.03.6 |
 | LLM | `deepseek-flash`；真实调用元数据保存在隔离会话记录中 |
