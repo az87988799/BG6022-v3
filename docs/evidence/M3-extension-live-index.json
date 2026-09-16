@@ -3,13 +3,14 @@
   "status": "awaiting_user_acceptance",
   "candidate": {
     "branch": "codex/v3-m3-extension",
-    "implementation_sha": "733bd2ee8471071286be99ce50c299f8acead05d",
+    "implementation_sha": "1355cbf49e6158727ab3f9bee8a66c73de8ec53d",
     "commits": [
       "fa0a90a",
       "3e1f612",
       "a6830a5",
       "b5d37f0",
-      "733bd2e"
+      "733bd2e",
+      "1355cbf"
     ],
     "baseline_sha": "b5d37f07a040e7eb8dfc1dac7c06af51cf37f255"
   },
@@ -41,10 +42,10 @@
       "maxcore_mb": 192,
       "max_concurrent_jobs": 1
     },
-    "config_sha256": "1935185b5da3bdb83792021281fbe804adc5f7e8760ed506ef1d1a2be7d09736",
+    "config_sha256": "dcf2bdaa617cd1de56c20070adc00a2f2078b9a51cc96689beca11e7cf44374c",
     "uv_lock_sha256": "4ebcff69853f57680c368e061b57e1ea0a1cd2171ebfb8e426c95a5b40128bf3",
     "prompt_sha256": {
-      "src/bg6022/prompts/intake.md": "8717035f102e879f25b9c7d3b4b910f0d58f3268234c39aad609c3819660f92d",
+      "src/bg6022/prompts/intake.md": "29e3bdafec7d295962e6b4c5a0f89232001d2219b1d2c9ae8bc7819975393572",
       "src/bg6022/prompts/planner.md": "ca3a15d284a306d1675991fad8d523d0ebdec077e136044dbd4284dc1393201e"
     },
     "data_root": "E:\\BG6022-v3-data"
@@ -56,6 +57,89 @@
     "compileall": "passed",
     "package_wheel": "passed",
     "diff_check": "passed"
+  },
+  "latest_validation": {
+    "implementation_sha": "1355cbf49e6158727ab3f9bee8a66c73de8ec53d",
+    "offline_gate": {
+      "pytest": "312 passed, 16 skipped",
+      "targeted_review_regressions": "80 passed",
+      "ruff_check": "passed",
+      "ruff_format_check": "passed",
+      "compileall": "passed",
+      "package_wheel": "passed (pip wheel --no-deps --no-build-isolation)"
+    },
+    "live_llm": {
+      "test": "tests/live/test_generic_output_live.py::test_live_llm_geometry_angle_and_csv_followup",
+      "model": "deepseek-flash",
+      "calls": 5,
+      "finish_reasons": ["stop"],
+      "case": {
+        "id": "V21-geometry-angle-current",
+        "input": "registered geometry_angle Tool with inline three-atom XYZ; measure the angle, return selected atom records and the real CSV file",
+        "run_id": "run_1b281b34916f45008b063dd545427bb1",
+        "tool": "geometry_angle",
+        "result_status": "succeeded",
+        "artifact_sha256": "f9558316627dd855efbb503f27c38d2193ce85bbc830421e0e7751cfa5c037ae",
+        "first_delivery": "complete",
+        "followup_input": "把刚才的 CSV 内容给我",
+        "followup_delivery": "complete"
+      },
+      "evidence_file": "E:\\BG6022-v3-data\\m3-llm-evidence\\V21-geometry-angle.json",
+      "credential_policy": "DEEPSEEK_API_KEY was injected into the current process only; no secret was recorded"
+    },
+    "live_orca": {
+      "test": "tests/live/test_m3_extension_live.py::test_live_b3lyp_water_opt_freq_independent_sp",
+      "run_id": "run_b37ef0a1320144309e4192e4ae4094eb",
+      "orca_version": "6.1.1",
+      "method_profile": "b3lyp_d3bj_def2svp",
+      "environment": "gas",
+      "resource_budget": {
+        "cores": 4,
+        "memory_mb": 1024,
+        "maxcore_mb": 192,
+        "max_concurrent_jobs": 1
+      },
+      "steps": {
+        "opt": "succeeded",
+        "freq": "succeeded",
+        "sp": "succeeded"
+      },
+      "values": {
+        "opt_final_electronic_energy_Eh": -76.321846986879,
+        "sp_electronic_energy_Eh": -76.321843874159,
+        "frequency_complete": "passed"
+      },
+      "files": {
+        "run.json": {
+          "size": 18438,
+          "sha256": "7e7e672908689e363fed43c1b2bc7706243c5c3da0dcc3cd22f390af5e0c95bc"
+        },
+        "opt/attempt-01/input.inp": {
+          "size": 111,
+          "sha256": "81c845da0a8d88ceacd86dbc7f88ba263f2706435023a8daafc8218d9f8ea496"
+        },
+        "opt/attempt-01/geometry.xyz": {
+          "size": 168,
+          "sha256": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2"
+        },
+        "opt/attempt-01/result.json": {
+          "size": 12157,
+          "sha256": "bff208e95f4681d4d00deffb8e0f4ed7aa27079a036310acf0f1e4e624653d65"
+        },
+        "freq/attempt-01/result.json": {
+          "size": 13595,
+          "sha256": "59d9d6e14d9c665d43e2bd6f25e65118f1823930d0b653091b26fc209d996880"
+        },
+        "sp/attempt-01/input.inp": {
+          "size": 110,
+          "sha256": "eb0dd5c4ff970a2b5720b6d4f18972bad69287f950f3e6d6afec876437893f6e"
+        },
+        "sp/attempt-01/result.json": {
+          "size": 9818,
+          "sha256": "1c7cd554ff15ac5432f9a92c0f62ebe5ab8c0958a4ba1e4b01ed2464df4239cf"
+        }
+      }
+    }
   },
   "cases": [
     {
