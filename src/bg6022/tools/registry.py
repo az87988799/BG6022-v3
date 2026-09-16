@@ -175,8 +175,24 @@ class ToolRegistry:
         parser change.
         """
 
+        return self._index_parameter_fields(self.tools_for_request(operations, requested_results))
+
+    def request_index_parameter_fields_for_plan(self, plan: Plan) -> set[str]:
+        """Return index fields owned by the Tools in an already-built Plan.
+
+        A parameter-only continuation commonly omits operations and result
+        targets from its new Intake payload.  In that case the current Plan is
+        the authoritative scope; deriving fields from the new Intake would
+        incorrectly turn an empty field set into permission to coerce an
+        invalid index.
+        """
+
+        return self._index_parameter_fields([self.get(step.tool) for step in plan.steps])
+
+    @staticmethod
+    def _index_parameter_fields(tools: Iterable[Tool]) -> set[str]:
         fields: set[str] = set()
-        for tool in self.tools_for_request(operations, requested_results):
+        for tool in tools:
             properties = tool.parameter_schema.get("properties", {})
             if not isinstance(properties, dict):
                 continue

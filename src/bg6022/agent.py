@@ -291,15 +291,18 @@ class Agent:
                             )
 
             current = self._coerce_run(None)
+            index_parameter_names = (
+                self.registry.request_index_parameter_fields_for_plan(current.plan)
+                if current is not None and current.status == "waiting"
+                else self.registry.request_index_parameter_fields(
+                    intake.operations, intake.requested_results
+                )
+            )
             normalized_parameters = normalize_user_explicit_parameters(
                 text,
                 intake.explicit_parameters,
                 intake.electronic_state_candidates,
-                parameter_names=tuple(
-                    self.registry.request_index_parameter_fields(
-                        intake.operations, intake.requested_results
-                    )
-                ),
+                parameter_names=tuple(index_parameter_names),
             )
             explicit_parameters = normalized_parameters.explicit_parameters
             blocking = intake_blocking_requirements(intake, self.registry)
@@ -1937,14 +1940,9 @@ class Agent:
             return AgentResponse(self._waiting_text(run), run=run, result=result)
         structure = self._result_structure(run, result)
         if run.status in {"succeeded", "failed", "cancelled", "interrupted"}:
-            unavailable: list[str] = []
-            if run.status == "succeeded":
-                facts, files, unavailable = self._collect_requested_outputs(
-                    run, result, cancel=cancel
-                )
-            else:
-                facts = self._current_run_facts(run)
-                files = self._files_for_facts(facts, cancel=cancel)
+            facts, files, unavailable = self._collect_requested_outputs(run, result, cancel=cancel)
+            if run.status != "succeeded" and run.plan.requested_results:
+                facts, files = self._include_intermediate_facts(run, facts, files, cancel=cancel)
             default_text = render_run(
                 run,
                 result,
@@ -1953,40 +1951,21 @@ class Agent:
                 **self._failure_render_context(run),
             )
             delivery: dict[str, Any] = {}
-            if facts:
+            status_override = "cancelled" if run.status == "cancelled" else None
+            if facts or unavailable or status_override is not None:
                 rendered_facts, delivery = self._render_verified_delivery(
                     run,
                     facts,
                     files,
                     unavailable=unavailable,
                     cancel=cancel,
+                    status_override=status_override,
                 )
                 default_text = (
                     rendered_facts
                     if run.status == "succeeded"
                     else f"{default_text}\n{rendered_facts}"
                 )
-            elif unavailable:
-                if run.status == "succeeded":
-                    default_text = (
-                        "计算已完成，但请求的输出当前不可交付；未重新计算。\n"
-                        f"尚未交付：{'；'.join(unavailable)}。"
-                    )
-                else:
-                    default_text = f"{default_text}\n尚未交付：{'；'.join(unavailable)}。"
-                delivery = {
-                    "status": "unavailable" if run.status == "succeeded" else "partial",
-                    "rendered_refs": [],
-                    "unavailable_targets": list(unavailable),
-                    "outputs": [],
-                }
-            elif run.status == "cancelled":
-                delivery = {
-                    "status": "cancelled",
-                    "rendered_refs": [],
-                    "unavailable_targets": [],
-                    "outputs": [],
-                }
             return AgentResponse(
                 default_text,
                 run=run,
@@ -2001,6 +1980,46 @@ class Agent:
                 result=result,
             )
         return AgentResponse(render_run(run, registry=self.registry), run=run)
+
+    def _include_intermediate_facts(
+        self,
+        run: Run,
+        facts: list[dict[str, Any]],
+        files: list[dict[str, Any]],
+        *,
+        cancel: Event | None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Display verified intermediate facts without treating them as targets."""
+
+        current = self._current_run_facts(run)
+        if not current:
+            return facts, files
+        combined = list(facts)
+        existing = {(fact.get("step_id"), fact.get("kind"), fact.get("name")) for fact in combined}
+        used_refs = {
+            str(fact.get("output_ref"))
+            for fact in combined
+            if isinstance(fact.get("output_ref"), str)
+        }
+        next_index = 1
+        for fact in current:
+            identity = (fact.get("step_id"), fact.get("kind"), fact.get("name"))
+            if identity in existing:
+                continue
+            while f"out_{next_index}" in used_refs:
+                next_index += 1
+            optional = dict(fact)
+            optional["output_ref"] = f"out_{next_index}"
+            combined.append(optional)
+            existing.add(identity)
+            used_refs.add(optional["output_ref"])
+            next_index += 1
+        if len(combined) == len(facts):
+            return facts, files
+        # Rebuild descriptors so optional port facts and target facts share the
+        # same stable output references.  Target coverage remains represented
+        # by the separate ``unavailable`` list passed to the renderer.
+        return combined, self._files_for_facts(combined, cancel=cancel)
 
     def _collect_requested_outputs(
         self, run: Run, result: Result | None = None, *, cancel: Event | None = None
@@ -2302,6 +2321,7 @@ class Agent:
         cancel: Event | None,
         question: str | None = None,
         preferences: Mapping[str, Any] | None = None,
+        status_override: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
         for index, fact in enumerate(facts, start=1):
             fact.setdefault("output_ref", f"out_{index}")
@@ -2323,11 +2343,18 @@ class Agent:
         delivery_preferences = dict(
             preferences if preferences is not None else run.request.output_preferences
         )
+        cancelled = status_override == "cancelled" or (cancel is not None and cancel.is_set())
         required = [str(fact["output_ref"]) for fact in renderable]
         if not required:
-            if cancel is not None and cancel.is_set():
+            if cancelled:
+                missing = (
+                    f"\n尚未交付：{'；'.join(unavailable_targets)}；未重新计算。"
+                    if unavailable_targets
+                    else ""
+                )
                 return (
-                    "本次结果呈现已取消。已完成的科学结果仍保留；本次未将其标记为完整交付。",
+                    "本次结果呈现已取消。已完成的科学结果仍保留；本次未将其标记为完整交付。"
+                    + missing,
                     {
                         "status": "cancelled",
                         "rendered_refs": [],
@@ -2335,8 +2362,13 @@ class Agent:
                         "outputs": [],
                     },
                 )
+            missing = (
+                f"\n尚未交付：{'；'.join(unavailable_targets)}；未重新计算。"
+                if unavailable_targets
+                else ""
+            )
             return (
-                "本次目标暂无可交付的当前文件或结果；未重新计算。",
+                "本次目标暂无可交付的当前文件或结果；未重新计算。" + missing,
                 {
                     "status": "unavailable",
                     "rendered_refs": [],
@@ -2346,7 +2378,7 @@ class Agent:
             )
         outputs = self._answer_output_map(renderable, files)
         draft: AnswerOutput | None = None
-        if cancel is None or not cancel.is_set():
+        if not cancelled:
             try:
                 draft, _error = self._compose_answer_draft(
                     question or run.request.description,
@@ -2361,7 +2393,6 @@ class Agent:
                 )
             except LlmError:
                 draft = None
-        cancelled = cancel is not None and cancel.is_set()
         fallback = AnswerOutput(
             action="respond",
             sections=[
@@ -3574,19 +3605,29 @@ class Agent:
             self._record_response(response, cancel=cancel)
             return response
         selected_facts: list[dict[str, Any]] = []
+        unavailable: list[str] = []
         for target in selection.targets:
             fact = self._load_query_fact(target.subject_ref, target.property)
             if fact is None:
-                text = "所选任务尚未得到所问性质；已保存的其他性质不能替代它。"
-                response = AgentResponse(text)
-                self._record_response(response, cancel=cancel)
-                return response
+                unavailable.append(_query_target_label(target, catalog))
+                continue
             selected_facts.append(fact)
         targets = [target.model_dump(mode="python") for target in selection.targets]
-        facts, covered = select_facts_for_question(targets, selected_facts)
-        if not covered:
-            text = "本次任务尚未得到所问性质；已保存的其他性质不能替代它。"
-            response = AgentResponse(text)
+        facts, _covered = select_facts_for_question(targets, selected_facts)
+        if not facts:
+            status = "cancelled" if cancel is not None and cancel.is_set() else "unavailable"
+            text = "本次所选结果当前不可交付；未重新计算。"
+            if unavailable:
+                text += f"\n尚未交付：{'；'.join(unavailable)}。"
+            response = AgentResponse(
+                text,
+                delivery={
+                    "status": status,
+                    "rendered_refs": [],
+                    "unavailable_targets": unavailable,
+                    "outputs": [],
+                },
+            )
             self._record_response(response, cancel=cancel)
             return response
         for index, fact in enumerate(facts, start=1):
@@ -3612,7 +3653,7 @@ class Agent:
             run,
             facts,
             files,
-            unavailable=[],
+            unavailable=unavailable,
             cancel=cancel,
             question=question,
             preferences=preferences,
@@ -3646,6 +3687,19 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 def _target_identity(target: Any, kind: str | None, name: str | None) -> str:
     step_id = getattr(target, "step_id", None) or "unbound"
     return f"{step_id}:{kind or 'unknown'}:{name or 'unknown'}"
+
+
+def _query_target_label(target: Any, catalog: list[Mapping[str, Any]]) -> str:
+    subject_ref = getattr(target, "subject_ref", None)
+    property_name = getattr(target, "property", None)
+    for item in catalog:
+        if not isinstance(item, Mapping) or item.get("subject_ref") != subject_ref:
+            continue
+        result = item.get("result")
+        if not isinstance(result, Mapping) or result.get("property") != property_name:
+            continue
+        return str(result.get("label") or property_name)
+    return str(property_name or "所选结果")
 
 
 def path_label(artifact: Any) -> str:

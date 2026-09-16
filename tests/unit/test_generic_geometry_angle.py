@@ -5,6 +5,7 @@ from pathlib import Path
 from bg6022.agent import Agent
 from bg6022.config import load_config
 from bg6022.models import InputReference, Plan, Request, ResultTarget, Run, Step
+from bg6022.planner import QuerySelection, QueryTarget
 from bg6022.session import create_run, register_bytes_artifact, save_run, utc_now
 from bg6022.tools.registry import ToolRegistry, build_registry
 from tests.support.geometry_angle_tool import make_geometry_angle_tool
@@ -109,11 +110,45 @@ def test_geometry_angle_proves_scalar_records_and_csv_delivery(tmp_path: Path) -
     assert "atom_index,element,x,y,z,raw_line" in response.text
     assert "file_1" not in response.text
 
+    catalog = agent._build_query_catalog()
+    angle_entry = next(item for item in catalog if item["result"]["property"] == "angle")
+    report_entry = next(item for item in catalog if item["result"]["property"] == "atom_report")
+    selection = QuerySelection(
+        status="selected",
+        targets=[
+            QueryTarget(
+                subject_ref=angle_entry["subject_ref"],
+                property="angle",
+                evidence="原子夹角",
+            ),
+            QueryTarget(
+                subject_ref=report_entry["subject_ref"],
+                property="atom_report",
+                evidence="原子坐标 CSV",
+            ),
+        ],
+    )
+
     # A missing current artifact is a delivery failure, not a successful
     # rerun or a fabricated file link.
     report_path = Path(config.data_root_path, "runs", run.id, report.relative_path)
     report_path.unlink()
+    partial_query = agent._answer_context(
+        "给我原子夹角和原子坐标 CSV",
+        selection=selection,
+        catalog=catalog,
+    )
+    assert partial_query.delivery["status"] == "partial"
+    assert "原子夹角" in partial_query.text
+    assert "尚未交付" in partial_query.text
+
     missing = agent._response_for_run(run, result)
     assert missing.delivery["status"] == "partial"
     assert "未重新计算" in missing.text
     assert "尚未交付" in missing.text
+
+    cancelled_run = run.model_copy(update={"status": "cancelled", "current_results": {}})
+    cancelled = agent._response_for_run(cancelled_run, None)
+    assert cancelled.delivery["status"] == "cancelled"
+    assert cancelled.delivery["rendered_refs"] == []
+    assert "complete" not in cancelled.delivery["status"]

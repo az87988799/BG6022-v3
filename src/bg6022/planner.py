@@ -361,6 +361,7 @@ def intake_message(
         candidate_refs,
         message=message,
         result_catalog=catalog,
+        capability_catalog=capabilities,
     )
     if inline_xyz is not None and output.intent == "chemistry_compute":
         xyz_text, _atom_count = inline_xyz
@@ -726,23 +727,33 @@ def _request_output_preferences(message: str, value: Mapping[str, Any] | None) -
     """
 
     preferences = validate_output_preferences(value)
-    explicit_link_request = bool(
+    explicit_link_only = bool(
         re.search(
-            r"(?:仅|只|不要正文|不显示正文|不展示正文|只给).{0,8}(?:链接|链结|路径|文件入口)|"
+            r"(?:仅|只|只需|只要|只给|仅需|仅要).{0,12}(?:链接|链结|路径|文件入口)|"
+            r"(?:不要|不显示|不展示|不提供).{0,8}(?:正文|文件内容|内容)|"
             r"(?:link\s*only|path\s*only|only\s+(?:the\s+)?(?:link|path))",
             message,
             re.IGNORECASE,
         )
-        or (
-            re.search(r"链接|链结|文件路径|文件入口|\blink\b|\bpath\b", message, re.IGNORECASE)
-            and not re.search(
-                r"(?:不要|不需要|不用).{0,4}(?:链接|链结|路径|入口|link|path)",
-                message,
-                re.IGNORECASE,
-            )
+    )
+    explicit_body_request = bool(
+        re.search(
+            r"正文|文件内容|内容|file\s+(?:content|body)|show\s+(?:the\s+)?content|"
+            r"display\s+(?:the\s+)?content|include\s+(?:the\s+)?content",
+            message,
+            re.IGNORECASE,
+        )
+        and not re.search(
+            r"(?:不要|不显示|不展示|不提供).{0,8}(?:正文|文件内容|内容|file\s+(?:content|body))",
+            message,
+            re.IGNORECASE,
         )
     )
-    if preferences.get("file_content") == "link_only" and not explicit_link_request:
+    if explicit_body_request:
+        # An explicit body request wins over a model-proposed link-only view,
+        # including “正文和文件路径都给我”.
+        preferences["file_content"] = "show"
+    elif preferences.get("file_content") == "link_only" and not explicit_link_only:
         preferences["file_content"] = "auto"
     return preferences
 
@@ -1634,6 +1645,7 @@ def _coerce_intake_output(
     *,
     message: str,
     result_catalog: list[Mapping[str, Any]] | None = None,
+    capability_catalog: list[Mapping[str, Any]] | None = None,
 ) -> IntakeOutput:
     payload = (
         value.model_dump(mode="python", exclude_unset=True)
@@ -1672,6 +1684,7 @@ def _coerce_intake_output(
         candidate_refs,
         message=message,
         result_catalog=result_catalog,
+        capability_catalog=capability_catalog,
     )
 
 
@@ -1681,6 +1694,7 @@ def _validate_query_selection(
     *,
     message: str,
     result_catalog: list[Mapping[str, Any]] | None = None,
+    capability_catalog: list[Mapping[str, Any]] | None = None,
 ) -> IntakeOutput:
     selection = output.query_selection
     if output.intent != "context_query":
@@ -1724,16 +1738,19 @@ def _validate_query_selection(
     invalid_evidence = False
     if selection.status == "selected":
         for target in selection.targets:
-            followup = (
-                target.reference_mode == "followup"
-                and (target.subject_ref, target.property) in recent_pairs
-                and _followup_reference_is_safe(
+            if target.reference_mode == "followup":
+                followup = (
+                    target.subject_ref,
+                    target.property,
+                ) in recent_pairs and _followup_reference_is_safe(
                     target,
                     message,
                     result_catalog,
+                    capability_catalog=capability_catalog,
                 )
-            )
-            if followup:
+                if not followup:
+                    invalid_evidence = True
+                    break
                 continue
             if not _query_property_evidence_matches(
                 target.property,
@@ -1756,43 +1773,173 @@ def _followup_reference_is_safe(
     target: QueryTarget,
     message: str,
     result_catalog: list[Mapping[str, Any]] | None,
+    *,
+    capability_catalog: list[Mapping[str, Any]] | None = None,
 ) -> bool:
-    """Allow a follow-up only for an explicit conversational reference.
+    """Allow a follow-up only for one recent result without a new request.
 
     A recent delivery is necessary but not sufficient: a new molecule, file,
     negation, or scientific property in the current message must be handled
     as an explicit query instead of inheriting the old result.
     """
 
-    if not re.search(
+    recent_pairs = {
+        (str(item.get("subject_ref")), str(result.get("property")))
+        for item in result_catalog or []
+        if isinstance(item, Mapping)
+        and item.get("recently_delivered") is True
+        and isinstance(result := item.get("result"), Mapping)
+        and isinstance(item.get("subject_ref"), str)
+        and isinstance(result.get("property"), str)
+    }
+    if (target.subject_ref, target.property) not in recent_pairs:
+        return False
+    if _followup_has_new_request(
+        target,
+        message,
+        result_catalog,
+        capability_catalog=capability_catalog,
+    ):
+        return False
+
+    target_metadata = _query_property_metadata(target.property, result_catalog)
+    if _query_property_evidence_matches(
+        target.property,
+        target.evidence,
+        message,
+        metadata=target_metadata,
+    ):
+        return True
+
+    # A unique recent delivery is a sufficient conversational focus for an
+    # implicit question such as “是什么告诉我”.  If several recent
+    # subject/property pairs exist, the model must provide an explicit
+    # property reference instead of guessing which one “what” means.
+    has_reference_marker = re.search(
         r"刚才|上次|上一条|前面|刚生成|刚输出|刚才的|同一|这个结果|该结果|"
         r"previous|earlier|above|that result|same result|again",
         message,
         re.IGNORECASE,
+    )
+    return has_reference_marker is not None or len(recent_pairs) == 1
+
+
+def _followup_has_new_request(
+    target: QueryTarget,
+    message: str,
+    result_catalog: list[Mapping[str, Any]] | None,
+    *,
+    capability_catalog: list[Mapping[str, Any]] | None = None,
+) -> bool:
+    """Detect a new subject/property before a follow-up can inherit focus."""
+
+    # These are request-level transitions, not molecule or Tool names.  The
+    # bounded suffix check avoids treating a harmless view change such as
+    # “改成表格” as a new scientific request.
+    replacement = re.search(
+        r"(?:改成|改为|换成|换为|变成|替换为|instead\s+of|rather\s+than|"
+        r"switch\s+to)\s*(?P<suffix>[^，,。！？!?;；\n]{1,64})",
+        message,
+        re.IGNORECASE,
+    )
+    if replacement is not None:
+        suffix = replacement.group("suffix")
+        if not re.search(
+            r"表格|链接|链结|路径|文件入口|正文|内容|link|path|table|content|body|"
+            r"json|csv",
+            suffix,
+            re.IGNORECASE,
+        ):
+            return True
+
+    if _message_mentions_other_property(
+        target.property,
+        message,
+        result_catalog=result_catalog,
+        capability_catalog=capability_catalog,
     ):
-        return False
-    for item in result_catalog or []:
+        return True
+
+    # A negated old result followed by a new request must never inherit the
+    # old binding, even when the new property is not in the saved catalog.
+    if re.search(
+        r"不要|不用|不需要|不想要|不是|并非|do\s+not|don't|without|instead",
+        message,
+        re.IGNORECASE,
+    ) and re.search(
+        r"我要|我需要|请给|需要|想要|want|need|give|show|provide|return",
+        message,
+        re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
+def _message_mentions_other_property(
+    target_property: str,
+    message: str,
+    *,
+    result_catalog: list[Mapping[str, Any]] | None,
+    capability_catalog: list[Mapping[str, Any]] | None,
+) -> bool:
+    descriptors: list[tuple[str, Mapping[str, Any]]] = []
+    for item in [*(result_catalog or []), *(capability_catalog or [])]:
         if not isinstance(item, Mapping):
             continue
-        result = item.get("result")
+        result = item.get("result") if isinstance(item.get("result"), Mapping) else item
         if not isinstance(result, Mapping):
             continue
         property_name = result.get("property")
-        if not isinstance(property_name, str) or property_name == target.property:
+        if not isinstance(property_name, str) or not property_name:
             continue
-        evidence = str(result.get("label") or property_name)
-        if _query_property_evidence_matches(
-            property_name,
-            evidence,
-            message,
-            metadata={
-                key: result[key]
-                for key in ("label", "description")
-                if isinstance(result.get(key), str)
-            },
+        metadata = {
+            key: result[key] for key in ("label", "description") if isinstance(result.get(key), str)
+        }
+        descriptors.append((property_name, metadata))
+
+    for property_name, metadata in descriptors:
+        if property_name == target_property:
+            continue
+        for evidence in (
+            property_name.replace("_", " "),
+            str(metadata.get("label", "")),
+            str(metadata.get("description", "")),
         ):
-            return False
-    return True
+            if evidence and _query_property_evidence_matches(
+                property_name, evidence, message, metadata=metadata
+            ):
+                return True
+
+    # Keep the fallback vocabulary bounded to scientific property concepts
+    # already handled by the public query contract.  Future Tool-specific
+    # labels still flow through the metadata path above.
+    generic_cues = (
+        ("free_energy", r"自由能|free[\s_-]*energy"),
+        ("zero_point_energy", r"零点(?:能)?|zero[\s_-]*point|zpe"),
+        ("frequency", r"频率|frequenc(?:y|ies)"),
+        ("electronic_energy", r"电子能|electronic[\s_-]*energy|(?<!自由)能量|(?<!free )energy"),
+        ("distance", r"距离|间距|distance|bond[ -]?length"),
+        ("molecular_geometry", r"结构|几何|xyz|坐标|geometry|structure"),
+        ("angle", r"角度|夹角|张角|angle|degree"),
+        ("atom_count", r"原子数|atom[ _-]?count|number of atoms"),
+    )
+    target_metadata = next(
+        (metadata for property_name, metadata in descriptors if property_name == target_property),
+        {},
+    )
+    for property_name, pattern in generic_cues:
+        if property_name == target_property:
+            continue
+        for match in re.finditer(pattern, message, re.IGNORECASE):
+            evidence = match.group(0)
+            if not _query_property_evidence_matches(
+                target_property,
+                evidence,
+                message,
+                metadata=target_metadata,
+            ):
+                return True
+    return False
 
 
 def _query_property_metadata(

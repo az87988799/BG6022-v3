@@ -108,6 +108,12 @@ def test_distance_tool_is_operation_free_and_declares_only_indices() -> None:
     assert tool.requires_compute_permission is False
     assert tool.execution_budget == "none"
     assert registry.request_parameter_fields([], ["interatomic_distance"]) == {"atom_i", "atom_j"}
+    plan = Plan(
+        id="distance-index-scope",
+        request_id="distance-index-scope-request",
+        steps=[Step(id="distance", tool="geometry_distance")],
+    )
+    assert registry.request_index_parameter_fields_for_plan(plan) == {"atom_i", "atom_j"}
     distance_capability = next(
         item for item in registry.result_capabilities() if item["name"] == "interatomic_distance"
     )
@@ -513,6 +519,37 @@ def test_waiting_parameter_update_precedes_intake_blocking(monkeypatch, tmp_path
     assert response.run.id == run.id
     assert "rejected" in response.text
     assert response.run.model_dump(mode="json") == before
+    assert run.model_dump(mode="json") == before
+    assert run.attempts == []
+
+
+@pytest.mark.parametrize(
+    "message", ["atom_i=2.5", "atom_i=2e0", "atom_i=2/3", "不要 atom_i=2", "atom_i=2, atom_i=3"]
+)
+def test_waiting_parameter_scope_rejects_non_integer_user_text(
+    monkeypatch, tmp_path: Path, message: str
+) -> None:
+    agent, run = _opt_to_distance_chat_run(
+        tmp_path, atom_j=3, session_id=f"distance-index-reject-{len(message)}"
+    )
+    agent.advance(run)
+    assert run.status == "waiting"
+    agent._session["active_run_id"] = run.id
+    agent._save_session()
+    before = run.model_dump(mode="json")
+
+    def blocked_intake(*_args, **_kwargs) -> IntakeOutput:
+        return IntakeOutput(
+            intent="chemistry_compute",
+            explicit_parameters={"atom_i": 2},
+            missing_fields=["atom_i", "atom_j"],
+        )
+
+    monkeypatch.setattr("bg6022.agent.intake_message", blocked_intake)
+    response = agent.handle_message(message)
+
+    assert response.run is not None
+    assert "没有更新" in response.text or "rejected" in response.text
     assert run.model_dump(mode="json") == before
     assert run.attempts == []
 

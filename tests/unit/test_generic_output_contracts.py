@@ -88,6 +88,12 @@ def test_generic_property_evidence_accepts_declared_semantic_synonyms() -> None:
         "把原子坐标报告给我",
         metadata={"label": "原子坐标 CSV", "description": "所选原子的实际坐标表文件"},
     )
+    assert property_evidence_matches(
+        "angle",
+        "张角",
+        "请告诉我这三个原子的张角",
+        metadata={"label": "原子夹角", "description": "以第二个原子为顶点的夹角"},
+    )
 
 
 @pytest.mark.parametrize("raw", ["2.5", "2e0", "2/3", "0", "-1"])
@@ -250,6 +256,55 @@ def test_followup_query_requires_recent_delivery_and_conversational_reference() 
     assert explicit.query_selection.status == "clarify"
 
 
+def test_followup_focus_accepts_implicit_question_but_rejects_new_request() -> None:
+    catalog = [
+        {
+            "subject_ref": "t1",
+            "recently_delivered": True,
+            "result": {
+                "property": "molecular_geometry",
+                "label": "初始 XYZ 结构文件",
+                "description": "由已验证分子生成的初始结构",
+            },
+        }
+    ]
+
+    def output(evidence: str = "是什么") -> IntakeOutput:
+        return IntakeOutput(
+            intent="context_query",
+            query_selection=QuerySelection(
+                status="selected",
+                targets=[
+                    QueryTarget(
+                        subject_ref="t1",
+                        property="molecular_geometry",
+                        evidence=evidence,
+                        reference_mode="followup",
+                    )
+                ],
+            ),
+        )
+
+    implicit = _validate_query_selection(
+        output(),
+        ("t1",),
+        message="是什么告诉我",
+        result_catalog=catalog,
+    )
+    assert implicit.query_selection is not None
+    assert implicit.query_selection.status == "selected"
+
+    for message in ("不要刚才的内容，我要自由能", "把刚才的结果改成乙醇的XYZ给我"):
+        rejected = _validate_query_selection(
+            output("刚才的内容"),
+            ("t1",),
+            message=message,
+            result_catalog=catalog,
+        )
+        assert rejected.query_selection is not None
+        assert rejected.query_selection.status == "clarify"
+
+
 def test_output_views_preserve_context_and_require_explicit_link_only() -> None:
     outputs = {
         "out_1": {
@@ -360,4 +415,10 @@ def test_model_cannot_force_link_only_without_user_request() -> None:
     assert (
         _request_output_preferences("只给文件路径", {"file_content": "link_only"})["file_content"]
         == "link_only"
+    )
+    assert (
+        _request_output_preferences("把 XYZ 正文和文件路径都给我", {"file_content": "link_only"})[
+            "file_content"
+        ]
+        == "show"
     )

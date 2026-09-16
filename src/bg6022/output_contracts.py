@@ -307,7 +307,7 @@ def _meaningful_tokens(value: str) -> list[str]:
 # groups only bridge ordinary language to the public contract (for example
 # ``角度`` and ``夹角`` or ``报告`` and ``文件``).
 _SEMANTIC_CONCEPTS = (
-    frozenset({"角度", "夹角", "angle", "degree"}),
+    frozenset({"角", "角度", "夹角", "angle", "degree"}),
     frozenset({"报告", "report", "csv", "file", "文件", "表格"}),
     frozenset({"结构", "geometry", "structure", "xyz", "坐标"}),
     frozenset({"距离", "间距", "distance", "length", "长度"}),
