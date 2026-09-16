@@ -36,7 +36,7 @@ parameter precedence, immutable input bytes/hash, strict angstrom query values,
 B3LYP rendering, profile-aware repair scope, configured default precedence, and
 result presentation.
 
-The complete offline regression command passed 270 tests with 9 opt-in live
+The complete offline regression command passed 272 tests with 9 opt-in live
 tests deselected. Ruff lint and format checks, Python compilation, package wheel
 build, and `git diff --check` passed. `uv sync`/`uv build` were not available on
 this host; this environment limitation is recorded rather than hidden.

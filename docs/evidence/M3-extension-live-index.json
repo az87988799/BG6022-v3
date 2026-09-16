@@ -45,7 +45,7 @@
   },
   "offline": {
     "m3_tests": "24 passed",
-    "regression": "270 passed, 9 deselected",
+    "regression": "272 passed, 9 deselected",
     "ruff": "passed",
     "compileall": "passed",
     "package_wheel": "passed",
