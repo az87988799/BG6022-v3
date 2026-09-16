@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import re
 import time
+from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 from threading import Event
-from typing import Any, Literal
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -14,6 +17,13 @@ from pydantic import BaseModel, ConfigDict, StrictStr
 
 from bg6022.config import AppConfig
 from bg6022.models import Result, Run, Step, Tool
+from bg6022.molecule_identity import (
+    SUPPORTED_FORMULA_ELEMENTS,
+    MoleculeInputKind,
+    canonical_formula,
+    identity_matches_facts,
+    parse_formula_counts,
+)
 from bg6022.session import (
     register_bytes_artifact,
     run_directory,
@@ -22,7 +32,7 @@ from bg6022.session import (
 
 PUBCHEM_BASE_URL = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-InputKind = Literal["name", "cas", "cid", "smiles"]
+InputKind = MoleculeInputKind
 
 
 class ResolveMoleculeParameters(BaseModel):
@@ -40,13 +50,25 @@ class PubChemLookup:
     candidates: tuple[dict[str, Any], ...]
     raw_bytes: bytes
     attempts: int
+    source_responses: tuple[dict[str, Any], ...] = ()
+    search_complete: bool = True
+    returned_cid_count: int = 0
+    candidates_truncated: bool = False
 
 
 class PubChemError(ValueError):
-    def __init__(self, message: str, *, category: str, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: str,
+        retryable: bool = False,
+        source_responses: tuple[dict[str, Any], ...] = (),
+    ) -> None:
         super().__init__(message)
         self.category = category
         self.retryable = retryable
+        self.source_responses = source_responses
 
 
 def make_resolve_molecule_tool(config: AppConfig | None = None) -> Tool:
@@ -58,7 +80,8 @@ def make_resolve_molecule_tool(config: AppConfig | None = None) -> Tool:
     return Tool(
         name="resolve_molecule",
         description=(
-            "Resolve a name, CAS, CID, or explicit SMILES into a verified molecule artifact."
+            "Resolve a name, CAS, CID, formula, or explicit SMILES into a verified "
+            "molecule artifact."
         ),
         parameter_model=ResolveMoleculeParameters.__name__,
         parameter_schema=ResolveMoleculeParameters.model_json_schema(),
@@ -96,6 +119,12 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
     attempt = _next_attempt(run, step.id)
     relative = f"{step.id}/attempt-{attempt:02d}"
     (run_directory(config.data_root_path, run.id) / relative).mkdir(parents=True, exist_ok=True)
+    identity = run.request.structure_input.get("molecule_identity")
+    identity = identity if isinstance(identity, Mapping) else None
+    source_responses: tuple[dict[str, Any], ...] = ()
+    source_artifact_ids: list[str] = []
+    source_url = ""
+    lookup_attempts = 0
 
     try:
         if cancel.is_set():
@@ -108,14 +137,52 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                 relative=relative,
             )
         if parameters.input_kind == "smiles":
+            source_url = "explicit:smiles"
+            source_responses = (
+                {
+                    "url": source_url,
+                    "raw_bytes": json.dumps(
+                        {"input_kind": "smiles", "query": parameters.query},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ).encode("utf-8"),
+                },
+            )
             facts = _facts_from_smiles(parameters.query)
             raw_bytes = json.dumps(
                 {"input_kind": "smiles", "query": parameters.query, "facts": facts},
                 ensure_ascii=False,
                 sort_keys=True,
             ).encode("utf-8")
-            source_url = "explicit:smiles"
+            source_responses = ({"url": source_url, "raw_bytes": raw_bytes},)
             lookup_attempts = 0
+            source_artifact_ids = _register_source_responses(
+                config, run, step, attempt, source_responses
+            )
+            matches, reason = identity_matches_facts(identity, facts)
+            if not matches:
+                _record_attempt(
+                    run,
+                    step,
+                    attempt,
+                    "failed",
+                    artifact_ids=source_artifact_ids,
+                )
+                save_run(config.data_root_path, run)
+                return _result(
+                    run,
+                    step,
+                    attempt,
+                    "failed",
+                    diagnostics={
+                        "category": "identity_mismatch",
+                        "reason": reason or "explicit SMILES does not match the requested identity",
+                        "requested_formula": identity.get("formula") if identity else None,
+                        "calculated_formula": facts.get("formula"),
+                    },
+                    artifact_ids=source_artifact_ids,
+                    relative=relative,
+                )
         else:
             lookup = fetch_pubchem(
                 parameters.query,
@@ -124,7 +191,21 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                 cancel=cancel,
                 remaining_timeout_seconds=_remaining_active_seconds(run, config),
             )
+            source_responses = lookup.source_responses or (
+                {"url": lookup.url, "raw_bytes": lookup.raw_bytes},
+            )
+            source_artifact_ids = _register_source_responses(
+                config, run, step, attempt, source_responses
+            )
             if cancel.is_set():
+                _record_attempt(
+                    run,
+                    step,
+                    attempt,
+                    "cancelled",
+                    artifact_ids=source_artifact_ids,
+                )
+                save_run(config.data_root_path, run)
                 return _result(
                     run,
                     step,
@@ -134,29 +215,93 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                         "category": "cancelled",
                         "reason": "cancelled after molecule lookup",
                     },
+                    artifact_ids=source_artifact_ids,
                     relative=relative,
                 )
-            if len(lookup.candidates) != 1:
-                raw_artifact = register_bytes_artifact(
-                    config.data_root_path,
-                    run,
-                    lookup.raw_bytes,
-                    artifact_type="molecule_source",
-                    role="source_response",
-                    source=lookup.url,
-                    extension=".json",
-                    step_id=step.id,
-                    attempt=attempt,
+            accepted: list[tuple[dict[str, Any], dict[str, Any]]] = []
+            rejected: list[dict[str, Any]] = []
+            for candidate in lookup.candidates:
+                try:
+                    candidate_facts = _facts_from_pubchem_candidate(
+                        candidate,
+                        parameters.query,
+                        lookup.url,
+                        strict_formula_metadata=(
+                            identity is not None and identity.get("element_counts") is not None
+                        ),
+                    )
+                except PubChemError as error:
+                    rejected.append(
+                        {
+                            "cid": candidate.get("CID"),
+                            "title": candidate.get("Title"),
+                            "reason": str(error),
+                            "category": error.category,
+                        }
+                    )
+                    continue
+                matches, reason = identity_matches_facts(identity, candidate_facts)
+                if matches:
+                    accepted.append((candidate, candidate_facts))
+                else:
+                    rejected.append(
+                        {
+                            "cid": candidate_facts.get("cid"),
+                            "title": candidate_facts.get("title"),
+                            "formula": candidate_facts.get("formula"),
+                            "reason": reason
+                            or "candidate does not satisfy the identity constraint",
+                            "category": "identity_mismatch",
+                        }
+                    )
+
+            if not accepted:
+                category = "identity_mismatch" if rejected and identity else "invalid_structure"
+                reason = (
+                    "no PubChem candidate satisfies the requested molecule identity"
+                    if identity
+                    else "PubChem returned no parseable structure"
                 )
-                run.attempts.append(
-                    {
-                        "step_id": step.id,
-                        "attempt": attempt,
-                        "phase": "finished",
-                        "status": "needs_input",
-                        "artifact_ids": [raw_artifact.id],
-                        "output_ports": {},
-                    }
+                _record_attempt(
+                    run,
+                    step,
+                    attempt,
+                    "failed",
+                    artifact_ids=source_artifact_ids,
+                )
+                save_run(config.data_root_path, run)
+                return _result(
+                    run,
+                    step,
+                    attempt,
+                    "failed",
+                    diagnostics={
+                        "category": category,
+                        "reason": reason,
+                        "requested_formula": identity.get("formula") if identity else None,
+                        "rejected_candidates": rejected,
+                        "candidates": list(lookup.candidates),
+                        "source_url": lookup.url,
+                    },
+                    artifact_ids=source_artifact_ids,
+                    relative=relative,
+                )
+            candidate_views = [
+                _candidate_public_view(candidate, candidate_facts, index=index)
+                for index, (candidate, candidate_facts) in enumerate(accepted, start=1)
+            ]
+            if (
+                len(accepted) != 1
+                or lookup.candidates_truncated
+                or rejected
+                or not lookup.search_complete
+            ):
+                _record_attempt(
+                    run,
+                    step,
+                    attempt,
+                    "needs_input",
+                    artifact_ids=source_artifact_ids,
                 )
                 save_run(config.data_root_path, run)
                 return _result(
@@ -166,19 +311,28 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                     "needs_input",
                     diagnostics={
                         "category": "ambiguous_molecule",
-                        "reason": "PubChem returned multiple candidate structures",
-                        "candidates": list(lookup.candidates),
+                        "reason": "PubChem returned more than one identity-compatible candidate",
+                        "candidates": candidate_views[
+                            : config.molecule.pubchem_formula_max_display_candidates
+                        ],
+                        "rejected_candidates": rejected,
+                        "search_complete": lookup.search_complete,
+                        "candidates_truncated": lookup.candidates_truncated,
+                        "returned_cid_count": lookup.returned_cid_count,
                         "source_url": lookup.url,
+                        "input_requirement": "molecule_identity",
                     },
                     clarification={
-                        "question": "Which exact molecule/CID should be used?",
-                        "candidates": list(lookup.candidates),
+                        "question": "请回复候选编号、CID，或明确的 SMILES；确认后继续原计算任务。",
+                        "candidates": candidate_views[
+                            : config.molecule.pubchem_formula_max_display_candidates
+                        ],
+                        "input_requirement": "molecule_identity",
                     },
-                    artifact_ids=[raw_artifact.id],
+                    artifact_ids=source_artifact_ids,
                     relative=relative,
                 )
-            candidate = lookup.candidates[0]
-            facts = _facts_from_pubchem_candidate(candidate, parameters.query, lookup.url)
+            _, facts = accepted[0]
             raw_bytes = lookup.raw_bytes
             source_url = lookup.url
             lookup_attempts = lookup.attempts
@@ -190,6 +344,7 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                 attempt,
                 "cancelled",
                 diagnostics={"category": "cancelled", "reason": "cancelled before artifact write"},
+                artifact_ids=source_artifact_ids,
                 relative=relative,
             )
         molecule_bytes = json.dumps(
@@ -198,6 +353,7 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                 "facts": facts,
                 "query": parameters.query,
                 "input_kind": parameters.input_kind,
+                "molecule_identity": dict(identity) if identity is not None else None,
                 "source": source_url,
                 "lookup_attempts": lookup_attempts,
             },
@@ -221,17 +377,14 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                 "cid": facts.get("cid"),
             },
         )
-        raw_artifact = register_bytes_artifact(
-            config.data_root_path,
+        raw_artifact_ids = source_artifact_ids or _register_source_responses(
+            config,
             run,
-            raw_bytes,
-            artifact_type="molecule_source",
-            role="source_response",
-            source=source_url,
-            extension=".json",
-            step_id=step.id,
-            attempt=attempt,
+            step,
+            attempt,
+            ({"url": source_url, "raw_bytes": raw_bytes},),
         )
+        artifact_ids = [molecule_artifact.id, *raw_artifact_ids]
         values = {
             "molecule_formula": facts["formula"],
             "formal_charge": facts["formal_charge"],
@@ -242,7 +395,7 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                 "attempt": attempt,
                 "phase": "finished",
                 "status": "succeeded",
-                "artifact_ids": [molecule_artifact.id, raw_artifact.id],
+                "artifact_ids": artifact_ids,
                 "output_ports": {"molecule": molecule_artifact.id},
             }
         )
@@ -253,27 +406,78 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
             attempt,
             "succeeded",
             values=values,
-            artifact_ids=[molecule_artifact.id, raw_artifact.id],
+            artifact_ids=artifact_ids,
             output_ports={"molecule": molecule_artifact.id},
             parameter_sources={"structure": source_url},
             relative=relative,
         )
     except PubChemError as error:
+        source_artifact_ids = _register_source_responses(
+            config,
+            run,
+            step,
+            attempt,
+            error.source_responses or source_responses,
+        )
+        status = "cancelled" if error.category == "cancelled" else "failed"
+        if (
+            error.category == "not_found"
+            and identity is not None
+            and identity.get("element_counts") is not None
+        ):
+            status = "needs_input"
+        diagnostic_category = (
+            "molecule_identity_not_found" if status == "needs_input" else error.category
+        )
+        diagnostics = {"category": diagnostic_category, "reason": str(error)}
+        if status == "needs_input":
+            diagnostics.update(
+                {
+                    "input_requirement": "molecule_identity",
+                    "requested_formula": identity.get("formula"),
+                }
+            )
+        _record_attempt(
+            run,
+            step,
+            attempt,
+            status,
+            artifact_ids=source_artifact_ids,
+        )
+        save_run(config.data_root_path, run)
         return _result(
             run,
             step,
             attempt,
-            "failed",
-            diagnostics={"category": error.category, "reason": str(error)},
+            status,
+            diagnostics=diagnostics,
+            clarification=(
+                {
+                    "question": "未找到与该分子式匹配的结构，请提供明确的 CID 或 SMILES。",
+                    "input_requirement": "molecule_identity",
+                }
+                if status == "needs_input"
+                else None
+            ),
+            artifact_ids=source_artifact_ids,
             relative=relative,
         )
     except (OSError, ValueError) as error:
+        _record_attempt(
+            run,
+            step,
+            attempt,
+            "failed",
+            artifact_ids=source_artifact_ids,
+        )
+        save_run(config.data_root_path, run)
         return _result(
             run,
             step,
             attempt,
             "failed",
             diagnostics={"category": "invalid_molecule", "reason": str(error)},
+            artifact_ids=source_artifact_ids,
             relative=relative,
         )
 
@@ -287,14 +491,8 @@ def fetch_pubchem(
     client: httpx.Client | None = None,
     remaining_timeout_seconds: float | None = None,
 ) -> PubChemLookup:
-    if input_kind not in {"name", "cas", "cid"}:
+    if input_kind not in {"name", "cas", "cid", "formula"}:
         raise PubChemError("PubChem does not accept this input kind", category="invalid_query")
-    encoded = quote(str(query), safe="")
-    namespace = "cid" if input_kind == "cid" else "name"
-    url = (
-        f"{PUBCHEM_BASE_URL}/compound/{namespace}/{encoded}/property/"
-        "CanonicalSMILES,IsomericSMILES,ConnectivitySMILES,Title,MolecularFormula,Charge/JSON"
-    )
     attempts_limit = config.molecule.pubchem_max_attempts
     request_timeout = float(config.molecule.pubchem_timeout_seconds)
     if remaining_timeout_seconds is not None:
@@ -307,88 +505,223 @@ def fetch_pubchem(
         timeout = httpx.Timeout(request_timeout)
         client = httpx.Client(timeout=timeout, follow_redirects=True)
     try:
-        for attempt in range(1, attempts_limit + 1):
-            if cancel is not None and cancel.is_set():
-                raise PubChemError("PubChem lookup cancelled", category="cancelled")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise PubChemError("PubChem lookup timed out", category="timeout", retryable=True)
-            try:
-                response = client.get(url, timeout=max(0.001, remaining))
-                if cancel is not None and cancel.is_set():
-                    raise PubChemError("PubChem lookup cancelled", category="cancelled")
-                raw = response.content
-                if len(raw) > MAX_RESPONSE_BYTES:
-                    raise PubChemError(
-                        "PubChem response exceeds the response size bound",
-                        category="response_too_large",
-                    )
-                if response.status_code == 404:
-                    raise PubChemError(
-                        f"PubChem found no structure for {query!r}", category="not_found"
-                    )
-                if response.status_code == 401 or response.status_code == 403:
-                    raise PubChemError("PubChem rejected the request", category="auth")
-                if response.status_code == 429 or 500 <= response.status_code <= 599:
-                    if attempt >= attempts_limit:
-                        raise PubChemError(
-                            f"PubChem temporary failure after {attempt} attempts: "
-                            f"HTTP {response.status_code}",
-                            category="temporary_failure",
-                            retryable=True,
-                        )
-                    _wait_retry(response, cancel, deadline=deadline)
-                    continue
-                if response.status_code < 200 or response.status_code >= 300:
-                    raise PubChemError(
-                        f"PubChem request failed: HTTP {response.status_code}",
-                        category="http_error",
-                    )
-                try:
-                    payload = response.json()
-                except (ValueError, json.JSONDecodeError) as error:
-                    raise PubChemError(
-                        "PubChem returned invalid JSON", category="invalid_response"
-                    ) from error
-                candidates = _extract_candidates(payload)
-                if not candidates:
-                    raise PubChemError(
-                        "PubChem response contains no usable structure", category="not_found"
-                    )
-                if cancel is not None and cancel.is_set():
-                    raise PubChemError("PubChem lookup cancelled", category="cancelled")
-                return PubChemLookup(
-                    query=str(query),
-                    input_kind=input_kind,
-                    url=url,
-                    candidates=tuple(candidates),
-                    raw_bytes=raw,
-                    attempts=attempt,
+        if input_kind == "formula":
+            counts = parse_formula_counts(str(query))
+            formula = canonical_formula(counts)
+            encoded_formula = quote(formula, safe="")
+            cid_url = f"{PUBCHEM_BASE_URL}/compound/fastformula/{encoded_formula}/cids/JSON"
+            cid_payload, _cid_raw, attempts, cid_sources = _request_json_with_budget(
+                client,
+                cid_url,
+                query=str(query),
+                cancel=cancel,
+                deadline=deadline,
+                attempts_used=0,
+                attempts_limit=attempts_limit,
+            )
+            all_cids = _extract_cids(cid_payload)
+            if not all_cids:
+                raise PubChemError(
+                    f"PubChem found no structure for formula {formula!r}",
+                    category="not_found",
+                    source_responses=cid_sources,
                 )
-            except PubChemError:
-                raise
-            except httpx.TimeoutException as error:
-                if attempt >= attempts_limit:
-                    raise PubChemError(
-                        f"PubChem request timed out after {attempt} attempts",
-                        category="timeout",
-                        retryable=True,
-                    ) from error
-                _wait_retry(None, cancel, deadline=deadline)
-            except httpx.RequestError as error:
-                if attempt >= attempts_limit:
-                    raise PubChemError(
-                        f"PubChem network request failed after {attempt} attempts",
-                        category="network_error",
-                        retryable=True,
-                    ) from error
-                _wait_retry(None, cancel, deadline=deadline)
-        raise PubChemError(
-            "PubChem lookup exhausted its attempt bound", category="temporary_failure"
+            max_cids = config.molecule.pubchem_formula_max_cids
+            selected_cids = all_cids[:max_cids]
+            candidates_truncated = len(all_cids) > len(selected_cids)
+            cid_path = ",".join(str(cid) for cid in selected_cids)
+            if attempts >= attempts_limit:
+                raise PubChemError(
+                    "PubChem attempt bound was exhausted before fetching formula properties",
+                    category="temporary_failure",
+                    retryable=True,
+                    source_responses=cid_sources,
+                )
+            encoded_cids = quote(cid_path, safe=",")
+            property_url = (
+                f"{PUBCHEM_BASE_URL}/compound/cid/{encoded_cids}/property/"
+                "CanonicalSMILES,IsomericSMILES,ConnectivitySMILES,Title,"
+                "MolecularFormula,Charge,InChIKey/JSON"
+            )
+            property_payload, _property_raw, attempts, property_sources = _request_json_with_budget(
+                client,
+                property_url,
+                query=formula,
+                cancel=cancel,
+                deadline=deadline,
+                attempts_used=attempts,
+                attempts_limit=attempts_limit,
+            )
+            candidates = _extract_candidates(property_payload)
+            if not candidates:
+                raise PubChemError(
+                    "PubChem formula properties contain no usable structure",
+                    category="not_found",
+                    source_responses=cid_sources + property_sources,
+                )
+            raw_bytes = json.dumps(
+                {
+                    "formula": formula,
+                    "cid_response": cid_payload,
+                    "property_response": property_payload,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+            return PubChemLookup(
+                query=str(query),
+                input_kind=input_kind,
+                url=property_url,
+                candidates=tuple(candidates),
+                raw_bytes=raw_bytes,
+                attempts=attempts,
+                source_responses=cid_sources + property_sources,
+                search_complete=(
+                    not candidates_truncated
+                    and {
+                        int(candidate["CID"])
+                        for candidate in candidates
+                        if str(candidate.get("CID", "")).isdigit()
+                    }
+                    >= set(selected_cids)
+                ),
+                returned_cid_count=len(all_cids),
+                candidates_truncated=candidates_truncated,
+            )
+
+        encoded = quote(str(query), safe="")
+        namespace = "cid" if input_kind == "cid" else "name"
+        url = (
+            f"{PUBCHEM_BASE_URL}/compound/{namespace}/{encoded}/property/"
+            "CanonicalSMILES,IsomericSMILES,ConnectivitySMILES,Title,MolecularFormula,Charge/JSON"
+        )
+        payload, raw, attempts, sources = _request_json_with_budget(
+            client,
+            url,
+            query=str(query),
+            cancel=cancel,
+            deadline=deadline,
+            attempts_used=0,
+            attempts_limit=attempts_limit,
+        )
+        candidates = _extract_candidates(payload)
+        if not candidates:
+            raise PubChemError(
+                "PubChem response contains no usable structure",
+                category="not_found",
+                source_responses=sources,
+            )
+        return PubChemLookup(
+            query=str(query),
+            input_kind=input_kind,
+            url=url,
+            candidates=tuple(candidates),
+            raw_bytes=raw,
+            attempts=attempts,
+            source_responses=sources,
+            returned_cid_count=len(candidates),
         )
     finally:
         if owns_client:
             client.close()
+
+
+def _request_json_with_budget(
+    client: httpx.Client,
+    url: str,
+    *,
+    query: str,
+    cancel: Event | None,
+    deadline: float,
+    attempts_used: int,
+    attempts_limit: int,
+) -> tuple[Any, bytes, int, tuple[dict[str, Any], ...]]:
+    """Fetch one endpoint while sharing the caller's total attempt budget."""
+
+    source_responses: list[dict[str, Any]] = []
+    while attempts_used < attempts_limit:
+        if cancel is not None and cancel.is_set():
+            raise PubChemError(
+                "PubChem lookup cancelled",
+                category="cancelled",
+                source_responses=tuple(source_responses),
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise PubChemError(
+                "PubChem lookup timed out",
+                category="timeout",
+                retryable=True,
+                source_responses=tuple(source_responses),
+            )
+        attempts_used += 1
+        try:
+            response = client.get(url, timeout=max(0.001, remaining))
+            if cancel is not None and cancel.is_set():
+                raise PubChemError("PubChem lookup cancelled", category="cancelled")
+            raw = response.content
+            source_responses.append({"url": url, "raw_bytes": raw})
+            if len(raw) > MAX_RESPONSE_BYTES:
+                raise PubChemError(
+                    "PubChem response exceeds the response size bound",
+                    category="response_too_large",
+                )
+            if response.status_code == 404:
+                raise PubChemError(
+                    f"PubChem found no structure for {query!r}", category="not_found"
+                )
+            if response.status_code in {401, 403}:
+                raise PubChemError("PubChem rejected the request", category="auth")
+            if response.status_code == 429 or 500 <= response.status_code <= 599:
+                if attempts_used >= attempts_limit:
+                    raise PubChemError(
+                        f"PubChem temporary failure after {attempts_used} attempts: "
+                        f"HTTP {response.status_code}",
+                        category="temporary_failure",
+                        retryable=True,
+                    )
+                _wait_retry(response, cancel, deadline=deadline)
+                continue
+            if response.status_code < 200 or response.status_code >= 300:
+                raise PubChemError(
+                    f"PubChem request failed: HTTP {response.status_code}",
+                    category="http_error",
+                )
+            try:
+                payload = response.json()
+            except (ValueError, json.JSONDecodeError) as error:
+                raise PubChemError(
+                    "PubChem returned invalid JSON", category="invalid_response"
+                ) from error
+            return payload, raw, attempts_used, tuple(source_responses)
+        except PubChemError as error:
+            if not error.source_responses:
+                error.source_responses = tuple(source_responses)
+            raise
+        except httpx.TimeoutException as error:
+            if attempts_used >= attempts_limit:
+                raise PubChemError(
+                    f"PubChem request timed out after {attempts_used} attempts",
+                    category="timeout",
+                    retryable=True,
+                    source_responses=tuple(source_responses),
+                ) from error
+            _wait_retry(None, cancel, deadline=deadline)
+        except httpx.RequestError as error:
+            if attempts_used >= attempts_limit:
+                raise PubChemError(
+                    f"PubChem network request failed after {attempts_used} attempts",
+                    category="network_error",
+                    retryable=True,
+                    source_responses=tuple(source_responses),
+                ) from error
+            _wait_retry(None, cancel, deadline=deadline)
+    raise PubChemError(
+        "PubChem lookup exhausted its attempt bound",
+        category="temporary_failure",
+        retryable=True,
+        source_responses=tuple(source_responses),
+    )
 
 
 def _wait_retry(
@@ -432,14 +765,19 @@ def _extract_candidates(payload: Any) -> list[dict[str, Any]]:
 
 def _has_smiles(candidate: dict[str, Any]) -> bool:
     return bool(
-        candidate.get("ConnectivitySMILES")
-        or candidate.get("SMILES")
+        candidate.get("IsomericSMILES")
         or candidate.get("CanonicalSMILES")
+        or candidate.get("ConnectivitySMILES")
+        or candidate.get("SMILES")
     )
 
 
 def _facts_from_pubchem_candidate(
-    candidate: dict[str, Any], query: str, source_url: str
+    candidate: dict[str, Any],
+    query: str,
+    source_url: str,
+    *,
+    strict_formula_metadata: bool = False,
 ) -> dict[str, Any]:
     smiles = str(
         candidate.get("IsomericSMILES")
@@ -448,31 +786,57 @@ def _facts_from_pubchem_candidate(
         or candidate.get("ConnectivitySMILES")
     )
     facts = _facts_from_smiles(smiles)
-    candidate_charge = candidate.get("Charge")
-    if candidate_charge is None:
-        candidate_charge = facts["formal_charge"]
-    try:
-        candidate_charge = int(candidate_charge)
-    except (TypeError, ValueError) as error:
-        raise PubChemError(
-            "PubChem returned an invalid formal charge", category="invalid_structure"
-        ) from error
+    _validate_remote_metadata(candidate, facts, strict_formula=strict_formula_metadata)
     facts.update(
         {
             "cid": candidate.get("CID"),
             "title": candidate.get("Title") or query,
-            "formula": candidate.get("MolecularFormula") or facts["formula"],
-            "formal_charge": candidate_charge,
             "source_url": source_url,
         }
     )
     return facts
 
 
+def _validate_remote_metadata(
+    candidate: Mapping[str, Any], facts: Mapping[str, Any], *, strict_formula: bool
+) -> None:
+    """Treat PubChem formula/charge fields as evidence, never as calculated facts."""
+
+    remote_formula = candidate.get("MolecularFormula")
+    if remote_formula is not None:
+        try:
+            remote_counts = _metadata_formula_counts(str(remote_formula))
+        except ValueError as error:
+            if strict_formula:
+                raise PubChemError(
+                    "PubChem returned an invalid molecular formula", category="invalid_response"
+                ) from error
+            remote_counts = None
+        if remote_counts is not None and dict(remote_counts) != dict(
+            facts.get("element_counts") or {}
+        ):
+            raise PubChemError(
+                "PubChem formula metadata does not match the RDKit structure",
+                category="identity_mismatch",
+            )
+    remote_charge = candidate.get("Charge")
+    if remote_charge is not None:
+        try:
+            parsed_charge = int(remote_charge)
+        except (TypeError, ValueError) as error:
+            raise PubChemError(
+                "PubChem returned an invalid formal charge", category="invalid_response"
+            ) from error
+        if parsed_charge != facts.get("formal_charge"):
+            raise PubChemError(
+                "PubChem charge metadata does not match the RDKit structure",
+                category="identity_mismatch",
+            )
+
+
 def _facts_from_smiles(smiles: str) -> dict[str, Any]:
     try:
         from rdkit import Chem, rdBase
-        from rdkit.Chem import rdMolDescriptors
     except ImportError as error:
         raise PubChemError(
             "RDKit is not installed; molecule resolution is unavailable", category="dependency"
@@ -482,22 +846,120 @@ def _facts_from_smiles(smiles: str) -> dict[str, Any]:
         raise PubChemError("SMILES is not a valid RDKit structure", category="invalid_structure")
     canonical = Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
     atom_symbols = [atom.GetSymbol() for atom in mol.GetAtoms()]
-    unsupported = sorted(set(atom_symbols) - {"H", "C", "N", "O", "F", "P", "S", "Cl", "Br", "I"})
+    unsupported = sorted(set(atom_symbols) - SUPPORTED_FORMULA_ELEMENTS)
     if unsupported:
         raise PubChemError(
             f"structure contains unsupported elements: {unsupported}",
             category="unsupported_element",
         )
+    element_counts: Counter[str] = Counter()
+    for atom in mol.GetAtoms():
+        element_counts[atom.GetSymbol()] += 1
+        element_counts["H"] += int(atom.GetTotalNumHs())
     return {
         "canonical_smiles": canonical,
         "isomeric_smiles": canonical,
-        "formula": rdMolDescriptors.CalcMolFormula(mol),
+        "formula": canonical_formula(element_counts),
+        "element_counts": dict(element_counts),
         "formal_charge": int(sum(atom.GetFormalCharge() for atom in mol.GetAtoms())),
         "radical_electrons": int(sum(atom.GetNumRadicalElectrons() for atom in mol.GetAtoms())),
         "atom_symbols": atom_symbols,
         "atom_count": mol.GetNumAtoms(),
+        "component_count": len(Chem.GetMolFrags(mol, asMols=False, sanitizeFrags=False)),
+        "isotopic": any(atom.GetIsotope() != 0 for atom in mol.GetAtoms()),
         "rdkit_version": getattr(rdBase, "rdkitVersion", "unknown"),
     }
+
+
+def _metadata_formula_counts(raw: str) -> dict[str, int]:
+    """Parse common PubChem formula labels without changing calculated facts."""
+
+    text = re.sub(r"\s+", "", raw).strip()
+    text = re.sub(r"[+-]\d*$", "", text)
+    if not text:
+        raise ValueError("unsupported metadata formula")
+    total: Counter[str] = Counter()
+    for component in text.split("."):
+        total.update(parse_formula_counts(component))
+    return dict(total)
+
+
+def _candidate_public_view(
+    candidate: Mapping[str, Any], facts: Mapping[str, Any], *, index: int
+) -> dict[str, Any]:
+    return {
+        "choice_id": f"candidate_{index}",
+        "cid": facts.get("cid") or candidate.get("CID"),
+        "title": facts.get("title") or candidate.get("Title"),
+        "formula": facts.get("formula"),
+        "canonical_smiles": facts.get("canonical_smiles"),
+        "isomeric_smiles": facts.get("isomeric_smiles"),
+        "source_url": facts.get("source_url"),
+    }
+
+
+def _extract_cids(payload: Any) -> list[int]:
+    values = payload.get("IdentifierList", {}).get("CID", []) if isinstance(payload, dict) else []
+    if not isinstance(values, list):
+        return []
+    result: list[int] = []
+    for value in values:
+        try:
+            cid = int(value)
+        except (TypeError, ValueError):
+            continue
+        if cid > 0 and cid not in result:
+            result.append(cid)
+    return result
+
+
+def _register_source_responses(
+    config: AppConfig,
+    run: Run,
+    step: Step,
+    attempt: int,
+    responses: tuple[dict[str, Any], ...],
+) -> list[str]:
+    artifact_ids: list[str] = []
+    for index, response in enumerate(responses, start=1):
+        raw = response.get("raw_bytes")
+        url = response.get("url")
+        if not isinstance(raw, bytes) or not isinstance(url, str) or not url:
+            continue
+        artifact = register_bytes_artifact(
+            config.data_root_path,
+            run,
+            raw,
+            artifact_type="molecule_source",
+            role="source_response",
+            source=url,
+            extension=".json",
+            step_id=step.id,
+            attempt=attempt,
+            metadata={"source_sequence": index},
+        )
+        artifact_ids.append(artifact.id)
+    return artifact_ids
+
+
+def _record_attempt(
+    run: Run,
+    step: Step,
+    attempt: int,
+    status: str,
+    *,
+    artifact_ids: list[str] | None = None,
+) -> None:
+    run.attempts.append(
+        {
+            "step_id": step.id,
+            "attempt": attempt,
+            "phase": "finished",
+            "status": status,
+            "artifact_ids": list(artifact_ids or []),
+            "output_ports": {},
+        }
+    )
 
 
 def _result(

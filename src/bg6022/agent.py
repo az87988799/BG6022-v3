@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from dataclasses import field as dataclass_field
@@ -28,6 +29,7 @@ from .answer import (
 from .config import AppConfig, validate_execution_environment
 from .llm import LlmClient, LlmError
 from .models import InputReference, Plan, Request, Result, Run, Step, Tool
+from .molecule_identity import build_identity_constraint, identity_matches_facts
 from .orca.profiles import get_profile, resolve_parameters
 from .orca.repair_rules import applicable_repairs, applicable_scf_repair
 from .output_contracts import is_compatible_value, public_type_info
@@ -291,9 +293,19 @@ class Agent:
                             )
 
             current = self._coerce_run(None)
+            parameter_continuation = (
+                current is not None
+                and current.status == "waiting"
+                and _is_parameter_continuation(
+                    current,
+                    intake,
+                    text,
+                    dict(intake.explicit_parameters),
+                )
+            )
             index_parameter_names = (
                 self.registry.request_index_parameter_fields_for_plan(current.plan)
-                if current is not None and current.status == "waiting"
+                if parameter_continuation
                 else self.registry.request_index_parameter_fields(
                     intake.operations, intake.requested_results
                 )
@@ -413,22 +425,49 @@ class Agent:
                 )
                 self._record_response(response, cancel=request_cancel)
                 return response
-            if (
+            pending_identity = (
                 current is not None
                 and current.status == "waiting"
-                and intake.molecule_query
                 and current.waiting_for == "clarification"
-                and current.pending_data.get("category") == "ambiguous_molecule"
-                and not _looks_like_molecule_change(text)
-            ):
-                response = self._apply_molecule_clarification(
-                    current,
-                    intake.molecule_query,
-                    intake.molecule_input_kind,
-                    cancel=request_cancel,
+                and (
+                    current.pending_data.get("input_requirement") == "molecule_identity"
+                    or current.pending_data.get("category")
+                    in {"ambiguous_molecule", "molecule_identity_not_found", "identity_mismatch"}
                 )
-                self._record_response(response, cancel=request_cancel)
-                return response
+            )
+            if pending_identity:
+                selection = _pending_molecule_selection(text, current.pending_data)
+                if selection is not None and selection.get("invalid"):
+                    response = AgentResponse(str(selection["invalid"]), run=current)
+                    self._record_response(response, cancel=request_cancel)
+                    return response
+                if selection is not None and (
+                    selection.get("candidate") is not None or selection.get("explicit_new")
+                ):
+                    response = self._apply_molecule_clarification(
+                        current,
+                        str(selection["query"]),
+                        str(selection["input_kind"]),
+                        candidate=selection.get("candidate"),
+                        preserve_identity=bool(selection.get("preserve_identity")),
+                        message=text,
+                        cancel=request_cancel,
+                    )
+                    self._record_response(response, cancel=request_cancel)
+                    return response
+                if (
+                    intake.molecule_query
+                    and not _looks_like_molecule_change(text)
+                ):
+                    response = self._apply_molecule_clarification(
+                        current,
+                        intake.molecule_query,
+                        intake.molecule_input_kind,
+                        message=text,
+                        cancel=request_cancel,
+                    )
+                    self._record_response(response, cancel=request_cancel)
+                    return response
             if (
                 current is not None
                 and current.status == "waiting"
@@ -449,6 +488,7 @@ class Agent:
                     current,
                     intake.molecule_query,
                     intake.molecule_input_kind,
+                    message=text,
                     cancel=request_cancel,
                 )
                 self._record_response(response, cancel=request_cancel)
@@ -1043,7 +1083,20 @@ class Agent:
         if not isinstance(xyz_text, str):
             raise ValueError("chat structure_input.xyz_text must be text")
         geometry_bytes = xyz_text.encode("utf-8")
-        parse_xyz_bytes(geometry_bytes)
+        geometry = parse_xyz_bytes(geometry_bytes)
+        identity = value.get("molecule_identity") if isinstance(value, Mapping) else None
+        if isinstance(identity, Mapping) and identity.get("element_counts") is not None:
+            matches, reason = identity_matches_facts(
+                identity,
+                {
+                    "element_counts": dict(Counter(geometry.symbols)),
+                    "component_count": 1,
+                    "isotopic": False,
+                    "formal_charge": 0,
+                },
+            )
+            if not matches:
+                raise ValueError(f"inline XYZ does not satisfy the molecule formula: {reason}")
         artifact = register_bytes_artifact(
             self.config.data_root_path,
             run,
@@ -1258,9 +1311,20 @@ class Agent:
         query: str,
         input_kind: str | None,
         *,
+        candidate: Mapping[str, Any] | None = None,
+        preserve_identity: bool = False,
+        message: str | None = None,
         cancel: Event | None = None,
     ) -> AgentResponse:
-        return self._apply_molecule_update(run, query, input_kind, cancel=cancel)
+        return self._apply_molecule_update(
+            run,
+            query,
+            input_kind,
+            candidate=candidate,
+            preserve_identity=preserve_identity,
+            message=message,
+            cancel=cancel,
+        )
 
     def _apply_molecule_update(
         self,
@@ -1268,6 +1332,9 @@ class Agent:
         query: str,
         input_kind: str | None,
         *,
+        candidate: Mapping[str, Any] | None = None,
+        preserve_identity: bool = False,
+        message: str | None = None,
         cancel: Event | None = None,
     ) -> AgentResponse:
         if cancel is not None and cancel.is_set():
@@ -1280,6 +1347,61 @@ class Agent:
         if step is None:
             return AgentResponse("等待中的任务没有分子解析步骤。", run=run)
         kind = input_kind or ("cid" if query.isdecimal() else "name")
+        selected_candidate_cid = _candidate_cid(candidate)
+        if candidate is not None and selected_candidate_cid is None:
+            return AgentResponse("当前候选缺少可验证的 CID，无法安全选择。", run=run)
+        if selected_candidate_cid is not None:
+            query = str(selected_candidate_cid)
+            kind = "cid"
+        try:
+            structure_input = dict(run.request.structure_input)
+            if candidate is not None:
+                identity = structure_input.get("molecule_identity")
+                if not isinstance(identity, Mapping):
+                    return AgentResponse(
+                        "当前候选没有可继承的分子身份约束，无法安全选择。",
+                        run=run,
+                    )
+                selected_identity = dict(identity)
+                selected_identity["selected_cid"] = selected_candidate_cid
+                selected_identity.pop("selected_smiles", None)
+                choice_id = candidate.get("choice_id")
+                if isinstance(choice_id, str):
+                    selected_identity["selected_choice_id"] = choice_id
+                selected_smiles = candidate.get("isomeric_smiles") or candidate.get(
+                    "canonical_smiles"
+                )
+                if isinstance(selected_smiles, str):
+                    selected_identity["selected_smiles"] = selected_smiles
+                structure_input["molecule_identity"] = selected_identity
+            elif preserve_identity:
+                identity = structure_input.get("molecule_identity")
+                if not isinstance(identity, Mapping):
+                    return AgentResponse(
+                        "当前输入没有可继承的分子身份约束，无法安全选择。",
+                        run=run,
+                    )
+                selected_identity = dict(identity)
+                if kind == "cid":
+                    selected_identity["selected_cid"] = int(query)
+                    selected_identity.pop("selected_smiles", None)
+                elif kind == "smiles":
+                    selected_identity["selected_smiles"] = query
+                    selected_identity.pop("selected_cid", None)
+                structure_input["molecule_identity"] = selected_identity
+            else:
+                identity = build_identity_constraint(
+                    message=message or query,
+                    query=query,
+                    input_kind=kind,
+                )
+                if identity is not None:
+                    structure_input["molecule_identity"] = identity
+            candidate_request = run.request.model_copy(
+                update={"structure_input": structure_input}
+            )
+        except (TypeError, ValueError) as error:
+            return AgentResponse(f"该分子选择已拒绝（rejected）：{error}", run=run)
         try:
             replacement = Step.model_validate(
                 {
@@ -1297,9 +1419,14 @@ class Agent:
                 },
                 strict=True,
             )
-            candidate_plan = self.registry.validate_plan(candidate_plan)
+            candidate_plan = validate_request_plan(
+                candidate_request,
+                candidate_plan,
+                self.registry,
+            )
         except ValueError as error:
             return AgentResponse(f"该分子选择已拒绝（rejected）：{error}", run=run)
+        run.request = candidate_request
         run.plan = candidate_plan
         _invalidate_current_results(run, step.id)
         run.accepted_snapshot = {}
@@ -2391,8 +2518,14 @@ class Agent:
                     },
                     cancel=cancel,
                 )
-            except LlmError:
+            except LlmError as error:
+                # The provider can observe cancellation after the initial
+                # check above.  Re-read the event so the delivery cannot be
+                # reported as complete after a cancelled answer call.
+                if error.category == "cancelled":
+                    cancelled = True
                 draft = None
+            cancelled = cancelled or (cancel is not None and cancel.is_set())
         fallback = AnswerOutput(
             action="respond",
             sections=[
@@ -3946,6 +4079,103 @@ def _looks_like_molecule_change(message: str) -> bool:
             flags=re.IGNORECASE,
         )
     )
+
+
+def _pending_molecule_selection(
+    message: str, pending_data: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """Parse only bounded molecule choices from the current pending snapshot."""
+
+    candidates = pending_data.get("candidates")
+    candidate_list = (
+        [item for item in candidates if isinstance(item, Mapping)]
+        if isinstance(candidates, list)
+        else []
+    )
+    stripped = message.strip()
+    numeric = re.fullmatch(
+        r"(?:候选(?:编号)?|candidate(?:\s*[_-]?\s*)?)?\s*(\d+)",
+        stripped,
+        re.IGNORECASE,
+    )
+    if numeric is not None:
+        number = int(numeric.group(1))
+        explicit_candidate_label = bool(
+            re.match(r"(?:候选(?:编号)?|candidate)", stripped, re.IGNORECASE)
+        )
+        for index, candidate in enumerate(candidate_list, start=1):
+            choice_id = str(candidate.get("choice_id") or f"candidate_{index}")
+            cid = _candidate_cid(candidate)
+            if choice_id.casefold() == f"candidate_{number}" or (
+                not explicit_candidate_label and index == number
+            ) or cid == number:
+                return {
+                    "query": str(cid) if cid is not None else str(number),
+                    "input_kind": "cid",
+                    "candidate": candidate,
+                }
+        if explicit_candidate_label or candidate_list:
+            return {
+                "invalid": (
+                    f"候选编号 {number} 不在当前候选快照中；"
+                    "请回复列出的编号、CID 或明确 SMILES。"
+                )
+            }
+        return {"query": str(number), "input_kind": "cid", "explicit_new": True}
+
+    cid_match = re.fullmatch(r"CID\s*[:#]?\s*(\d+)", stripped, re.IGNORECASE)
+    if cid_match is not None:
+        cid = int(cid_match.group(1))
+        for candidate in candidate_list:
+            if _candidate_cid(candidate) == cid:
+                return {"query": str(cid), "input_kind": "cid", "candidate": candidate}
+        return {
+            "query": str(cid),
+            "input_kind": "cid",
+            "explicit_new": True,
+            "preserve_identity": True,
+        }
+
+    smiles_match = re.fullmatch(r"SMILES\s*[:=]\s*(\S+)", stripped, re.IGNORECASE)
+    if smiles_match is not None:
+        smiles_query = smiles_match.group(1)
+        for candidate in candidate_list:
+            candidate_smiles = candidate.get("isomeric_smiles") or candidate.get(
+                "canonical_smiles"
+            )
+            if isinstance(candidate_smiles, str) and candidate_smiles == smiles_query:
+                cid = _candidate_cid(candidate)
+                if cid is not None:
+                    return {
+                        "query": str(cid),
+                        "input_kind": "cid",
+                        "candidate": candidate,
+                    }
+        return {
+            "query": smiles_query,
+            "input_kind": "smiles",
+            "explicit_new": True,
+            "preserve_identity": True,
+        }
+
+    for candidate in candidate_list:
+        title = candidate.get("title") or candidate.get("Title")
+        if isinstance(title, str) and title.strip() and title.casefold() == stripped.casefold():
+            cid = _candidate_cid(candidate)
+            if cid is not None:
+                return {"query": str(cid), "input_kind": "cid", "candidate": candidate}
+    return None
+
+
+def _candidate_cid(candidate: Mapping[str, Any] | None) -> int | None:
+    if not isinstance(candidate, Mapping):
+        return None
+    value = candidate.get("cid") or candidate.get("CID")
+    try:
+        cid = int(value)
+    except (TypeError, ValueError):
+        return None
+    return cid if cid > 0 else None
 
 
 def _looks_like_parameter_only_change(message: str) -> bool:

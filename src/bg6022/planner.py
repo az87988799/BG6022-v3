@@ -32,6 +32,11 @@ from bg6022.models import (
     Step,
     validate_output_preferences,
 )
+from bg6022.molecule_identity import (
+    MoleculeInputKind,
+    build_identity_constraint,
+    normalize_identity_for_storage,
+)
 from bg6022.output_contracts import property_evidence_matches
 from bg6022.tools.molecule import parse_xyz_bytes
 from bg6022.tools.registry import ToolRegistry, merge_explicit_step_parameters
@@ -131,7 +136,7 @@ class IntakeOutput(BaseModel):
     answer: StrictStr | None = None
     operations: list[Operation] = Field(default_factory=list)
     molecule_query: StrictStr | None = None
-    molecule_input_kind: Literal["name", "cas", "cid", "smiles"] | None = None
+    molecule_input_kind: MoleculeInputKind | None = None
     history_geometry_alias: StrictStr | None = None
     explicit_parameters: dict[str, Any] = Field(default_factory=dict)
     electronic_state_candidates: list[ElectronicStateCandidate] = Field(default_factory=list)
@@ -564,6 +569,7 @@ def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) 
         strict=True,
     )
     plan = registry.validate_plan(plan)
+    _validate_molecule_identity_contract(request, plan, registry)
     _validate_required_geometry_bindings(request, plan, registry)
     operation_free_distance_steps = [
         step
@@ -638,6 +644,67 @@ def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) 
     return plan
 
 
+def _validate_molecule_identity_contract(
+    request: Request, plan: Plan, registry: ToolRegistry
+) -> None:
+    """Prevent a Planner from changing or bypassing a user molecule constraint."""
+
+    identity = request.structure_input.get("molecule_identity")
+    if not isinstance(identity, Mapping):
+        return
+    expected_kind = identity.get("input_kind")
+    expected_query = identity.get("lookup_query") or identity.get("raw_query")
+    selected_cid = identity.get("selected_cid")
+    selected_smiles = identity.get("selected_smiles")
+    resolve_steps = [step for step in plan.steps if step.tool == "resolve_molecule"]
+    if expected_kind == "formula" and selected_cid is None and selected_smiles is None:
+        has_inline_xyz = (
+            request.structure_input.get("xyz_text") is not None
+            or request.structure_input.get("xyz") is not None
+        )
+        if has_inline_xyz:
+            if resolve_steps:
+                raise ValueError(
+                    "an inline XYZ formula request cannot also resolve another structure"
+                )
+            return
+        if len(resolve_steps) != 1:
+            raise ValueError("a formula request must have exactly one formula-resolve Step")
+        parameters = resolve_steps[0].parameters
+        if parameters.get("input_kind") != "formula":
+            raise ValueError("the Planner cannot replace a formula request with a name/CID/SMILES")
+        if parameters.get("query") != identity.get("raw_query"):
+            raise ValueError("the formula-resolve Step must preserve the user's original formula")
+    if selected_cid is not None:
+        if len(resolve_steps) != 1:
+            raise ValueError("a selected molecule identity must have one resolve Step")
+        parameters = resolve_steps[0].parameters
+        if parameters.get("input_kind") not in {"cid", "smiles", "formula", expected_kind}:
+            raise ValueError("the selected molecule identity is not bound to the resolve Step")
+    if selected_smiles is not None:
+        if len(resolve_steps) != 1:
+            raise ValueError("a selected SMILES identity must have one resolve Step")
+        parameters = resolve_steps[0].parameters
+        if parameters.get("input_kind") != "smiles" or parameters.get("query") != selected_smiles:
+            raise ValueError("the selected SMILES is not bound to the resolve Step")
+    if resolve_steps and expected_query is not None:
+        parameters = resolve_steps[0].parameters
+        if (
+            expected_kind == "formula"
+            and selected_cid is None
+            and selected_smiles is None
+        ):
+            return
+        if (
+            parameters.get("query") != expected_query
+            and selected_cid is None
+            and selected_smiles is None
+        ):
+            # A formula plus an explicitly named/CID query carries both
+            # constraints; the lookup query is the one the user supplied.
+            raise ValueError("the resolve Step changed the user's molecule identity query")
+
+
 def request_from_intake(
     message: str,
     intake: IntakeOutput,
@@ -665,6 +732,8 @@ def request_from_intake(
             )
     if any(key in intake.structure_input for key in {"path", "local_path", "file"}):
         raise ValueError("model intake cannot authorize a local file path")
+    if "molecule_identity" in intake.structure_input:
+        raise ValueError("model intake cannot provide program-owned molecule identity facts")
     normalized = normalized_parameters or normalize_user_explicit_parameters(
         message,
         intake.explicit_parameters,
@@ -679,6 +748,13 @@ def request_from_intake(
             + ", ".join(normalized.clarification_fields)
         )
     structure_input = dict(intake.structure_input)
+    identity = build_identity_constraint(
+        message=message,
+        query=intake.molecule_query,
+        input_kind=intake.molecule_input_kind,
+    )
+    if identity is not None:
+        structure_input["molecule_identity"] = normalize_identity_for_storage(identity)
     raw_bindings = structure_input.get("required_bindings")
     if raw_bindings is not None:
         normalized_bindings = []
@@ -727,32 +803,40 @@ def _request_output_preferences(message: str, value: Mapping[str, Any] | None) -
     """
 
     preferences = validate_output_preferences(value)
-    explicit_link_only = bool(
-        re.search(
-            r"(?:仅|只|只需|只要|只给|仅需|仅要).{0,12}(?:链接|链结|路径|文件入口)|"
-            r"(?:不要|不显示|不展示|不提供).{0,8}(?:正文|文件内容|内容)|"
-            r"(?:link\s*only|path\s*only|only\s+(?:the\s+)?(?:link|path))",
-            message,
-            re.IGNORECASE,
-        )
+    # Keep negation and the requested view inside one punctuation-bounded
+    # clause.  A broad ``.{0,n}`` expression can incorrectly let a negated
+    # phrase in one clause suppress an explicit request in the next clause,
+    # e.g. “不要链接，把正文给我”.
+    clauses = [part for part in re.split(r"[,，。；;！？!?\n]+", message) if part.strip()]
+    link_only_pattern = re.compile(
+        r"(?:仅|只|只需|只要|只给|仅需|仅要)\s*(?:文件)?(?:链接|链结|路径|文件入口)|"
+        r"(?:link\s*only|path\s*only|only\s+(?:the\s+)?(?:link|path))",
+        re.IGNORECASE,
     )
-    explicit_body_request = bool(
-        re.search(
-            r"正文|文件内容|内容|file\s+(?:content|body)|show\s+(?:the\s+)?content|"
-            r"display\s+(?:the\s+)?content|include\s+(?:the\s+)?content",
-            message,
-            re.IGNORECASE,
-        )
-        and not re.search(
-            r"(?:不要|不显示|不展示|不提供).{0,8}(?:正文|文件内容|内容|file\s+(?:content|body))",
-            message,
-            re.IGNORECASE,
-        )
+    body_pattern = re.compile(
+        r"正文|文件内容|内容|file\s+(?:content|body)|show\s+(?:the\s+)?content|"
+        r"display\s+(?:the\s+)?content|include\s+(?:the\s+)?content",
+        re.IGNORECASE,
+    )
+    body_negative_pattern = re.compile(
+        r"(?:不要|不显示|不展示|不提供|do\s+not|don't|without)\s*"
+        r"(?:文件的?\s*)?(?:正文|文件内容|内容|file\s+(?:content|body))",
+        re.IGNORECASE,
+    )
+    explicit_link_only = any(
+        link_only_pattern.search(clause) or body_negative_pattern.search(clause)
+        for clause in clauses
+    )
+    explicit_body_request = any(
+        body_pattern.search(clause) and not body_negative_pattern.search(clause)
+        for clause in clauses
     )
     if explicit_body_request:
         # An explicit body request wins over a model-proposed link-only view,
         # including “正文和文件路径都给我”.
         preferences["file_content"] = "show"
+    elif explicit_link_only:
+        preferences["file_content"] = "link_only"
     elif preferences.get("file_content") == "link_only" and not explicit_link_only:
         preferences["file_content"] = "auto"
     return preferences
@@ -1794,6 +1878,8 @@ def _followup_reference_is_safe(
     }
     if (target.subject_ref, target.property) not in recent_pairs:
         return False
+    if not _followup_subject_is_safe(target, message, result_catalog):
+        return False
     if _followup_has_new_request(
         target,
         message,
@@ -1822,6 +1908,96 @@ def _followup_reference_is_safe(
         re.IGNORECASE,
     )
     return has_reference_marker is not None or len(recent_pairs) == 1
+
+
+def _followup_subject_is_safe(
+    target: QueryTarget,
+    message: str,
+    result_catalog: list[Mapping[str, Any]] | None,
+) -> bool:
+    """Do not inherit a result when the current message names another subject."""
+
+    recent_items = [
+        item
+        for item in result_catalog or []
+        if isinstance(item, Mapping) and item.get("recently_delivered") is True
+    ]
+    recent_subjects = {
+        str(item.get("subject_ref"))
+        for item in recent_items
+        if isinstance(item.get("subject_ref"), str)
+    }
+    subject = _explicit_followup_subject(message)
+    target_items = [
+        item for item in recent_items if item.get("subject_ref") == target.subject_ref
+    ]
+    if subject is not None:
+        return bool(target_items) and any(
+            _catalog_subject_matches(subject, item) for item in target_items
+        )
+    # “把刚才那个给我” is not a safe selector once more than one subject was
+    # delivered.  A property-only follow-up may remain implicit for one
+    # subject, but it must not choose among molecule/task identities.
+    return len(recent_subjects) <= 1
+
+
+def _explicit_followup_subject(message: str) -> str | None:
+    property_words = (
+        r"xyz|结构|几何|坐标|文件|能量|自由能|频率|角度|距离|"
+        r"geometry|structure|coordinates?|file|energy|frequency|angle|distance"
+    )
+    patterns = (
+        rf"(?P<subject>[\u3400-\u9fffA-Za-z0-9]"
+        rf"[\u3400-\u9fffA-Za-z0-9 .+()_\-]{{0,48}}?)\s*(?:的|之)\s*"
+        rf"(?:{property_words})",
+        rf"(?:{property_words})\s+(?:for|of)\s+(?P<subject>[A-Za-z0-9][A-Za-z0-9 .+()_\-]{{0,48}})",
+    )
+    generic = re.compile(
+        r"^(?:刚才|上次|上一条|前面|刚生成|刚输出|这个|那个|该|同一|"
+        r"previous|earlier|above|this|that|same)(?:的|那个|个|结果|内容|文件)?$",
+        re.IGNORECASE,
+    )
+    for pattern in patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+        if match is None:
+            continue
+        subject = re.sub(
+            r"^(?:请|把|将|给我|帮我|查询|查一下|告诉我|显示|提供|返回|我要|我想要)\s*",
+            "",
+            match.group("subject").strip(),
+            flags=re.IGNORECASE,
+        ).strip(" \t，,。；;:：")
+        if subject and not generic.fullmatch(subject):
+            return subject
+    return None
+
+
+def _catalog_subject_matches(subject: str, item: Mapping[str, Any]) -> bool:
+    normalized_subject = _normalize_subject_text(subject)
+    if not normalized_subject:
+        return False
+    values: list[str] = []
+    system = item.get("system")
+    if isinstance(system, Mapping):
+        values.extend(
+            str(system[key])
+            for key in ("formula", "title", "query", "cid")
+            if key in system
+        )
+    task = item.get("task")
+    if isinstance(task, Mapping) and isinstance(task.get("description"), str):
+        values.append(task["description"])
+    return any(
+        normalized_subject == _normalize_subject_text(value)
+        or normalized_subject in _normalize_subject_text(value).split()
+        for value in values
+        if value
+    )
+
+
+def _normalize_subject_text(value: str) -> str:
+    translated = value.strip().translate(str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789"))
+    return re.sub(r"[\s_\-()（）]+", "", translated.casefold())
 
 
 def _followup_has_new_request(

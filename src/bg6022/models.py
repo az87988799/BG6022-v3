@@ -161,6 +161,11 @@ class Request(StrictModel):
     @field_validator("structure_input")
     @classmethod
     def _validate_required_geometry_bindings(cls, value: dict[str, Any]) -> dict[str, Any]:
+        identity = value.get("molecule_identity")
+        if identity is not None:
+            from bg6022.molecule_identity import validate_identity_constraint
+
+            validate_identity_constraint(identity)
         raw_bindings = value.get("required_bindings")
         if raw_bindings is None:
             return value

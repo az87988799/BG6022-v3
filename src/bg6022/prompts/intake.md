@@ -5,6 +5,21 @@ operation (SP, Opt, and/or Freq), operation-free Tool request, molecule query, a
 CID, SMILES, charge, multiplicity, energy, or local path. A context_query may
 read saved facts but must not contain a parameter patch.
 
+Formula input is a composition constraint, not a request to choose the first
+remote structure. When the user supplies an ordinary formula with ASCII digits
+or Unicode subscripts (for example C6H6 or C₆H₆), preserve the complete token
+as `molecule_query` with `molecule_input_kind: "formula"`; do not rewrite it to
+a common name. `H20` means the literal formula H20, not water H2O. Do not
+return `molecule_identity` or any calculated formula/charge facts in
+`structure_input`; those fields belong to the program. If the user gives both
+a formula and an explicit name/CID, preserve both by keeping the explicit
+lookup query and letting the program verify the formula constraint.
+
+When an earlier molecule lookup asks for a candidate, a reply such as a listed
+candidate number or CID selects only from the current candidate snapshot. A
+new explicit SMILES or a clearly changed molecule is a new identity request;
+never silently reuse a previous candidate or change the user's formula.
+
 First determine what concrete result the user is asking for. A request for a
 specific molecule's XYZ/structure file is a request for the registered initial
 geometry output, not merely a general explanation of the XYZ format. A request

@@ -471,16 +471,30 @@ def render_clarification(pending_data: Mapping[str, Any] | None) -> str:
         candidates = data.get("candidates")
         details: list[str] = []
         if isinstance(candidates, list):
-            for candidate in candidates[:5]:
+            for index, candidate in enumerate(candidates[:5], start=1):
                 item = _mapping(candidate)
-                title = item.get("Title") or item.get("title")
+                choice = item.get("choice_id") or f"candidate_{index}"
+                title = item.get("Title") or item.get("title") or "未命名结构"
                 cid = item.get("CID") or item.get("cid")
-                if title and cid:
-                    details.append(f"{title}（CID {cid}）")
-                elif title or cid:
-                    details.append(str(title or f"CID {cid}"))
+                formula = item.get("MolecularFormula") or item.get("formula")
+                smiles = item.get("IsomericSMILES") or item.get("isomeric_smiles")
+                parts = [f"{choice}: {title}"]
+                if cid:
+                    parts.append(f"CID {cid}")
+                if formula:
+                    parts.append(f"分子式 {formula}")
+                if smiles:
+                    parts.append(f"SMILES {smiles}")
+                details.append("；".join(parts))
         suffix = f"候选包括：{'、'.join(details)}。" if details else ""
-        return f"分子结构存在歧义，请指定准确的分子或 CID。{suffix}".strip()
+        return (
+            "分子结构存在歧义，请回复候选编号、CID 或明确的 SMILES。"
+            f"{suffix}"
+        ).strip()
+    if category == "molecule_identity_not_found":
+        return "没有找到与用户分子式匹配的结构；请提供明确的 CID 或 SMILES。"
+    if category == "identity_mismatch":
+        return "候选结构与用户给出的分子身份约束不一致；请提供明确的 CID 或 SMILES。"
 
     missing = data.get("missing_fields")
     if isinstance(missing, list) and missing:

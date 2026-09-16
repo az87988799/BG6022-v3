@@ -9,6 +9,7 @@ import queue
 import subprocess
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Thread
@@ -204,6 +205,13 @@ def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel
             comment=f"BG6022 v3 RDKit ETKDGv3 seed {used_seed}",
         )
         geometry = parse_xyz_bytes(geometry_bytes)
+        expected_counts = facts.get("element_counts")
+        if isinstance(expected_counts, dict):
+            actual_counts = dict(Counter(geometry.symbols))
+            if actual_counts != expected_counts:
+                raise ValueError(
+                    "generated geometry element counts do not match the resolved molecule"
+                )
         geometry_artifact = register_bytes_artifact(
             config.data_root_path,
             run,

@@ -523,6 +523,47 @@ def test_waiting_parameter_update_precedes_intake_blocking(monkeypatch, tmp_path
     assert run.attempts == []
 
 
+def test_new_distance_request_uses_new_index_scope_after_waiting_opt(
+    monkeypatch, tmp_path: Path
+) -> None:
+    agent, run = _opt_to_distance_chat_run(
+        tmp_path, atom_j=3, session_id="distance-index-new-request"
+    )
+    agent.advance(run)
+    assert run.status == "waiting"
+    agent._session["active_run_id"] = run.id
+    agent._save_session()
+    captured: dict[str, object] = {}
+    original_normalize = normalize_user_explicit_parameters
+
+    def spy_normalize(message, parameters, candidates=(), *, parameter_names=None):
+        captured["parameter_names"] = tuple(parameter_names or ())
+        return original_normalize(
+            message,
+            parameters,
+            candidates,
+            parameter_names=parameter_names,
+        )
+
+    monkeypatch.setattr("bg6022.agent.normalize_user_explicit_parameters", spy_normalize)
+
+    def new_distance_intake(*_args, **_kwargs) -> IntakeOutput:
+        return IntakeOutput(
+            intent="chemistry_compute",
+            requested_results=["interatomic_distance"],
+            explicit_parameters={"atom_i": 2, "atom_j": 3},
+            missing_fields=["a fresh distance request"],
+        )
+
+    monkeypatch.setattr("bg6022.agent.intake_message", new_distance_intake)
+    response = agent.handle_message("测量新距离，atom_i=2.5，atom_j=3")
+
+    assert set(captured["parameter_names"]) == {"atom_i", "atom_j"}
+    assert "没有更新" in response.text or "不是受支持" in response.text
+    assert run.status == "waiting"
+    assert run.attempts == []
+
+
 @pytest.mark.parametrize(
     "message", ["atom_i=2.5", "atom_i=2e0", "atom_i=2/3", "不要 atom_i=2", "atom_i=2, atom_i=3"]
 )
