@@ -176,9 +176,14 @@ def test_single_operation_on_history_geometry_uses_only_the_history_alias() -> N
     assert request.operations == ["SP"]
 
 
-def test_agent_preserves_trailing_newline_in_inline_xyz() -> None:
-    registry = build_registry()
-    config = load_config(Path("config.toml"))
+def test_agent_preserves_trailing_newline_in_inline_xyz(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[orca]\nexecutable = 'missing-orca.exe'\n[runtime]\ndata_root = 'data'\n",
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+    registry = build_registry(config)
     xyz = "3\nwater\nO 0 0 0\nH 0 1 0\nH 1 0 0\n"
     intake_body = {
         "intent": "chemistry_compute",

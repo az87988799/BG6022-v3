@@ -73,7 +73,7 @@ the initial artifact with SHA-256
   1 to 100 and used the hashed restart candidate.
 - Opt attempt 2 succeeded. Freq and SP both consumed its
   `optimized_geometry` artifact, whose geometry SHA-256 is
-  `7550520a8bf67d1b9a2b90ed4c0d40cfa2864f2cb34d5aea4759a6ed5f9a690`.
+  `7550520a8bf67d1b9a2b90ed4c0d40cfa2864f2cb34d5aea4759a6ed5f9a6902`.
 - Freq returned 27 modes and a valid Hessian. SP returned
   `-155.002350059646 Eh`. One extra ORCA execution was used, within the Run
   budget. Generated `.inp` files contain `%pal` with `nprocs 4` and
@@ -89,16 +89,16 @@ semicolon boundary and preserves the exact XYZ bytes.
 The final Windows frozen-dependency checks passed:
 
 ```
-245 passed, 3 deselected
+245 passed, 2 skipped, 1 deselected
 ruff check .                         passed
-ruff format --check .                passed (67 files)
+ruff format --check .                passed (68 files)
 python -m compileall -q src          passed
 uv build                             passed
 git diff --check                     passed
 ```
 
 The focused root-cause, parameter-scoping, plan-composition, and LLM tests
-also pass (`72 passed`). The full file-level index contains 417 credential-free
+also pass (`73 passed`). The full file-level index contains 417 credential-free
 records and raw artifacts with size and SHA-256 metadata.
 
 ## Acceptance state

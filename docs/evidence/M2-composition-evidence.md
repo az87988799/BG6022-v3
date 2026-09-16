@@ -131,8 +131,8 @@ the offline Freq-only Agent test and does not replace any R1–R4 Agent scenario
 | Item | Status |
 |---|---|
 | Pre-fix M2 implementation and offline/live evidence | historical baseline; not post-fix recertification |
-| Root-cause repair candidate commit | `cc11043` (final candidate; push pending in this turn) |
-| Post-fix offline verification | 245 passed, 3 deselected; lint, format, compile, package build, and diff checks passed |
+| Root-cause repair candidate commit | `cc11043` (final candidate; pushed; this cleanup follows it) |
+| Post-fix offline verification | 245 passed, 2 skipped, 1 deselected; lint, format, compile, package build, and diff checks passed |
 | Post-fix fresh real-entry recertification | final candidate recorded in [`M2-final-minimal-fix-acceptance.md`](M2-final-minimal-fix-acceptance.md); awaiting user acceptance |
 | Evidence commits | `dd0ee54eb0d6b4fed714b73a065f0505b18ff0e1`, `03a421438af09154b567d0c49d7c50c2aacc0b30`, `e7b33d74d1e59f045ec66dbabcf2865bcdb0cda7` (post-fix live recertification; pushed) |
 | M2 user acceptance owner and date | pending user review |
