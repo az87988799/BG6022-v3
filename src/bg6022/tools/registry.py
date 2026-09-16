@@ -7,7 +7,9 @@ from collections.abc import Iterable
 from typing import Any
 
 from bg6022.config import AppConfig
-from bg6022.models import Plan, ResultTarget, Tool
+from bg6022.models import Plan, Request, ResultTarget, Step, Tool
+from bg6022.orca.profiles import method_capability_catalog
+from bg6022.tools.geometry_distance import make_geometry_distance_tool
 from bg6022.tools.molecule import make_generate_geometry_tool
 from bg6022.tools.orca import make_frequency_tool, make_optimize_tool, make_single_point_tool
 from bg6022.tools.pubchem import make_resolve_molecule_tool
@@ -77,13 +79,70 @@ class ToolRegistry:
                 "tool": tool.name,
                 "operations": list(tool.operations),
                 "schema": tool.parameter_schema,
+                "request_parameters": list(tool.request_parameters),
                 "deferred_parameters": list(tool.deferred_parameters),
             }
             for tool in (self.get(name) for name in self.names())
-            if tool.available
-            and tool.parameter_preparation == "orca_electronic_state"
-            and tool.parameter_type is not None
+            if tool.available and tool.request_parameters and tool.parameter_type is not None
         ]
+
+    def method_capability_catalog(self) -> list[dict[str, Any]]:
+        """Return the shared registry-backed method profile directory."""
+
+        return method_capability_catalog()
+
+    def tools_for_request(
+        self,
+        operations: Iterable[str],
+        requested_results: Iterable[str | ResultTarget] = (),
+    ) -> list[Tool]:
+        """Return the available Tools involved in one request's semantics.
+
+        Operation-bearing Tools are selected by operation.  Operation-free
+        result producers are selected from the canonical result capability
+        catalog, which keeps tools such as ``geometry_distance`` in scope even
+        when the Request intentionally has no ORCA operation.
+        """
+
+        requested_operations = set(operations)
+        selected: dict[str, Tool] = {
+            tool.name: tool
+            for tool in (self.get(name) for name in self.names())
+            if tool.available
+            and requested_operations
+            and bool(requested_operations & set(tool.operations))
+        }
+        for raw_target in requested_results:
+            if isinstance(raw_target, ResultTarget):
+                target_name = raw_target.check or raw_target.port or raw_target.field
+            else:
+                target_name = raw_target
+            if not target_name:
+                continue
+            try:
+                target = self.resolve_result_target(
+                    str(target_name), requested_operations, canonical_only=False
+                )
+            except ValueError:
+                continue
+            identity = _target_identity(target)
+            for item in self.result_capabilities():
+                if (item["kind"], item["name"]) == identity:
+                    selected[item["tool"]] = self.get(item["tool"])
+        return [selected[name] for name in sorted(selected)]
+
+    def request_parameter_fields(
+        self,
+        operations: Iterable[str],
+        requested_results: Iterable[str | ResultTarget] = (),
+    ) -> set[str]:
+        """Return only request-level fields declared by involved Tools."""
+
+        return {
+            field
+            for tool in self.tools_for_request(operations, requested_results)
+            for field in tool.request_parameters
+        }
 
     def resolve_result_target(
         self,
@@ -149,6 +208,9 @@ class ToolRegistry:
             "electronic_energy": "electronic_energy",
             "geometry": "molecular_geometry",
             "molecular_geometry": "molecular_geometry",
+            "distance": "distance",
+            "interatomic_distance": "distance",
+            "bond_length": "distance",
         }
         property_name = property_aliases.get(name)
         if property_name is None:
@@ -281,6 +343,7 @@ def build_registry(config: AppConfig | None = None) -> ToolRegistry:
             make_single_point_tool(config),
             make_optimize_tool(config),
             make_frequency_tool(config),
+            make_geometry_distance_tool(config),
         ]
     )
 
@@ -290,7 +353,31 @@ def describe_tools() -> list[dict[str, Any]]:
     return build_registry().describe()
 
 
-__all__ = ["ToolRegistry", "build_registry", "describe_tools"]
+def merge_explicit_step_parameters(tool: Tool, step: Step, request: Request) -> Step:
+    """Project Request parameters into one Step without inventing defaults.
+
+    The merge order is deliberately explicit: planner candidate values are
+    the base, Request explicit values override them, and user modifications
+    override both.  Validation uses the Tool's own parameter model while the
+    returned mapping preserves which keys were actually supplied.
+    """
+
+    allowed = set(tool.request_parameters)
+    merged = dict(step.parameters)
+    for source in (request.explicit_parameters, request.user_modifications):
+        merged.update(
+            {key: value for key, value in source.items() if key in allowed and value is not None}
+        )
+    tool.validate_parameters(merged, allow_deferred=True)
+    return step.model_copy(update={"parameters": merged})
+
+
+__all__ = [
+    "ToolRegistry",
+    "build_registry",
+    "describe_tools",
+    "merge_explicit_step_parameters",
+]
 
 
 def _target_from_unique_capability(
@@ -301,6 +388,15 @@ def _target_from_unique_capability(
         raise ValueError(f"requested result alias {requested_name!r} is ambiguous")
     kind, canonical_name = next(iter(identities))
     return ResultTarget(**{kind: canonical_name})
+
+
+def _target_identity(target: ResultTarget) -> tuple[str, str]:
+    if target.check is not None:
+        return "check", target.check
+    if target.port is not None:
+        return "port", target.port
+    assert target.field is not None
+    return "field", target.field
 
 
 def _topological_order(steps: list[Any], dependencies: dict[str, set[str]]) -> list[Any]:

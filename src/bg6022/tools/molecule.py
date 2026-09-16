@@ -145,7 +145,7 @@ def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel
         reference = step.inputs.get("molecule")
         if reference is None:
             raise ValueError("generate_geometry requires a molecule input reference")
-        molecule_artifact = _resolve_artifact_reference(
+        molecule_artifact = resolve_artifact_reference(
             config, run, reference, expected_type="molecule"
         )
         molecule_path = artifact_path(config.data_root_path, run, molecule_artifact)
@@ -372,7 +372,7 @@ def _remaining_active_seconds(run: Run, config: AppConfig) -> float:
     return limit - run.current_active_seconds()
 
 
-def _resolve_artifact_reference(
+def resolve_artifact_reference(
     config: AppConfig, run: Run, reference: InputReference, *, expected_type: str
 ):
     if reference.artifact_id is not None:
@@ -577,5 +577,6 @@ __all__ = [
     "make_generate_geometry_tool",
     "parse_xyz_bytes",
     "parse_xyz_file",
+    "resolve_artifact_reference",
     "validate_electronic_state",
 ]

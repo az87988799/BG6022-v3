@@ -31,7 +31,7 @@ from bg6022.models import (
     Step,
 )
 from bg6022.tools.molecule import parse_xyz_bytes
-from bg6022.tools.registry import ToolRegistry
+from bg6022.tools.registry import ToolRegistry, merge_explicit_step_parameters
 
 Intent = Literal["chemistry_compute", "chemistry_qa", "daily_qa", "context_query"]
 QuerySelectionStatus = Literal["selected", "clarify", "unavailable"]
@@ -305,6 +305,9 @@ def intake_message(
                             if registry is not None
                             else []
                         ),
+                        "method_capability_catalog": (
+                            registry.method_capability_catalog() if registry is not None else []
+                        ),
                     }
                 ),
             },
@@ -398,6 +401,7 @@ def plan_message(
                         "request": request.model_dump(mode="json"),
                         "tool_directory": directory,
                         "capability_catalog": registry.result_capabilities(),
+                        "method_capability_catalog": registry.method_capability_catalog(),
                         "context": _bounded_context(context),
                         "validation_feedback": validation_feedback,
                     }
@@ -516,25 +520,46 @@ def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) 
     that check at the boundary where both Request and Plan are available.
     """
 
+    plan = Plan.model_validate(
+        {
+            **plan.model_dump(mode="python"),
+            "steps": [
+                merge_explicit_step_parameters(registry.get(step.tool), step, request)
+                for step in plan.steps
+            ],
+        },
+        strict=True,
+    )
     plan = registry.validate_plan(plan)
     _validate_required_geometry_bindings(request, plan, registry)
+    operation_free_distance_steps = [
+        step
+        for step in plan.steps
+        if not registry.get(step.tool).operations
+        and "distance" in set(registry.get(step.tool).result_properties.values())
+    ]
+    if len(operation_free_distance_steps) > 1:
+        raise ValueError("one Request may contain only one distance-measurement Step")
     proposed_operations = [
         operation for step in plan.steps for operation in registry.get(step.tool).operations
     ]
-    # A missing operation list is retained only for pre-composition explicit
-    # CLI/test Requests. Chat intake is rejected unless it declares an
-    # operation, so new user Plans always receive this full coverage check.
-    if request.operations and proposed_operations != request.operations:
-        missing = [item for item in request.operations if item not in proposed_operations]
-        extra = [item for item in proposed_operations if item not in request.operations]
-        if missing:
-            if len(missing) == 1:
-                label = {"SP": "SP", "Opt": "Opt", "Freq": "frequency"}[missing[0]]
-                raise ValueError(f"Plan does not cover the requested {label} calculation")
-            raise ValueError(f"Plan does not cover requested operation(s): {', '.join(missing)}")
-        if extra:
-            raise ValueError(f"Plan adds unrequested operation(s): {', '.join(extra)}")
-        raise ValueError("Plan operation order does not match the user's requested order")
+    # Chat requests always receive this full coverage check. An empty list is
+    # meaningful for operation-free Tools such as geometry_distance: an ORCA
+    # Tool cannot be smuggled into that request because it would add an item.
+    if request.source == "chat" or request.operations:
+        if proposed_operations != request.operations:
+            missing = [item for item in request.operations if item not in proposed_operations]
+            extra = [item for item in proposed_operations if item not in request.operations]
+            if missing:
+                if len(missing) == 1:
+                    label = {"SP": "SP", "Opt": "Opt", "Freq": "frequency"}[missing[0]]
+                    raise ValueError(f"Plan does not cover the requested {label} calculation")
+                raise ValueError(
+                    f"Plan does not cover requested operation(s): {', '.join(missing)}"
+                )
+            if extra:
+                raise ValueError(f"Plan adds unrequested operation(s): {', '.join(extra)}")
+            raise ValueError("Plan operation order does not match the user's requested order")
 
     plan_targets = plan.requested_results
     for request_target in request.requested_results:
@@ -596,9 +621,15 @@ def request_from_intake(
             + "。请明确这些要求，或重新指定只计算已支持的部分。"
         )
     if intake.intent == "chemistry_compute" and not intake.operations:
-        raise ValueError(
-            "the requested scientific operation is missing; please specify SP, Opt, or Freq"
-        )
+        if not intake.requested_results:
+            raise ValueError(
+                "an operation-free request must name a registered operation-free result"
+            )
+        operation_free_tools = registry.tools_for_request([], intake.requested_results)
+        if not operation_free_tools or any(tool.operations for tool in operation_free_tools):
+            raise ValueError(
+                "an operation-free request must target a registered operation-free Tool"
+            )
     if any(key in intake.structure_input for key in {"path", "local_path", "file"}):
         raise ValueError("model intake cannot authorize a local file path")
     normalized = normalized_parameters or normalize_user_explicit_parameters(
@@ -612,10 +643,16 @@ def request_from_intake(
     structure_input = dict(intake.structure_input)
     raw_bindings = structure_input.get("required_bindings")
     if raw_bindings is not None:
-        structure_input["required_bindings"] = [
-            RequiredGeometryBinding.model_validate(item, strict=True).model_dump(mode="json")
-            for item in raw_bindings
-        ]
+        normalized_bindings = []
+        for item in raw_bindings:
+            binding = RequiredGeometryBinding.model_validate(item, strict=True)
+            normalized_binding = binding.model_dump(mode="json")
+            if binding.consumer_operation is None:
+                normalized_binding.pop("consumer_operation", None)
+            else:
+                normalized_binding.pop("consumer_tool", None)
+            normalized_bindings.append(normalized_binding)
+        structure_input["required_bindings"] = normalized_bindings
     request = Request(
         id=request_id,
         description=message,
@@ -638,7 +675,7 @@ def request_from_intake(
         missing_fields=list(intake.missing_fields),
     )
     _validate_required_geometry_contract(request, registry)
-    _require_composite_geometry_sources(request)
+    _require_composite_geometry_sources(request, registry)
     return request
 
 
@@ -650,16 +687,22 @@ def intake_blocking_requirements(intake: IntakeOutput, registry: ToolRegistry) -
 
     requested_operations = set(intake.operations)
     deferred: set[str] = set()
-    for name in registry.names():
-        tool = registry.get(name)
-        if not tool.available:
-            continue
-        if requested_operations and not (requested_operations & set(tool.operations)):
-            continue
+    involved = registry.tools_for_request(requested_operations, intake.requested_results)
+    required_request_parameters: set[str] = set()
+    supplied = set(intake.explicit_parameters)
+    for tool in involved:
         deferred.update(tool.deferred_parameters)
+        if tool.parameter_type is not None:
+            required_request_parameters.update(
+                name
+                for name in tool.request_parameters
+                if tool.parameter_type.model_fields[name].is_required()
+                and name not in tool.deferred_parameters
+            )
 
     unclassified = [item for item in intake.missing_fields if item not in deferred]
-    return tuple(dict.fromkeys([*intake.unresolved_results, *unclassified]))
+    missing_declared = sorted(required_request_parameters - supplied)
+    return tuple(dict.fromkeys([*intake.unresolved_results, *unclassified, *missing_declared]))
 
 
 def filter_user_explicit_parameters(message: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
@@ -795,12 +838,32 @@ def _tool_for_operation(registry: ToolRegistry, operation: str):
 
 def _validate_required_geometry_contract(request: Request, registry: ToolRegistry) -> None:
     for binding in _required_geometry_bindings(request):
-        if binding.consumer_operation not in request.operations:
-            raise ValueError(
-                f"geometry binding consumer {binding.consumer_operation!r} "
-                "is not a requested operation"
-            )
-        consumer = _tool_for_operation(registry, binding.consumer_operation)
+        if binding.consumer_operation is not None:
+            if binding.consumer_operation not in request.operations:
+                raise ValueError(
+                    f"geometry binding consumer {binding.consumer_operation!r} "
+                    "is not a requested operation"
+                )
+            consumer = _tool_for_operation(registry, binding.consumer_operation)
+        else:
+            consumer_name = binding.consumer_tool
+            if consumer_name is None:
+                raise ValueError("geometry binding has no consumer selector")
+            try:
+                consumer = registry.get(consumer_name)
+            except ValueError as error:
+                raise ValueError(
+                    f"geometry binding consumer Tool {consumer_name!r} is not registered"
+                ) from error
+            if not consumer.available:
+                raise ValueError(f"geometry binding consumer Tool {consumer_name!r} is unavailable")
+            if consumer not in registry.tools_for_request(
+                request.operations, request.requested_results
+            ):
+                raise ValueError(
+                    f"geometry binding consumer Tool {consumer_name!r} is not involved "
+                    "in this Request"
+                )
         input_type = consumer.input_ports.get(binding.input_port)
         if input_type is None:
             raise ValueError(f"Tool {consumer.name!r} has no input port {binding.input_port!r}")
@@ -827,19 +890,35 @@ def _validate_required_geometry_contract(request: Request, registry: ToolRegistr
             )
 
 
-def _require_composite_geometry_sources(request: Request) -> None:
+def _require_composite_geometry_sources(request: Request, registry: ToolRegistry) -> None:
     operations = set(request.operations)
     if "Opt" not in operations:
         return
     bindings = _required_geometry_bindings(request)
-    bound_operations = {item.consumer_operation for item in bindings}
+    bound_operations = {
+        item.consumer_operation for item in bindings if item.consumer_operation is not None
+    }
+    bound_tools = {item.consumer_tool for item in bindings if item.consumer_tool is not None}
+    consumers: list[tuple[str, str]] = []
+    for tool in registry.tools_for_request(request.operations, request.requested_results):
+        if "geometry" not in tool.input_ports:
+            continue
+        if "Opt" in tool.operations:
+            continue
+        selector = tool.name
+        if tool.operations:
+            for operation in tool.operations:
+                if operation in operations:
+                    consumers.append(("operation", operation))
+        else:
+            consumers.append(("tool", selector))
     missing = [
-        operation
-        for operation in ("Freq", "SP")
-        if operation in operations and operation not in bound_operations
+        (kind, name)
+        for kind, name in consumers
+        if (name not in bound_operations if kind == "operation" else name not in bound_tools)
     ]
     if missing:
-        names = "、".join(missing)
+        names = "、".join(name for _kind, name in missing)
         raise ValueError(
             f"请明确 {names} 使用优化后的结构还是初始结构；我没有让 Planner 自行选择几何来源。"
         )
@@ -853,15 +932,21 @@ def _validate_required_geometry_bindings(
     if not bindings:
         return
     steps_by_operation: dict[str, list[Step]] = {}
+    steps_by_tool: dict[str, list[Step]] = {}
     for step in plan.steps:
-        for operation in registry.get(step.tool).operations:
+        tool = registry.get(step.tool)
+        steps_by_tool.setdefault(tool.name, []).append(step)
+        for operation in tool.operations:
             steps_by_operation.setdefault(operation, []).append(step)
     for binding in bindings:
-        consumers = steps_by_operation.get(binding.consumer_operation, [])
+        consumers = (
+            steps_by_operation.get(binding.consumer_operation, [])
+            if binding.consumer_operation is not None
+            else steps_by_tool.get(binding.consumer_tool or "", [])
+        )
         if len(consumers) != 1:
-            raise ValueError(
-                f"geometry binding cannot identify one {binding.consumer_operation} Step"
-            )
+            selector = binding.consumer_operation or binding.consumer_tool
+            raise ValueError(f"geometry binding cannot identify one {selector} Step")
         consumer = consumers[0]
         actual = consumer.inputs.get(binding.input_port)
         if actual is None:
@@ -1231,9 +1316,6 @@ def _intake_schema(
     allowed_subjects = frozenset(candidate_refs)
     capabilities = [dict(item) for item in capability_catalog]
     allowed_targets = tuple(sorted({str(item["name"]) for item in capabilities}))
-    parameter_capabilities = (
-        registry.request_parameter_capabilities() if registry is not None else []
-    )
 
     def _targets_are_candidates(value: list[QueryTarget]) -> list[QueryTarget]:
         unknown = sorted({target.subject_ref for target in value} - allowed_subjects)
@@ -1262,27 +1344,42 @@ def _intake_schema(
                 )
         return value
 
-    def _explicit_parameters_are_declared(
-        value: dict[str, Any], info: ValidationInfo
-    ) -> dict[str, Any]:
-        if not value or info.data.get("intent") != "chemistry_compute":
+    def _request_contract(value: IntakeOutput) -> IntakeOutput:
+        if value.intent != "chemistry_compute":
             return value
         if registry is None:
-            raise ValueError("parameter capability catalog is required")
-
-        operations = set(info.data.get("operations", []))
-        allowed: set[str] = set()
-        for item in parameter_capabilities:
-            if operations and not (operations & set(item["operations"])):
-                continue
-            allowed.update(item["schema"].get("properties", {}))
-
-        unknown = sorted(set(value) - allowed)
+            if value.explicit_parameters or not value.operations:
+                raise ValueError("parameter capability catalog is required")
+            return value
+        involved = registry.tools_for_request(value.operations, value.requested_results)
+        allowed = {name for tool in involved for name in tool.request_parameters}
+        if not value.operations and not value.requested_results:
+            # A parameter-only continuation is intentionally parsed before the
+            # Agent decides whether a waiting Run can consume it.  It is not a
+            # standalone operation-free Request; request_from_intake rejects
+            # that case unless a real operation-free result is named.
+            allowed = {
+                name
+                for item in registry.request_parameter_capabilities()
+                for name in item["request_parameters"]
+            }
+        unknown = sorted(set(value.explicit_parameters) - allowed)
         if unknown:
             raise ValueError(
                 "explicit parameter names are outside the Tool catalog: "
                 f"{unknown}; allowed names: {sorted(allowed)}"
             )
+        if not value.operations and not value.requested_results:
+            return value
+        if not value.operations:
+            if not value.requested_results or not involved:
+                raise ValueError(
+                    "an operation-free chemistry request must target an available result Tool"
+                )
+            if any(tool.operations for tool in involved):
+                raise ValueError(
+                    "an operation-free chemistry request cannot target an ORCA operation"
+                )
         return value
 
     def _required_geometry_bindings_are_valid(value: IntakeOutput) -> IntakeOutput:
@@ -1297,12 +1394,21 @@ def _intake_schema(
             id="intake_geometry_validation",
             description="validate intake geometry bindings",
             operations=list(value.operations),
+            requested_results=[
+                registry.resolve_result_target(target, value.operations, canonical_only=True)
+                if registry is not None
+                else ResultTarget(field=target)
+                for target in value.requested_results
+            ],
             structure_input=structure_value,
         )
         bindings = _required_geometry_bindings(request)
         operations = set(request.operations)
         for binding in bindings:
-            if binding.consumer_operation not in operations:
+            if (
+                binding.consumer_operation is not None
+                and binding.consumer_operation not in operations
+            ):
                 raise ValueError(
                     f"geometry binding consumer {binding.consumer_operation!r} "
                     "is not a requested operation"
@@ -1321,9 +1427,7 @@ def _intake_schema(
         "_requested_results_are_available": field_validator("requested_results")(
             _requested_results_are_available
         ),
-        "_explicit_parameters_are_declared": field_validator("explicit_parameters")(
-            _explicit_parameters_are_declared
-        ),
+        "_request_contract": model_validator(mode="after")(_request_contract),
         "_required_geometry_bindings_are_valid": model_validator(mode="after")(
             _required_geometry_bindings_are_valid
         ),
@@ -1450,6 +1554,12 @@ def _query_property_evidence_matches(property_name: str, evidence: str, message:
         return _has_affirmed_property_phrase(
             ("原子数", "atom count", "number of atoms"), evidence, message
         )
+    if property_name == "distance":
+        return _has_affirmed_property_phrase(
+            ("距离", "间距", "distance", "bond length", "bond-length"),
+            evidence,
+            message,
+        )
     return False
 
 
@@ -1483,7 +1593,8 @@ def _geometry_output_requested(evidence: str) -> bool:
     """Separate a structure mentioned as the subject from a requested output."""
 
     other_property = (
-        r"电子能|能量|zero[-\s]?point|zpe|自由能|free\s+energy|频率|frequency|原子数|atom\s+count"
+        r"电子能|能量|zero[-\s]?point|zpe|自由能|free\s+energy|频率|frequency|"
+        r"原子数|atom\s+count|距离|间距|distance|bond\s+length"
     )
     action_before = (
         r"给我|给出|输出|提供|返回|展示|显示|列出|(?<!不)需要|想要|希望|要求|"

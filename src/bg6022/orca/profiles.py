@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from bg6022.tools.molecule import SUPPORTED_ELEMENTS
@@ -16,6 +16,10 @@ class MethodProfile:
     supported_environments: frozenset[str]
     supported_elements: frozenset[str]
     supported_operations: frozenset[str]
+    display_name: str = ""
+    aliases: frozenset[str] = frozenset()
+    validated_orca_versions: frozenset[str] = frozenset()
+    repair_options_by_operation: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -31,20 +35,62 @@ R2SCAN3C = MethodProfile(
     supported_environments=frozenset({"gas"}),
     supported_elements=SUPPORTED_ELEMENTS,
     supported_operations=frozenset({"SP", "Opt", "Freq"}),
+    display_name="r²SCAN-3c",
+    aliases=frozenset({"r2scan3c", "r2scan-3c", "r2scan_3c"}),
+    repair_options_by_operation={
+        "SP": ("increase_scf_maxiter",),
+        "Opt": ("restart_optimization", "increase_scf_maxiter"),
+        "Freq": (),
+    },
 )
 
-PROFILES = {R2SCAN3C.name: R2SCAN3C}
+B3LYP_D3BJ_DEF2SVP = MethodProfile(
+    name="b3lyp_d3bj_def2svp",
+    orca_keyword="B3LYP D3BJ def2-SVP def2/J RIJCOSX",
+    supported_environments=frozenset({"gas"}),
+    supported_elements=frozenset({"H", "C", "N", "O"}),
+    supported_operations=frozenset({"SP", "Opt", "Freq"}),
+    display_name="B3LYP-D3(BJ)/def2-SVP（RIJCOSX, def2/J）",
+    aliases=frozenset({"b3lyp-d3(bj)/def2-svp", "b3lyp-d3bj/def2-svp"}),
+    validated_orca_versions=frozenset({"6.1.1"}),
+    repair_options_by_operation={"SP": (), "Opt": (), "Freq": ()},
+)
+
+PROFILES = {profile.name: profile for profile in (R2SCAN3C, B3LYP_D3BJ_DEF2SVP)}
 
 
 def get_profile(name: str) -> MethodProfile:
+    canonical = normalize_method_profile(name)
     try:
-        return PROFILES[name]
+        return PROFILES[canonical]
     except KeyError as error:
         raise ValueError(f"method profile is not registered: {name}") from error
 
 
 def list_profiles() -> tuple[MethodProfile, ...]:
     return tuple(PROFILES.values())
+
+
+def method_capability_catalog() -> list[dict[str, Any]]:
+    """Return the single model-readable catalog for registered method profiles."""
+
+    return [
+        {
+            "name": profile.name,
+            "display_name": profile.display_name or profile.name,
+            "orca_keyword": profile.orca_keyword,
+            "aliases": sorted(profile.aliases),
+            "environments": sorted(profile.supported_environments),
+            "operations": sorted(profile.supported_operations),
+            "supported_elements": sorted(profile.supported_elements),
+            "validated_orca_versions": sorted(profile.validated_orca_versions),
+            "repair_options_by_operation": {
+                operation: list(options)
+                for operation, options in sorted(profile.repair_options_by_operation.items())
+            },
+        }
+        for profile in list_profiles()
+    ]
 
 
 def resolve_parameters(
@@ -160,12 +206,16 @@ def resolve_parameters(
 
 
 def _normalize_method_profile(value: Any) -> Any:
-    aliases = {
-        "r2scan-3c": "r2scan3c",
-        "r2scan_3c": "r2scan3c",
-        "r2scan3c": "r2scan3c",
-    }
-    return aliases.get(str(value).casefold(), value)
+    return normalize_method_profile(value)
+
+
+def normalize_method_profile(value: Any) -> Any:
+    text = str(value).strip().casefold()
+    for profile in list_profiles():
+        aliases = {profile.name.casefold(), *(alias.casefold() for alias in profile.aliases)}
+        if text in aliases:
+            return profile.name
+    return value
 
 
 def _structure_aliases(facts: Mapping[str, Any], wanted: str, *aliases: str) -> Mapping[str, Any]:
@@ -202,8 +252,11 @@ __all__ = [
     "MethodProfile",
     "PROFILES",
     "ParameterResolution",
+    "B3LYP_D3BJ_DEF2SVP",
     "R2SCAN3C",
     "get_profile",
     "list_profiles",
+    "method_capability_catalog",
+    "normalize_method_profile",
     "resolve_parameters",
 ]

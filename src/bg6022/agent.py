@@ -56,7 +56,7 @@ from .session import (
     utc_now,
 )
 from .tools.molecule import parse_xyz_bytes, validate_electronic_state
-from .tools.registry import ToolRegistry
+from .tools.registry import ToolRegistry, merge_explicit_step_parameters
 
 INPUT_GEOMETRY_PLACEHOLDER = "__input_geometry__"
 MAX_QUERY_CATALOG_ITEMS = 24
@@ -124,7 +124,8 @@ class Agent:
         _validate_request_parameter_scope(request, plan, self.registry)
         # The explicit command has always checked the machine before creating a
         # Run. Chat intentionally defers this check until an ORCA Tool starts.
-        validate_execution_environment(self.config)
+        if any(self.registry.get(step.tool).execution_budget == "orca" for step in plan.steps):
+            validate_execution_environment(self.config)
         geometry_path = Path(xyz_path).resolve()
         parse_xyz_bytes(geometry_path.read_bytes())
         run = Run(
@@ -878,9 +879,13 @@ class Agent:
 
     def _prepare_orca_step(self, run: Run, step: Step) -> Step | None:
         tool = self.registry.get(step.tool)
-        partial_parameters = tool.validate_parameters(step.parameters, allow_deferred=True)
-        if partial_parameters != step.parameters:
-            step = step.model_copy(update={"parameters": partial_parameters})
+        original_parameters = dict(step.parameters)
+        checked_parameters = tool.validate_parameters(original_parameters, allow_deferred=True)
+        supplied_parameters = {
+            name: checked_parameters[name]
+            for name in original_parameters
+            if name in checked_parameters
+        }
         parameter_fields = _tool_parameter_fields(tool)
         if (
             run.accepted_snapshot
@@ -902,7 +907,7 @@ class Agent:
         resolution = resolve_parameters(
             run.request.explicit_parameters,
             facts,
-            step.parameters,
+            supplied_parameters,
             self.config.defaults,
             user_modifications=run.request.user_modifications,
             parameter_fields=parameter_fields,
@@ -938,12 +943,10 @@ class Agent:
     ) -> AgentResponse:
         if cancel is not None and cancel.is_set():
             return AgentResponse("当前请求已取消。", run=run)
-        science_steps = [
-            item
-            for item in run.plan.steps
-            if self.registry.get(item.tool).parameter_preparation == "orca_electronic_state"
+        editable_steps = [
+            item for item in run.plan.steps if self.registry.get(item.tool).request_parameters
         ]
-        if not science_steps:
+        if not editable_steps:
             return AgentResponse("等待中的任务没有可编辑的计算步骤。", run=run)
         if not parameters:
             return AgentResponse("没有识别到可应用的计算参数修改。", run=run)
@@ -966,8 +969,26 @@ class Agent:
             candidate_sources: dict[str, dict[str, str]] = {}
             for step in run.plan.steps:
                 tool = self.registry.get(step.tool)
-                if tool.parameter_preparation != "orca_electronic_state":
+                if not tool.request_parameters:
                     candidate_steps.append(step)
+                    continue
+
+                if tool.parameter_preparation != "orca_electronic_state":
+                    replacement = merge_explicit_step_parameters(tool, step, candidate_request)
+                    candidate_steps.append(replacement)
+                    candidate_sources[step.id] = {
+                        name: (
+                            "user_modification"
+                            if name in candidate_request.user_modifications
+                            else "request_explicit"
+                        )
+                        for name in tool.request_parameters
+                        if name in replacement.parameters
+                        and (
+                            name in candidate_request.user_modifications
+                            or name in candidate_request.explicit_parameters
+                        )
+                    }
                     continue
 
                 parameter_fields = _tool_parameter_fields(tool)
@@ -976,11 +997,12 @@ class Agent:
                 }
                 merged = dict(step.parameters)
                 merged.update(step_patch)
-                partial = tool.validate_parameters(merged, allow_deferred=True)
+                checked = tool.validate_parameters(merged, allow_deferred=True)
+                supplied = {name: checked[name] for name in merged if name in checked}
                 resolution = resolve_parameters(
                     candidate_request.explicit_parameters,
                     self._known_structure_facts(run, step),
-                    partial,
+                    supplied,
                     self.config.defaults,
                     user_modifications=candidate_request.user_modifications,
                     parameter_fields=parameter_fields,
@@ -1506,7 +1528,11 @@ class Agent:
         iteration_increase_allowed = _iteration_increase_allowed(run.request.description)
         scopes: dict[str, Any] = {}
         for step in run.plan.steps:
-            capabilities = set(self.registry.get(step.tool).repair_capabilities)
+            tool = self.registry.get(step.tool)
+            try:
+                capabilities = set(tool.applicable_repair_capabilities(step.parameters))
+            except (TypeError, ValueError):
+                capabilities = set()
             mutable_parameters: list[str] = []
             immutable_parameters = ["method_profile", "environment", "charge", "multiplicity"]
             actions: dict[str, Any] = {}
@@ -2301,6 +2327,7 @@ class Agent:
                 "opt_final_electronic_energy": "优化后的电子能",
                 "optimized_geometry": "优化后的几何",
                 "geometry": "初始几何",
+                "interatomic_distance": "原子间距离",
             }.get(name, name.replace("_", " "))
             label_step = candidates[0] if candidates else producers[0] if producers else None
             if label_step is not None:
@@ -2720,8 +2747,7 @@ def _validate_selected_geometry_binding(
             "a supplied geometry must be used directly without new structure preparation"
         )
     if not any(
-        step.tool in {"single_point", "optimize_geometry", "frequency"}
-        and (reference := step.inputs.get("geometry")) is not None
+        (reference := step.inputs.get("geometry")) is not None
         and reference.artifact_id == selected_alias
         for step in plan.steps
     ):
@@ -2799,8 +2825,7 @@ def _validate_request_parameter_scope(request: Request, plan: Plan, registry: To
     supported_names: set[str] = set()
     for step in plan.steps:
         tool = registry.get(step.tool)
-        if tool.parameter_preparation == "orca_electronic_state":
-            supported_names.update(_tool_parameter_fields(tool))
+        supported_names.update(tool.request_parameters)
     unscoped = sorted(explicit_names - supported_names)
     if unscoped:
         raise ValueError(
@@ -3183,6 +3208,31 @@ def _query_value_is_compatible(value: Any, declared_type: str) -> bool:
             except ValueError:
                 return False
         return True
+    if declared_type == "angstrom":
+        if not isinstance(value, Mapping):
+            return False
+        raw = value.get("value")
+        if type(raw) not in {int, float} or not math.isfinite(float(raw)):
+            return False
+        if value.get("unit") != "angstrom":
+            return False
+        atom_indices = value.get("atom_indices")
+        if atom_indices is not None:
+            if (
+                not isinstance(atom_indices, list)
+                or len(atom_indices) != 2
+                or any(type(item) is not int or item < 1 for item in atom_indices)
+                or atom_indices[0] == atom_indices[1]
+            ):
+                return False
+        atom_symbols = value.get("atom_symbols")
+        if atom_symbols is not None and (
+            not isinstance(atom_symbols, list)
+            or len(atom_symbols) != 2
+            or any(not isinstance(item, str) or not item for item in atom_symbols)
+        ):
+            return False
+        return True
     if declared_type == "integer":
         if isinstance(value, Mapping):
             value = value.get("value")
@@ -3211,6 +3261,7 @@ def _step_purpose(step: Step) -> str:
         "single_point": "计算单点电子能",
         "optimize_geometry": "进行几何优化并检查收敛",
         "frequency": "计算振动频率并检查 Hessian",
+        "geometry_distance": "测量指定原子间距离",
     }.get(step.tool, step.tool)
 
 

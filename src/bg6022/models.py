@@ -64,10 +64,19 @@ class RequiredGeometryBinding(StrictModel):
     output port identify the required upstream source.
     """
 
-    consumer_operation: Operation
+    consumer_operation: Operation | None = None
+    consumer_tool: str | None = None
     input_port: str
     source_operation: Operation | None
     source_port: str
+
+    @model_validator(mode="after")
+    def _one_consumer_selector(self) -> RequiredGeometryBinding:
+        if (self.consumer_operation is None) == (self.consumer_tool is None):
+            raise ValueError(
+                "geometry binding must identify exactly one consumer_operation or consumer_tool"
+            )
+        return self
 
 
 _REQUIRED_GEOMETRY_BINDINGS = TypeAdapter(list[RequiredGeometryBinding])
@@ -120,7 +129,16 @@ class Request(StrictModel):
         if raw_bindings is None:
             return value
         bindings = _REQUIRED_GEOMETRY_BINDINGS.validate_python(raw_bindings, strict=True)
-        identities = [(item.consumer_operation, item.input_port) for item in bindings]
+        identities = [
+            (
+                "operation",
+                item.consumer_operation,
+                item.input_port,
+            )
+            if item.consumer_operation is not None
+            else ("tool", item.consumer_tool, item.input_port)
+            for item in bindings
+        ]
         if len(identities) != len(set(identities)):
             raise ValueError("required geometry bindings must be unique per calculation input")
         return value
@@ -314,6 +332,7 @@ ResultProperty = Literal[
     "free_energy",
     "frequency",
     "atom_count",
+    "distance",
 ]
 
 
@@ -336,8 +355,12 @@ class Tool(StrictModel):
     parameter_preparation: Literal["none", "orca_electronic_state"] = "none"
     execution_budget: Literal["none", "orca"] = "none"
     deferred_parameters: list[str] = Field(default_factory=list)
+    request_parameters: list[str] = Field(default_factory=list)
     available: bool = True
     execute_function: ExecuteFunction | None = Field(default=None, exclude=True, repr=False)
+    repair_capabilities_function: Callable[[dict[str, Any]], list[str]] | None = Field(
+        default=None, exclude=True, repr=False
+    )
 
     model_config = ConfigDict(
         extra="forbid", strict=True, arbitrary_types_allowed=True, validate_assignment=True
@@ -363,6 +386,19 @@ class Tool(StrictModel):
             extra = sorted(set(metadata) - allowed)
             if extra:
                 raise ValueError(f"result metadata for {name!r} has unsupported keys: {extra}")
+        if len(self.request_parameters) != len(set(self.request_parameters)):
+            raise ValueError("request_parameters must not contain duplicates")
+        if self.request_parameters and self.parameter_type is None:
+            raise ValueError("request_parameters require a parameter model")
+        if self.parameter_type is not None:
+            unknown_request_parameters = sorted(
+                set(self.request_parameters) - set(self.parameter_type.model_fields)
+            )
+            if unknown_request_parameters:
+                raise ValueError(
+                    "request_parameters are not fields of the parameter model: "
+                    f"{unknown_request_parameters}"
+                )
         return self
 
     def execute(self, step: Step, run: Run, *, cancel: Any) -> Result:
@@ -394,6 +430,17 @@ class Tool(StrictModel):
             mode="python", exclude_none=True
         )
 
+    def applicable_repair_capabilities(self, parameters: dict[str, Any]) -> list[str]:
+        """Return repair actions permitted for this Tool and its parameters."""
+
+        if self.repair_capabilities_function is None:
+            selected = list(self.repair_capabilities)
+        else:
+            selected = list(self.repair_capabilities_function(dict(parameters)))
+        if not set(selected) <= set(self.repair_capabilities):
+            raise ValueError("parameter adapter cannot expand the Tool repair capabilities")
+        return selected
+
     def description_json(self) -> dict[str, Any]:
         return self.model_dump(mode="json", exclude={"execute_function"})
 
@@ -405,6 +452,7 @@ __all__ = [
     "Request",
     "Result",
     "ResultTarget",
+    "ResultProperty",
     "Run",
     "RunStatus",
     "Step",
