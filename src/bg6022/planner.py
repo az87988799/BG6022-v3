@@ -36,6 +36,7 @@ from bg6022.molecule_identity import (
     MoleculeInputKind,
     build_identity_constraint,
     normalize_identity_for_storage,
+    validate_resolve_binding,
 )
 from bg6022.output_contracts import property_evidence_matches
 from bg6022.tools.molecule import parse_xyz_bytes
@@ -653,7 +654,6 @@ def _validate_molecule_identity_contract(
     if not isinstance(identity, Mapping):
         return
     expected_kind = identity.get("input_kind")
-    expected_query = identity.get("lookup_query") or identity.get("raw_query")
     selected_cid = identity.get("selected_cid")
     selected_smiles = identity.get("selected_smiles")
     resolve_steps = [step for step in plan.steps if step.tool == "resolve_molecule"]
@@ -670,39 +670,19 @@ def _validate_molecule_identity_contract(
             return
         if len(resolve_steps) != 1:
             raise ValueError("a formula request must have exactly one formula-resolve Step")
-        parameters = resolve_steps[0].parameters
-        if parameters.get("input_kind") != "formula":
-            raise ValueError("the Planner cannot replace a formula request with a name/CID/SMILES")
-        if parameters.get("query") != identity.get("raw_query"):
-            raise ValueError("the formula-resolve Step must preserve the user's original formula")
     if selected_cid is not None:
         if len(resolve_steps) != 1:
             raise ValueError("a selected molecule identity must have one resolve Step")
-        parameters = resolve_steps[0].parameters
-        if parameters.get("input_kind") not in {"cid", "smiles", "formula", expected_kind}:
-            raise ValueError("the selected molecule identity is not bound to the resolve Step")
     if selected_smiles is not None:
         if len(resolve_steps) != 1:
             raise ValueError("a selected SMILES identity must have one resolve Step")
-        parameters = resolve_steps[0].parameters
-        if parameters.get("input_kind") != "smiles" or parameters.get("query") != selected_smiles:
-            raise ValueError("the selected SMILES is not bound to the resolve Step")
-    if resolve_steps and expected_query is not None:
-        parameters = resolve_steps[0].parameters
-        if (
-            expected_kind == "formula"
-            and selected_cid is None
-            and selected_smiles is None
-        ):
-            return
-        if (
-            parameters.get("query") != expected_query
-            and selected_cid is None
-            and selected_smiles is None
-        ):
-            # A formula plus an explicitly named/CID query carries both
-            # constraints; the lookup query is the one the user supplied.
-            raise ValueError("the resolve Step changed the user's molecule identity query")
+    if resolve_steps:
+        if len(resolve_steps) != 1:
+            raise ValueError("a molecule identity must have at most one resolve Step")
+        try:
+            validate_resolve_binding(identity, resolve_steps[0].parameters)
+        except ValueError as error:
+            raise ValueError(str(error)) from error
 
 
 def request_from_intake(
@@ -1928,9 +1908,7 @@ def _followup_subject_is_safe(
         if isinstance(item.get("subject_ref"), str)
     }
     subject = _explicit_followup_subject(message)
-    target_items = [
-        item for item in recent_items if item.get("subject_ref") == target.subject_ref
-    ]
+    target_items = [item for item in recent_items if item.get("subject_ref") == target.subject_ref]
     if subject is not None:
         return bool(target_items) and any(
             _catalog_subject_matches(subject, item) for item in target_items
@@ -1980,9 +1958,7 @@ def _catalog_subject_matches(subject: str, item: Mapping[str, Any]) -> bool:
     system = item.get("system")
     if isinstance(system, Mapping):
         values.extend(
-            str(system[key])
-            for key in ("formula", "title", "query", "cid")
-            if key in system
+            str(system[key]) for key in ("formula", "title", "query", "cid") if key in system
         )
     task = item.get("task")
     if isinstance(task, Mapping) and isinstance(task.get("description"), str):

@@ -11,18 +11,21 @@ from the supplied `geometry_catalog`. Never emit file paths, Artifact IDs,
 execution permissions, hashes, Run states, energies, or arbitrary commands.
 Missing charge or multiplicity may remain absent for program-side clarification.
 
-For a formula input, keep exactly one `resolve_molecule` Step with
-`input_kind: "formula"` and the complete user formula as `query`; do not
-replace it with a common name, a guessed CID, or an arbitrary SMILES. The
-program verifies RDKit-computed element counts, neutral single-component
-identity, and source metadata before accepting a candidate. A formula may
-produce a bounded candidate clarification; do not bypass it by selecting the
-first result. If the Request contains inline XYZ, bind that geometry directly
-and do not add a molecule-resolve Step; the program still checks its element
-counts against the formula. When a user selects a candidate, preserve the
-current pending identity snapshot and its candidate CID. A new explicit
-SMILES/name/CID request replaces the identity constraint and must be validated
-as a new request.
+For an unselected formula input, keep exactly one `resolve_molecule` Step with
+`input_kind: "formula"` and the program-provided
+`Request.structure_input.molecule_identity.lookup_query` as `query`; this may
+be a safe case-normalized spelling while `raw_query` preserves the user's
+text. Do not replace it with a common name, a guessed CID, or an arbitrary
+SMILES. The program verifies RDKit-computed element counts, neutral
+single-component identity, and source metadata before accepting a candidate.
+A formula may produce a bounded candidate clarification; do not bypass it by
+selecting the first result. If the Request contains inline XYZ, bind that
+geometry directly and do not add a molecule-resolve Step; the program still
+checks its element counts against the formula. When a user selects a
+candidate, bind its CID as the resolve query while retaining the original
+formula constraint; any saved SMILES is a structure check, not a reason to
+change the query kind. A new explicit SMILES/name/CID request replaces the
+identity constraint and must be validated as a new request.
 
 For `geometry_distance`, pass `atom_i` and `atom_j` exactly from the Request,
 with no charge, multiplicity, method, or environment. Its geometry input must

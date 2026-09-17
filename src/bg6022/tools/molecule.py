@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Thread
@@ -205,13 +206,10 @@ def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel
             comment=f"BG6022 v3 RDKit ETKDGv3 seed {used_seed}",
         )
         geometry = parse_xyz_bytes(geometry_bytes)
-        expected_counts = facts.get("element_counts")
-        if isinstance(expected_counts, dict):
-            actual_counts = dict(Counter(geometry.symbols))
-            if actual_counts != expected_counts:
-                raise ValueError(
-                    "generated geometry element counts do not match the resolved molecule"
-                )
+        expected_counts = _verified_molecule_counts(facts)
+        actual_counts = dict(Counter(geometry.symbols))
+        if actual_counts != expected_counts:
+            raise ValueError("generated geometry element counts do not match the resolved molecule")
         geometry_artifact = register_bytes_artifact(
             config.data_root_path,
             run,
@@ -389,6 +387,47 @@ def _remaining_active_seconds(run: Run, config: AppConfig) -> float:
         run.resources.get("run_active_timeout_seconds", config.runtime.run_active_timeout_seconds)
     )
     return limit - run.current_active_seconds()
+
+
+def _verified_molecule_counts(facts: Mapping[str, Any]) -> dict[str, int]:
+    """Derive composition from retained SMILES and tolerate only legacy H:0."""
+
+    smiles = facts.get("isomeric_smiles") or facts.get("canonical_smiles")
+    if not isinstance(smiles, str) or not smiles:
+        stored = facts.get("element_counts")
+        if not isinstance(stored, dict) or not stored:
+            raise ValueError("molecule artifact has no verifiable element counts")
+        _validate_stored_counts(stored)
+        return {str(element): int(count) for element, count in stored.items() if count > 0}
+    # Keep one production RDKit fact implementation.  The import is local to
+    # avoid coupling module registration to the PubChem adapter.
+    from bg6022.tools.pubchem import _facts_from_smiles
+
+    derived = _facts_from_smiles(smiles).get("element_counts")
+    if not isinstance(derived, dict) or not derived:
+        raise ValueError("retained molecule SMILES produced no element counts")
+    stored = facts.get("element_counts")
+    if stored is not None:
+        if not isinstance(stored, dict):
+            raise ValueError("molecule artifact element_counts is invalid")
+        _validate_stored_counts(stored)
+        for element, count in stored.items():
+            if count == 0 and element == "H":
+                # Older artifacts could serialize implicit hydrogen as H:0;
+                # the retained structure is authoritative for this one repair.
+                continue
+            if count != derived.get(element):
+                raise ValueError("molecule artifact element counts disagree with its SMILES")
+        for element, count in derived.items():
+            if stored.get(element) != count and not (element == "H" and stored.get(element) == 0):
+                raise ValueError("molecule artifact element counts disagree with its SMILES")
+    return {str(element): int(count) for element, count in derived.items() if count > 0}
+
+
+def _validate_stored_counts(stored: Mapping[str, Any]) -> None:
+    for element, count in stored.items():
+        if element not in SUPPORTED_ELEMENTS or type(count) is not int or count < 0:
+            raise ValueError("molecule artifact element counts contain an invalid value")
 
 
 def resolve_artifact_reference(

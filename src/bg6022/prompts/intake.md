@@ -15,6 +15,13 @@ return `molecule_identity` or any calculated formula/charge facts in
 a formula and an explicit name/CID, preserve both by keeping the explicit
 lookup query and letting the program verify the formula constraint.
 
+The program may normalize only an unambiguous formula spelling such as
+`C4h10` or `c4h10` to its safe `lookup_query` later; do not apply whole-string
+uppercasing. A labelled SMILES (`SMILES:`, `SMILES=`, or the full-width-colon
+form, with or without a space before the label) is authoritative and must stay
+`molecule_input_kind: "smiles"` with its original case. Do not turn a SMILES
+ring digit or a model-suggested replacement structure into a formula.
+
 When an earlier molecule lookup asks for a candidate, a reply such as a listed
 candidate number or CID selects only from the current candidate snapshot. A
 new explicit SMILES or a clearly changed molecule is a new identity request;

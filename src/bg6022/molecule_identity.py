@@ -1,10 +1,4 @@
-"""Program-owned molecule identity constraints and ordinary formula parsing.
-
-The intake model may suggest a molecule query, but this module constructs the
-identity facts that are allowed to cross into a Request.  In particular, a
-formula is a composition constraint; it is not permission to choose the first
-structure returned by a remote service.
-"""
+"""Program-owned molecule identity constraints and ordinary formula parsing."""
 
 from __future__ import annotations
 
@@ -18,22 +12,27 @@ MoleculeInputKind = Literal["name", "cas", "cid", "smiles", "formula"]
 SUPPORTED_FORMULA_ELEMENTS = frozenset({"H", "C", "N", "O", "F", "P", "S", "Cl", "Br", "I"})
 _SUBSCRIPTS = str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")
 _TOKEN = re.compile(r"([A-Z][a-z]?)([1-9][0-9]*)?")
-_FORMULA_TOKEN = re.compile(
-    r"(?<![A-Za-z0-9_])(?:[A-Z][a-z]?(?:[0-9₀-₉]+)?){1,16}(?![A-Za-z0-9_])"
+_FORMULA_TOKEN = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9₀-₉]*(?![A-Za-z0-9_])")
+_FORMULA_LABEL = re.compile(r"(?i)(?<![A-Za-z0-9_])(?:formula|molecular\s+formula|分子式)\s*[:=：]")
+_FORMULA_VALUE = re.compile(r"[A-Za-z0-9₀-₉]+")
+_EXPLICIT_SMILES_LABEL = re.compile(r"(?i)(?<![A-Za-z0-9_])smiles\s*[:=：]")
+# Keep the structure token ASCII and narrow so Chinese text immediately after
+# a SMILES label cannot be swallowed as part of the query.
+_SMILES_VALUE = re.compile(r"[-A-Za-z0-9@+_=#\\/%().:\[\]]+")
+_SIMPLE_CASE_FORMULA = re.compile(r"(?:[A-Za-z][1-9][0-9]*)+")
+_SINGLE_LETTER_ELEMENTS = frozenset(
+    element for element in SUPPORTED_FORMULA_ELEMENTS if len(element) == 1
 )
 
 
 def parse_formula_counts(raw: str) -> dict[str, int]:
-    """Parse one complete ordinary molecular formula into element counts.
+    """Parse one complete ordinary molecular formula into element counts."""
 
-    This intentionally does not accept parentheses, dots, charges, isotope
-    labels, or zero counts.  Those expressions need an explicit structure
-    identifier in the first formula-input implementation.
-    """
+    normalized = normalize_formula_token(raw)
+    return _parse_standard_formula_counts(normalized)
 
-    if not isinstance(raw, str):
-        raise ValueError("unsupported formula")
-    text = raw.strip().translate(_SUBSCRIPTS)
+
+def _parse_standard_formula_counts(text: str) -> dict[str, int]:
     if not text or len(text) > 128:
         raise ValueError("unsupported formula")
     result: Counter[str] = Counter()
@@ -46,6 +45,40 @@ def parse_formula_counts(raw: str) -> dict[str, int]:
     if position != len(text) or not result:
         raise ValueError("unsupported formula")
     return dict(result)
+
+
+def normalize_formula_token(raw: str) -> str:
+    """Return the only safe lookup spelling for one formula token.
+
+    Normal formula spelling is parsed exactly.  A deliberately narrow
+    fallback accepts only repeated one-letter-plus-positive-integer segments,
+    which makes inputs such as ``c4h10`` unambiguous without turning ``Co``
+    into ``CO`` or changing a SMILES token's case.
+    """
+
+    if not isinstance(raw, str):
+        raise ValueError("unsupported formula")
+    text = raw.strip().translate(_SUBSCRIPTS)
+    if not text or len(text) > 128:
+        raise ValueError("unsupported formula")
+    try:
+        counts = _parse_standard_formula_counts(text)
+    except ValueError:
+        if not _SIMPLE_CASE_FORMULA.fullmatch(text):
+            raise ValueError("unsupported formula") from None
+        counts: Counter[str] = Counter()
+        position = 0
+        for match in re.finditer(r"([A-Za-z])([1-9][0-9]*)", text):
+            if match.start() != position:
+                raise ValueError("unsupported formula") from None
+            element = match.group(1).upper()
+            if element not in _SINGLE_LETTER_ELEMENTS:
+                raise ValueError("unsupported formula") from None
+            counts[element] += int(match.group(2))
+            position = match.end()
+        if position != len(text) or not counts:
+            raise ValueError("unsupported formula") from None
+    return canonical_formula(counts)
 
 
 def canonical_formula(counts: Mapping[str, int]) -> str:
@@ -62,13 +95,29 @@ def canonical_formula(counts: Mapping[str, int]) -> str:
     )
 
 
-def formula_token_from_text(message: str) -> str | None:
-    """Return a complete formula token from a user message, if one is present.
+def extract_explicit_smiles(message: str) -> tuple[dict[str, Any], ...]:
+    """Extract every explicitly labelled SMILES token once, with its range."""
 
-    Explicit ``SMILES:`` text wins over formula detection.  Untyped one-letter
-    or all-letter strings such as ``CO`` are deliberately not treated as a
-    formula unless they contain a subscript/digit, avoiding a SMILES collision.
-    """
+    if not isinstance(message, str):
+        return ()
+    extracted: list[dict[str, Any]] = []
+    for label in _EXPLICIT_SMILES_LABEL.finditer(message):
+        value = _SMILES_VALUE.match(message, label.end())
+        if value is None:
+            raise ValueError("SMILES input requires a complete structure after its label")
+        extracted.append(
+            {
+                "input_kind": "smiles",
+                "raw_query": value.group(0),
+                "start": label.start(),
+                "end": value.end(),
+            }
+        )
+    return tuple(extracted)
+
+
+def formula_token_from_text(message: str) -> str | None:
+    """Return a complete formula token from a user message, if one is present."""
 
     if not isinstance(message, str):
         return None
@@ -77,41 +126,51 @@ def formula_token_from_text(message: str) -> str | None:
 
 
 def _formula_tokens_from_text(message: str) -> list[str]:
-    explicit_smiles = re.search(r"(?i)\bsmiles\s*[:=]\s*[^\s,，。；;]+", message)
-    explicit_formula_matches = list(
-        re.finditer(
-            r"(?i)\b(?:formula|molecular\s+formula|分子式)\s*[:=：]\s*([^\s,，。；;]+)",
-            message,
-        )
-    )
+    explicit_smiles = extract_explicit_smiles(message)
     tokens: list[str] = []
-    for match in explicit_formula_matches:
-        candidate = match.group(1)
-        parse_formula_counts(candidate)
-        if candidate not in tokens:
+    normalized_tokens: set[str] = set()
+    for label in _FORMULA_LABEL.finditer(message):
+        value = _FORMULA_VALUE.match(message, label.end())
+        if value is None:
+            raise ValueError("formula input requires a complete formula after its label")
+        candidate = value.group(0)
+        normalized = normalize_formula_token(candidate)
+        if normalized not in normalized_tokens:
             tokens.append(candidate)
+            normalized_tokens.add(normalized)
     for match in _FORMULA_TOKEN.finditer(message):
         candidate = match.group(0)
-        if (
-            explicit_smiles is not None
-            and explicit_smiles.start() <= match.start() < explicit_smiles.end()
-        ):
+        if any(item["start"] <= match.start() < item["end"] for item in explicit_smiles):
             continue
         if not re.search(r"[0-9₀-₉]", candidate):
             continue
+        if _looks_like_ring_smiles(candidate):
+            continue
         try:
-            parse_formula_counts(candidate)
+            normalized = normalize_formula_token(candidate)
         except ValueError:
             continue
-        if candidate not in tokens:
+        if normalized not in normalized_tokens:
             tokens.append(candidate)
+            normalized_tokens.add(normalized)
     return tokens
+
+
+def _looks_like_ring_smiles(value: str) -> bool:
+    letters = re.findall(r"[A-Za-z]", value)
+    digits = re.findall(r"[0-9]", value)
+    return (
+        len(letters) >= 3
+        and len(set(letter.upper() for letter in letters)) == 1
+        and len(set(digits)) < len(digits)
+    )
 
 
 def formula_constraint(raw: str) -> dict[str, Any]:
     """Build program-owned facts for a formula supplied by the user."""
 
-    counts = parse_formula_counts(raw)
+    normalized = normalize_formula_token(raw)
+    counts = _parse_standard_formula_counts(normalized)
     return {
         "formula": canonical_formula(counts),
         "element_counts": counts,
@@ -127,17 +186,30 @@ def build_identity_constraint(
 ) -> dict[str, Any] | None:
     """Construct the Request identity record without trusting model facts."""
 
+    explicit_smiles = extract_explicit_smiles(message)
+    if len(explicit_smiles) > 1:
+        canonical_values = {canonical_structure(item["raw_query"]) for item in explicit_smiles}
+        if len(canonical_values) != 1:
+            raise ValueError("multiple conflicting SMILES inputs require clarification")
     formula_tokens = _formula_tokens_from_text(message)
     if len(formula_tokens) > 1:
         raise ValueError("multiple formula inputs require clarification")
     formula_raw = formula_tokens[0] if formula_tokens else None
-    explicit_smiles = re.search(r"(?i)\bsmiles\s*[:=]\s*([^\s,，。；;]+)", message)
-    if explicit_smiles is not None:
+
+    if explicit_smiles:
         # A typed SMILES is authoritative for input kind; formula-looking
-        # fragments inside its token are not allowed to steal it. A separate
-        # explicit formula remains an additional program-owned constraint.
-        input_kind = "smiles"
-        query = explicit_smiles.group(1)
+        # fragments inside its token were excluded from formula scanning.  A
+        # separate formula remains an additional program-owned constraint.
+        smiles_query = explicit_smiles[0]["raw_query"]
+        identity: dict[str, Any] = {
+            "input_kind": "smiles",
+            "raw_query": smiles_query,
+            "lookup_query": smiles_query,
+            "selected_cid": None,
+        }
+        if formula_raw is not None:
+            identity.update(formula_constraint(formula_raw))
+        return identity
 
     normalized_kind = input_kind
     if normalized_kind == "formula" and formula_raw is None:
@@ -148,37 +220,44 @@ def build_identity_constraint(
         formula_raw = query
     if formula_raw is not None:
         formula = formula_constraint(formula_raw)
-        lookup_query = query.strip() if isinstance(query, str) and query.strip() else formula_raw
-        # If the model rewrote H20 as water, keep the user's formula as the
-        # lookup query.  A named/CID lookup may still be retained when the
-        # user explicitly supplied both a formula and a second identifier.
-        if normalized_kind in {None, "formula"} or (
-            lookup_query != formula_raw and lookup_query not in message
-        ):
-            lookup_query = formula_raw
-        kind = normalized_kind or "formula"
-        if normalized_kind in {None, "formula"} or lookup_query == formula_raw or (
-            isinstance(query, str) and query.strip() and query not in message
-        ):
+        normalized_formula = canonical_formula(formula["element_counts"])
+        proposed_query = query.strip() if isinstance(query, str) and query.strip() else ""
+        kind = normalized_kind if normalized_kind in {"name", "cas", "cid"} else None
+        if kind is not None and proposed_query and proposed_query in message:
+            lookup_query = proposed_query
+        else:
             kind = "formula"
-            lookup_query = formula_raw
+            lookup_query = normalized_formula
+        selected_cid = None
+        if kind == "cid":
+            selected_cid = _positive_cid(lookup_query)
+            if selected_cid is None:
+                raise ValueError("CID input must be a positive integer")
+            lookup_query = str(selected_cid)
         return {
             "input_kind": kind,
             "raw_query": formula_raw,
             "lookup_query": lookup_query,
             **formula,
-            "selected_cid": None,
+            "selected_cid": selected_cid,
         }
 
     if not isinstance(query, str) or not query.strip() or normalized_kind is None:
         return None
     if normalized_kind not in {"name", "cas", "cid", "smiles", "formula"}:
         raise ValueError(f"unsupported molecule input kind: {normalized_kind!r}")
+    raw_query = query
+    selected_cid = None
+    if normalized_kind == "cid":
+        selected_cid = _positive_cid(query)
+        if selected_cid is None:
+            raise ValueError("CID input must be a positive integer")
+        query = str(selected_cid)
     return {
         "input_kind": normalized_kind,
-        "raw_query": query,
+        "raw_query": raw_query,
         "lookup_query": query,
-        "selected_cid": None,
+        "selected_cid": selected_cid,
     }
 
 
@@ -234,10 +313,25 @@ def validate_identity_constraint(value: Mapping[str, Any]) -> dict[str, Any]:
 def identity_matches_facts(
     identity: Mapping[str, Any] | None, facts: Mapping[str, Any]
 ) -> tuple[bool, str | None]:
-    """Check a candidate's computed RDKit facts against the Request constraint."""
+    """Check a candidate's computed facts against the Request constraint."""
 
     if identity is None:
         return True, None
+    selected_cid = identity.get("selected_cid")
+    if selected_cid is None and identity.get("input_kind") == "cid":
+        selected_cid = _positive_cid(identity.get("lookup_query") or identity.get("raw_query"))
+    if selected_cid is not None and _positive_cid(facts.get("cid")) != selected_cid:
+        return False, "resolved structure CID does not match the selected CID"
+    selected_smiles = identity.get("selected_smiles")
+    if selected_smiles is not None:
+        actual_smiles = facts.get("isomeric_smiles") or facts.get("canonical_smiles")
+        if not isinstance(actual_smiles, str):
+            return False, "resolved structure has no SMILES for selected-structure validation"
+        try:
+            if canonical_structure(actual_smiles) != canonical_structure(selected_smiles):
+                return False, "resolved structure does not match the selected SMILES"
+        except ValueError as error:
+            return False, str(error)
     expected_counts = identity.get("element_counts")
     if expected_counts is None:
         return True, None
@@ -256,6 +350,64 @@ def identity_matches_facts(
     return True, None
 
 
+def canonical_structure(smiles: str) -> str:
+    """Canonicalize a structure without changing charge, isotope, or stereo."""
+
+    if not isinstance(smiles, str) or not smiles.strip():
+        raise ValueError("SMILES must be non-empty text")
+    try:
+        from rdkit import Chem
+    except ImportError as error:
+        raise ValueError("RDKit is required for structure identity validation") from error
+    molecule = Chem.MolFromSmiles(smiles)
+    if molecule is None:
+        raise ValueError("SMILES is not a valid RDKit structure")
+    return Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=True)
+
+
+def validate_resolve_binding(
+    identity: Mapping[str, Any] | None, parameters: Mapping[str, Any]
+) -> None:
+    """Validate the query binding for a resolve step at the execution boundary."""
+
+    if identity is None:
+        return
+    validate_identity_constraint(identity)
+    input_kind = parameters.get("input_kind")
+    query = parameters.get("query")
+    if input_kind not in {"name", "cas", "cid", "smiles", "formula"}:
+        raise ValueError("resolve step has an invalid molecule input kind")
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("resolve step query must be non-empty text")
+    if input_kind == "cid" and _positive_cid(query) is None:
+        raise ValueError("CID input must be a positive integer")
+    selected_cid = identity.get("selected_cid")
+    if selected_cid is not None:
+        if input_kind != "cid" or query != str(selected_cid):
+            raise ValueError("selected CID must be the resolve step's exact CID query")
+        return
+    selected_smiles = identity.get("selected_smiles")
+    if selected_smiles is not None:
+        if input_kind != "smiles":
+            raise ValueError("selected SMILES must be resolved through a SMILES query")
+        if canonical_structure(query) != canonical_structure(selected_smiles):
+            raise ValueError("resolve query does not match the selected SMILES")
+        return
+    expected_kind = identity.get("input_kind")
+    expected_query = identity.get("lookup_query") or identity.get("raw_query")
+    if input_kind != expected_kind or query != expected_query:
+        raise ValueError("resolve step changed the user's molecule identity query")
+
+
+def _positive_cid(value: Any) -> int | None:
+    if type(value) is int and value > 0:
+        return value
+    if isinstance(value, str) and value.isdecimal():
+        cid = int(value)
+        return cid if cid > 0 else None
+    return None
+
+
 def normalize_identity_for_storage(value: Mapping[str, Any]) -> dict[str, Any]:
     """Return a JSON-safe identity copy after strict validation."""
 
@@ -270,10 +422,14 @@ __all__ = [
     "SUPPORTED_FORMULA_ELEMENTS",
     "build_identity_constraint",
     "canonical_formula",
+    "canonical_structure",
+    "extract_explicit_smiles",
     "formula_constraint",
     "formula_token_from_text",
     "identity_matches_facts",
+    "normalize_formula_token",
     "normalize_identity_for_storage",
     "parse_formula_counts",
     "validate_identity_constraint",
+    "validate_resolve_binding",
 ]

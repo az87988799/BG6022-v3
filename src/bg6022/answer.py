@@ -487,10 +487,7 @@ def render_clarification(pending_data: Mapping[str, Any] | None) -> str:
                     parts.append(f"SMILES {smiles}")
                 details.append("；".join(parts))
         suffix = f"候选包括：{'、'.join(details)}。" if details else ""
-        return (
-            "分子结构存在歧义，请回复候选编号、CID 或明确的 SMILES。"
-            f"{suffix}"
-        ).strip()
+        return (f"分子结构存在歧义，请回复候选编号、CID 或明确的 SMILES。{suffix}").strip()
     if category == "molecule_identity_not_found":
         return "没有找到与用户分子式匹配的结构；请提供明确的 CID 或 SMILES。"
     if category == "identity_mismatch":

@@ -23,6 +23,7 @@ from bg6022.molecule_identity import (
     canonical_formula,
     identity_matches_facts,
     parse_formula_counts,
+    validate_resolve_binding,
 )
 from bg6022.session import (
     register_bytes_artifact,
@@ -134,6 +135,28 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                 attempt,
                 "cancelled",
                 diagnostics={"category": "cancelled", "reason": "cancelled before molecule lookup"},
+                relative=relative,
+            )
+        try:
+            validate_resolve_binding(
+                identity,
+                parameters.model_dump(mode="python"),
+            )
+        except ValueError as error:
+            _record_attempt(
+                run,
+                step,
+                attempt,
+                "failed",
+                artifact_ids=source_artifact_ids,
+            )
+            save_run(config.data_root_path, run)
+            return _result(
+                run,
+                step,
+                attempt,
+                "failed",
+                diagnostics={"category": "identity_binding", "reason": str(error)},
                 relative=relative,
             )
         if parameters.input_kind == "smiles":
@@ -493,6 +516,8 @@ def fetch_pubchem(
 ) -> PubChemLookup:
     if input_kind not in {"name", "cas", "cid", "formula"}:
         raise PubChemError("PubChem does not accept this input kind", category="invalid_query")
+    if input_kind == "cid" and (not str(query).isdecimal() or int(query) <= 0):
+        raise PubChemError("CID query must be a positive integer", category="invalid_query")
     attempts_limit = config.molecule.pubchem_max_attempts
     request_timeout = float(config.molecule.pubchem_timeout_seconds)
     if remaining_timeout_seconds is not None:
@@ -787,9 +812,18 @@ def _facts_from_pubchem_candidate(
     )
     facts = _facts_from_smiles(smiles)
     _validate_remote_metadata(candidate, facts, strict_formula=strict_formula_metadata)
+    raw_cid = candidate.get("CID")
+    if raw_cid is None:
+        cid = None
+    elif type(raw_cid) is int and raw_cid > 0:
+        cid = raw_cid
+    elif isinstance(raw_cid, str) and raw_cid.isdecimal() and int(raw_cid) > 0:
+        cid = int(raw_cid)
+    else:
+        raise PubChemError("PubChem returned an invalid CID", category="invalid_response")
     facts.update(
         {
-            "cid": candidate.get("CID"),
+            "cid": cid,
             "title": candidate.get("Title") or query,
             "source_url": source_url,
         }
@@ -856,6 +890,9 @@ def _facts_from_smiles(smiles: str) -> dict[str, Any]:
     for atom in mol.GetAtoms():
         element_counts[atom.GetSymbol()] += 1
         element_counts["H"] += int(atom.GetTotalNumHs())
+    element_counts = Counter(
+        {symbol: count for symbol, count in element_counts.items() if count > 0}
+    )
     return {
         "canonical_smiles": canonical,
         "isomeric_smiles": canonical,
