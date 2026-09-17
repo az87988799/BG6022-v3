@@ -8,24 +8,25 @@ complete or accepted.
 | Field | Observed value |
 |---|---|
 | Branch | `codex/v3-m3-extension` |
-| Implementation candidate | `e71814c458c815ce80211b5c0fa9978220d6ef95` |
+| Implementation candidate | `6504ec8b62baccdd503d16ff81d24e971d3aaef8` |
 | Baseline | `b5d37f07a040e7eb8dfc1dac7c06af51cf37f255` |
-| Python | 3.11.4 |
-| Key packages | pydantic 2.13.5; httpx 0.28.1; pytest 9.1.1; rdkit 2026.03.6 |
+| Python | 3.14.6 for current offline validation; project package gate requires Python 3.11.x |
+| Key packages | pydantic 2.13.5; httpx 0.28.1; pytest 9.0.3; rdkit 2026.03.5 |
 | Lock hash | `uv.lock` SHA-256 `4ebcff69853f57680c368e061b57e1ea0a1cd2171ebfb8e426c95a5b40128bf3` |
 | ORCA | 6.1.1, `E:\orca\orca.exe` |
 | LLM | configured model `deepseek-flash`; live LLM suite passed with the key injected only into the current process |
 | Active resources | 4 cores; 1024 MB total; `%maxcore 192`; one concurrent job |
 | Live data root | `E:\BG6022-v3-data` |
 | Config record | `config.example.toml` SHA-256 `6047a76d41683b6d18059ed38130210adce8b99628f056dcbb522c3c645838b9`; only non-secret path/model/resource settings were recorded |
-| Prompt hashes | `intake.md` `73c75aaa3453c470f979a94bb7ba485536f0c6bd89bf580e4279b0136c57403c`; `planner.md` `eebfea972875d9f0fff0816f0c0cc87afb734804cfd73ceb90bf73addea213e5` |
+| Prompt hashes | `intake.md` `1488abbe4405990d7e38556a2d24c07174a0c44b008b449397e64a26f6924c46`; `planner.md` `c88dc578545b2ebbc2add3b80fb73d70183ed56934e8a9fed984671b5b8deee7` |
 
-The machine did not have `uv`, and its installed `build` package had no runnable
-`build.__main__`; the package wheel was nevertheless built successfully with
-`python -m pip wheel . --no-deps --no-build-isolation`. The produced wheel was
-`bg6022-0.1.0-py3-none-any.whl`, 147571 bytes, SHA-256
-`09ff32d6254107b9dd7a0f3814eda747930d2c14a6f80bb1eda1d6bb7121d27a`. No
-production fallback or fake execution was enabled.
+The current machine did not have `uv`. Its Python 3.11 interpreter lacked the
+project's dev dependencies and `wheel`, while Python 3.14 correctly rejected
+the package's `>=3.11,<3.12` requirement; therefore the package-build gate was
+not rerun for this candidate. The wheel and 3.11.4 environment recorded in
+earlier M3 evidence remain historical evidence for the earlier candidate, not
+a claim about this identity-root commit. No production fallback or fake
+execution was enabled.
 
 ## Offline acceptance evidence
 
@@ -56,17 +57,50 @@ candidates. RDKit-computed composition, component count, isotope state, and
 formal charge are authoritative; source metadata is checked and cannot replace
 those facts. Raw source responses are retained as molecule-source artifacts.
 
-The dedicated formula/boundary suite passed 14 tests. It covers Unicode and
-literal formula preservation, planner identity binding, the two-endpoint
-PubChem path, the shared retry bound, metadata mismatch rejection, charged
-legacy SMILES compatibility, bounded candidate clarification, snapshot-bound
-candidate selection, subject mismatch rejection, punctuation-bounded output
-negation, and cancellation during answer rendering. The complete offline
-regression for this candidate passed 326 tests
-with 16 opt-in live tests skipped. A direct real PubChem smoke request for
-`H2O` completed in two requests, observed 23 returned CIDs, capped the property
-lookup at 20 CIDs, and reported the bounded candidate state; this was a lookup
-smoke test only and is not an ORCA scientific-success claim.
+The dedicated formula/boundary suite passed 36 tests. It covers Unicode and
+literal formula preservation, narrow case normalization, all five explicit
+SMILES label forms, no-hydrogen structures and legacy `H:0` compatibility,
+explicit-hydrogen accounting, selected-CID/selected-structure binding,
+wrong-isomer and wrong-CID rejection, candidate collision handling, local
+state preservation after an invalid choice, and a saved candidate continuation
+that reaches confirmation without Intake or Planner calls. The complete
+offline regression for this candidate passed 349 tests with 16 opt-in live
+tests skipped. A direct real PubChem smoke request for `C6H14` completed in
+two requests, observed 146 returned CIDs, capped the property lookup at 20
+CIDs, and returned the expected leading CIDs including 8058 and 7892; this
+was a lookup smoke test only and is not an ORCA scientific-success claim.
+
+### Identity-root fix T01–T16 evidence
+
+The detailed identity-root plan is scoped to the five existing identity,
+planning, and agent files; it does not add a runtime object, a second molecule
+framework, or a molecule-specific execution loop. The following offline
+evidence is tied to implementation candidate
+`6504ec8b62baccdd503d16ff81d24e971d3aaef8`:
+
+| Case | Offline evidence and result |
+|---|---|
+| T01 | CO₂, N₂, and CCl₄ facts contain no artificial H count; source metadata agrees; a CO₂ geometry is generated successfully, including a legacy H:0 record. **passed** |
+| T02 | Explicit H is counted once; charged legacy SMILES remains charged; formula-only neutrality limits do not apply to name input. **passed** |
+| T03 | The five labelled SMILES spellings, including no-space and full-width-colon forms, remain `smiles` and are excluded from formula scanning. **passed** |
+| T04 | `C4h10`/`c4h10` normalize only through the narrow unambiguous rule; Unicode subscripts, `H20`, `CO`, `Cl`, and `Br` retain their meanings; `Co` is not guessed. **passed** |
+| T05 | A real `handle_message` continuation over fixture PubChem responses selects `candidate_1`, executes resolve and RDKit geometry, then reaches the original Opt confirmation with no ORCA call. **passed offline; real LLM/ORCA acceptance remains pending** |
+| T06 | Candidate number, CID, title, tagged SMILES, and equivalent bare SMILES resolve to the current snapshot while retaining candidate CID/title/source. **passed** |
+| T07 | `CCCCCCC` while waiting for C₆H₁₄ is rejected locally; the original identity, plan, and waiting state are unchanged. **passed** |
+| T08 | Invalid raw `cccccc` is never replaced by model-proposed `CCCCCC`; a later valid candidate remains selectable. **passed** |
+| T09 | Planner validation and direct Tool validation reject selected CID 8058 bound to query 7892 before source lookup. **passed** |
+| T10 | Missing/wrong CID and same-formula wrong-isomer candidates do not publish a molecule output. **passed** |
+| T11 | selected CID/SMILES checks still run when no formula constraint exists. **passed** |
+| T12 | Saved candidate continuation skips Intake and Planner and still reaches the deterministic confirmation fallback. **passed** |
+| T13 | Candidate/CID numeric collisions, out-of-range numbers, and stale snapshot choices are rejected; existing `/new` and cancellation regressions remain green. **passed** |
+| T14 | Existing request-routing regressions keep explicit molecule replacement separate from parameter continuation and new complete requests; affected confirmation/results are invalidated on replacement. **passed** |
+| T15 | Locally invalid choices leave Run state unchanged; source/network failures retain bounded attempts and raw response artifacts. **passed** |
+| T16 | The saved-run continuation test reloads the active Run from its session record; ordinary historical identity records remain readable without migration. **passed** |
+
+This table records controlled offline behavior only. It does not mark the
+phase accepted: the user still needs to perform the requested real interactive
+candidate-selection and small-molecule ORCA acceptance before this phase can be
+accepted.
 
 The active resource contract remains 4 cores, 1024 MB total, `%maxcore 192`,
 and one concurrent job. The candidate remains awaiting user acceptance.
