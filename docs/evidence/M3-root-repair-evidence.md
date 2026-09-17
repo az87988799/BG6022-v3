@@ -44,6 +44,6 @@ run. The raw ORCA evidence remains under
 
 ## Acceptance state
 
-Implementation and validation are recorded for this candidate. The repair is
-awaiting the Git handoff and then the user's review and acceptance; it is not
+Implementation, validation, and the Git handoff are complete for this
+candidate. The repair is awaiting the user's review and acceptance; it is not
 marked complete by this record.
