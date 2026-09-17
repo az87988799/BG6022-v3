@@ -499,8 +499,16 @@ def render_clarification(pending_data: Mapping[str, Any] | None) -> str:
             prefix = "部分来源记录无法可靠核验；请明确提供 CID 或 SMILES 后继续。"
         return f"{prefix}{suffix}".strip()
     if category == "molecule_name_not_found":
-        raw_query = data.get("raw_query") or data.get("lookup_query") or "该名称"
-        return f"来源未识别名称“{raw_query}”，原计算任务已保留。请补充英文名称、CID 或明确 SMILES。"
+        raw_query = str(data.get("raw_query") or "该名称")
+        lookup_query = str(data.get("lookup_query") or raw_query)
+        if lookup_query == raw_query:
+            subject = f"名称“{raw_query}”"
+        else:
+            subject = f"原名称“{raw_query}”（本次检索词：“{lookup_query}”）"
+        return (
+            f"来源未找到{subject}，原计算任务已保留。"
+            "请补充英文名称、CID 或明确 SMILES；也可以直接提出新的计算请求。"
+        )
     if category == "molecule_identity_not_found":
         if data.get("input_kind") == "formula" or data.get("requested_formula"):
             return "没有找到符合当前分子式约束的结构；请提供明确的 CID 或 SMILES。"

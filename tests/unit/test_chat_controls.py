@@ -151,6 +151,7 @@ def test_invalid_parameter_intake_does_not_create_a_run(tmp_path: Path) -> None:
                 "operation": "Opt",
                 "molecule_query": "water",
                 "molecule_input_kind": "name",
+                "molecule_name_evidence": "水",
                 "explicit_parameters": {"multiplicity": 1.5},
             }
 

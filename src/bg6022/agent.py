@@ -96,6 +96,51 @@ _PENDING_MOLECULE_CATEGORIES = frozenset(
 )
 
 
+def _is_waiting_for_identity(run: Run | None) -> bool:
+    return bool(
+        run is not None
+        and run.status == "waiting"
+        and run.waiting_for == "clarification"
+        and (
+            run.pending_data.get("input_requirement") == "molecule_identity"
+            or run.pending_data.get("category") in _PENDING_MOLECULE_CATEGORIES
+        )
+    )
+
+
+def _pending_intake_context(run: Run | None) -> dict[str, Any]:
+    if run is None or run.status != "waiting":
+        return {}
+    identity = run.request.structure_input.get("molecule_identity")
+    identity = identity if isinstance(identity, Mapping) else {}
+    candidates = run.pending_data.get("candidates")
+    candidates = candidates if isinstance(candidates, list) else []
+    public_candidates = [
+        {
+            key: item[key][:256] if isinstance(item[key], str) else item[key]
+            for key in ("choice_id", "cid", "title", "formula")
+            if key in item
+        }
+        for item in candidates[:5]
+        if isinstance(item, Mapping)
+    ]
+    return {
+        "waiting_for": run.waiting_for,
+        "identity_required": _is_waiting_for_identity(run),
+        "can_replace_identity": sum(step.tool == "resolve_molecule" for step in run.plan.steps)
+        == 1,
+        "category": run.pending_data.get("category"),
+        "raw_query": str(identity.get("raw_query") or "")[:128],
+        "lookup_query": str(identity.get("lookup_query") or "")[:128],
+        "operations": list(run.request.operations),
+        "requested_results": [
+            target.port or target.field or target.check
+            for target in run.request.requested_results[:24]
+        ],
+        "candidates": public_candidates,
+    }
+
+
 @dataclass(frozen=True)
 class AgentResponse:
     text: str
@@ -230,16 +275,7 @@ class Agent:
         try:
             self._ensure_request_active(request_token, request_cancel)
             current = self._coerce_run(None)
-            pending_identity = (
-                current is not None
-                and current.status == "waiting"
-                and current.waiting_for == "clarification"
-                and (
-                    current.pending_data.get("input_requirement") == "molecule_identity"
-                    or current.pending_data.get("category") in _PENDING_MOLECULE_CATEGORIES
-                )
-            )
-            if pending_identity:
+            if _is_waiting_for_identity(current):
                 selection = _pending_molecule_selection(text, current.pending_data)
                 if selection is not None and selection.get("invalid"):
                     response = AgentResponse(str(selection["invalid"]), run=current)
@@ -275,6 +311,7 @@ class Agent:
                 geometry_catalog=geometry_catalog,
                 capability_catalog=capability_catalog,
                 registry=self.registry,
+                pending_context=_pending_intake_context(current),
                 cancel=request_cancel,
             )
             self._persist_llm_diagnostics(llm_call_cursor, stage="intake")
@@ -317,6 +354,7 @@ class Agent:
                             geometry_catalog=geometry_catalog,
                             capability_catalog=capability_catalog,
                             registry=self.registry,
+                            pending_context=_pending_intake_context(current),
                             validation_feedback=(
                                 "The previous intake classified this as ordinary question "
                                 "answering, but the public answer stage identified a "
@@ -340,6 +378,62 @@ class Agent:
                                     "但还无法形成合法的工具请求；请明确要获取的结构或文件。"
                                 ),
                             )
+
+            if intake.intent in {"chemistry_qa", "daily_qa"}:
+                return self._answer_question(
+                    text,
+                    draft=answer_draft,
+                    error=answer_error,
+                    cancel=request_cancel,
+                )
+            if intake.intent == "context_query":
+                return self._answer_context(
+                    text,
+                    selection=intake.query_selection,
+                    catalog=result_catalog,
+                    preferences=_request_output_preferences(text, intake.output_preferences),
+                    cancel=request_cancel,
+                )
+
+            if intake.pending_action == "clarify":
+                response = AgentResponse(
+                    "你是在补充当前任务的分子身份，还是要发起一个新的计算？"
+                    "请直接说明；当前任务仍保留。",
+                    run=current,
+                )
+                self._record_response(response, cancel=request_cancel)
+                return response
+
+            if intake.pending_action in {"supplement_identity", "replace_identity"}:
+                if current is None:
+                    raise ValueError("waiting task disappeared before identity update")
+                query, kind = _validated_identity_reply(intake, message=text)
+                self._ensure_request_active(request_token, request_cancel)
+                response = self._apply_molecule_clarification(
+                    current,
+                    query,
+                    kind,
+                    preserve_identity=intake.pending_action == "supplement_identity",
+                    name_evidence=intake.molecule_name_evidence,
+                    message=text,
+                    cancel=request_cancel,
+                )
+                self._record_response(response, cancel=request_cancel)
+                return response
+
+            if _is_waiting_for_identity(current) and intake.pending_action == "none":
+                stripped = text.strip()
+                if (
+                    intake.molecule_input_kind == "smiles"
+                    and re.fullmatch(r"[-A-Za-z0-9@+_=#\\/%().:\[\]]+", stripped)
+                    and intake.molecule_query != stripped
+                ):
+                    response = AgentResponse(
+                        "当前身份补充未匹配到候选、CID 或可验证的 SMILES；原任务保持等待。",
+                        run=current,
+                    )
+                    self._record_response(response, cancel=request_cancel)
+                    return response
 
             parameter_continuation = (
                 current is not None
@@ -473,36 +567,6 @@ class Agent:
                 )
                 self._record_response(response, cancel=request_cancel)
                 return response
-            pending_identity = (
-                current is not None
-                and current.status == "waiting"
-                and current.waiting_for == "clarification"
-                and (
-                    current.pending_data.get("input_requirement") == "molecule_identity"
-                    or current.pending_data.get("category") in _PENDING_MOLECULE_CATEGORIES
-                )
-            )
-            if pending_identity:
-                selection = _pending_molecule_selection(text, current.pending_data)
-                if selection is not None and selection.get("invalid"):
-                    response = AgentResponse(str(selection["invalid"]), run=current)
-                    self._record_response(response, cancel=request_cancel)
-                    return response
-                if selection is not None and (
-                    selection.get("candidate") is not None or selection.get("explicit_new")
-                ):
-                    response = self._apply_molecule_clarification(
-                        current,
-                        str(selection["query"]),
-                        str(selection["input_kind"]),
-                        candidate=selection.get("candidate"),
-                        preserve_identity=bool(selection.get("preserve_identity")),
-                        name_evidence=selection.get("name_evidence"),
-                        message=text,
-                        cancel=request_cancel,
-                    )
-                    self._record_response(response, cancel=request_cancel)
-                    return response
             if (
                 current is not None
                 and current.status == "waiting"
@@ -513,48 +577,6 @@ class Agent:
                 )
                 self._record_response(response, cancel=request_cancel)
                 return response
-            if pending_identity and not (
-                intake.molecule_query and _looks_like_molecule_change(text)
-            ):
-                response = AgentResponse(
-                    "当前身份补充未匹配到候选、CID 或可验证的 SMILES；原任务保持等待。",
-                    run=current,
-                )
-                self._record_response(response, cancel=request_cancel)
-                return response
-            if (
-                current is not None
-                and current.status == "waiting"
-                and intake.molecule_query
-                and _looks_like_molecule_change(text)
-            ):
-                response = self._apply_molecule_update(
-                    current,
-                    intake.molecule_query,
-                    intake.molecule_input_kind,
-                    name_evidence=intake.molecule_name_evidence,
-                    message=text,
-                    cancel=request_cancel,
-                )
-                self._record_response(response, cancel=request_cancel)
-                return response
-
-            if intake.intent in {"chemistry_qa", "daily_qa"}:
-                return self._answer_question(
-                    text,
-                    draft=answer_draft,
-                    error=answer_error,
-                    cancel=request_cancel,
-                )
-            if intake.intent == "context_query":
-                return self._answer_context(
-                    text,
-                    selection=intake.query_selection,
-                    catalog=result_catalog,
-                    preferences=_request_output_preferences(text, intake.output_preferences),
-                    cancel=request_cancel,
-                )
-
             request = request_from_intake(
                 text,
                 intake,
@@ -1516,6 +1538,7 @@ class Agent:
         run.request = candidate_request
         run.plan = candidate_plan
         _invalidate_current_results(run, step.id)
+        run.execution_permission = not self.config.runtime.confirm_before_compute
         run.accepted_snapshot = {}
         run.accepted_execution_sha256 = None
         run.status = "running"
@@ -4249,15 +4272,17 @@ def _pending_molecule_selection(
             "preserve_identity": True,
         }
 
+    if not re.fullmatch(r"[A-Za-z0-9₀-₉]+", stripped):
+        return None
     try:
         formula = formula_token_from_text(stripped)
     except ValueError:
-        return {"invalid": "该分子式包含不支持的后缀，请提供完整的分子式、CID 或 SMILES。"}
+        formula = None
     if formula == stripped:
         try:
             normalized = normalize_formula_token(formula)
         except ValueError:
-            return {"invalid": "该分子式无法安全解析，请提供明确的分子式、CID 或 SMILES。"}
+            return {"invalid": "该分子式无法安全解析，请提供明确身份。"}
         return {
             "query": normalized,
             "input_kind": "formula",
@@ -4265,43 +4290,65 @@ def _pending_molecule_selection(
             "preserve_identity": True,
         }
 
-    if pending_data.get("category") == "molecule_name_not_found":
-        name_match = re.fullmatch(
-            r"(?i)(?:english\s+name|英文名称|英文名|name|名称)\s*[:=：]?\s*(\S(?:.*\S)?)",
-            stripped,
-        )
-        name = name_match.group(1).strip() if name_match is not None else stripped
-        if (
-            name
-            and len(name) <= 128
-            and "\n" not in name
-            and "\r" not in name
-            and not re.search(r"[=：:]", name)
-        ):
-            return {
-                "query": name,
-                "input_kind": "name",
-                "explicit_new": True,
-                "preserve_identity": True,
-            }
-
-    # A bare structure is accepted only after RDKit proves it is a SMILES;
-    # arbitrary model-generated text is not treated as a structure.
-    if " " not in stripped and "\t" not in stripped:
-        try:
-            canonical_structure(stripped)
-        except ValueError:
-            return None
-        matched = _candidate_with_same_structure(candidate_list, stripped)
-        if matched is not None:
-            return _candidate_selection(matched)
-        return {
-            "query": stripped,
-            "input_kind": "smiles",
-            "explicit_new": True,
-            "preserve_identity": True,
-        }
     return None
+
+
+def _validated_identity_reply(intake: Any, *, message: str) -> tuple[str, str]:
+    """Validate the identity payload before applying it to a waiting Run."""
+
+    query = intake.molecule_query
+    kind = intake.molecule_input_kind
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("identity reply has no query")
+    query = query.strip()
+    stripped = message.strip()
+
+    if kind == "name":
+        from .planner import _validate_lookup_name
+
+        _validate_lookup_name(intake, message=message)
+        return query, kind
+
+    if kind == "smiles":
+        labelled = extract_explicit_smiles(message)
+        if labelled:
+            if len(labelled) != 1 or labelled[0]["raw_query"] != query:
+                raise ValueError("SMILES reply must preserve the explicit structure")
+        elif stripped != query:
+            raise ValueError("bare SMILES must exactly match this message")
+        canonical_structure(query)
+        return query, kind
+
+    if kind == "cid":
+        matches = list(
+            re.finditer(
+                r"(?i)(?<![A-Za-z0-9_])CID\s*[:：#=]?\s*"
+                r"([^\s，,；;。!?！？]+)",
+                message,
+            )
+        )
+        if len(matches) != 1:
+            raise ValueError("CID reply requires exactly one explicit CID")
+        raw_cid = matches[0].group(1)
+        if (
+            re.fullmatch(r"[0-9]{1,16}", raw_cid) is None
+            or re.fullmatch(r"[0-9]{1,16}", query) is None
+            or int(query) <= 0
+            or int(query) != int(raw_cid)
+        ):
+            raise ValueError("CID reply must preserve a complete positive integer")
+        return str(int(query)), kind
+
+    if kind == "formula":
+        try:
+            raw = formula_token_from_text(message)
+        except ValueError as error:
+            raise ValueError("formula reply must preserve the complete user formula") from error
+        if raw is None or normalize_formula_token(raw) != query:
+            raise ValueError("formula reply must preserve the complete user formula")
+        return query, kind
+
+    raise ValueError("use a supported name, explicit CID, formula, or SMILES")
 
 
 def _candidate_selection(candidate: Mapping[str, Any]) -> dict[str, Any]:

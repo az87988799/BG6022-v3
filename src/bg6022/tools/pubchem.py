@@ -377,6 +377,7 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                             category,
                             input_kind=parameters.input_kind,
                             raw_query=(identity.get("raw_query") if identity else parameters.query),
+                            lookup_query=parameters.query,
                             has_candidates=bool(candidate_views),
                         ),
                         "candidates": candidate_views[
@@ -567,6 +568,7 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                         diagnostic_category,
                         input_kind=parameters.input_kind,
                         raw_query=(identity.get("raw_query") if identity else parameters.query),
+                        lookup_query=parameters.query,
                         has_candidates=False,
                     ),
                     "input_requirement": "molecule_identity",
@@ -1069,6 +1071,7 @@ def _resolution_clarification(
     *,
     input_kind: str,
     raw_query: Any,
+    lookup_query: Any,
     has_candidates: bool,
 ) -> str:
     if category == "ambiguous_molecule":
@@ -1079,7 +1082,16 @@ def _resolution_clarification(
     if category == "molecule_source_unverified":
         return "部分来源记录无法可靠核验；请明确提供 CID 或 SMILES 后继续原计算任务。"
     if category == "molecule_name_not_found":
-        return f"来源未识别名称“{raw_query}”，原计算任务已保留。请补充英文名称、CID 或明确 SMILES。"
+        raw_text = str(raw_query or "该名称")
+        lookup_text = str(lookup_query or raw_text)
+        if raw_text == lookup_text:
+            subject = f"名称“{raw_text}”"
+        else:
+            subject = f"原名称“{raw_text}”（本次检索词：“{lookup_text}”）"
+        return (
+            f"来源未找到{subject}，原计算任务已保留。"
+            "请补充英文名称、CID 或明确 SMILES；也可以直接提出新的计算请求。"
+        )
     if category == "molecule_identity_not_found":
         if input_kind == "formula":
             return "没有找到符合当前分子式约束的结构；请提供明确的 CID 或 SMILES。"

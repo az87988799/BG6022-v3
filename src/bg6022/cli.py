@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .agent import INPUT_GEOMETRY_PLACEHOLDER, Agent, AgentResponse
 from .config import AppConfig, load_config, runtime_summary, validate_execution_environment
+from .diagnostics import configure_rdkit_logging
 from .models import InputReference, Plan, Request, Result, ResultTarget, Step
 from .orca.input import OrcaInputSpec, render_input
 from .orca.runner import probe_orca_version
@@ -140,6 +141,7 @@ def _show_run(args: argparse.Namespace) -> int:
 
 def _run_tool(args: argparse.Namespace) -> int:
     config = _require_config(args)
+    configure_rdkit_logging(config.data_root_path)
     geometry = parse_xyz_file(args.xyz)
     method = args.method_profile or config.defaults.method_profile
     environment = args.environment or config.defaults.environment
@@ -262,6 +264,7 @@ def _chat(args: argparse.Namespace) -> int:
 
     try:
         with ChatSessionLock(config.data_root_path):
+            configure_rdkit_logging(config.data_root_path)
             agent = Agent(config, build_registry(config))
             return _chat_loop(agent)
     except RuntimeError as error:

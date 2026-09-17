@@ -196,6 +196,9 @@ def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel
                 tuple(float(value) for value in point) for point in embedded["coordinates"]
             )
             rdkit_version = str(embedded["rdkit_version"])
+            rdkit_stderr = embedded.get("rdkit_stderr", "")
+            if not isinstance(rdkit_stderr, str):
+                rdkit_stderr = ""
         except (KeyError, TypeError, ValueError) as error:
             raise GeometryEmbeddingError(
                 "RDKit helper returned malformed geometry", category="invalid_response"
@@ -210,6 +213,12 @@ def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel
         actual_counts = dict(Counter(geometry.symbols))
         if actual_counts != expected_counts:
             raise ValueError("generated geometry element counts do not match the resolved molecule")
+        diagnostics: dict[str, Any] = {}
+        if rdkit_stderr:
+            diagnostic_path = run_directory(config.data_root_path, run.id) / relative
+            diagnostic_file = diagnostic_path / "rdkit.stderr.log"
+            diagnostic_file.write_text(rdkit_stderr, encoding="utf-8")
+            diagnostics["raw_paths"] = {"rdkit_stderr": str(diagnostic_file)}
         geometry_artifact = register_bytes_artifact(
             config.data_root_path,
             run,
@@ -247,6 +256,7 @@ def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel
             attempt,
             "succeeded",
             values={"geometry_atom_count": geometry.atom_count},
+            diagnostics=diagnostics,
             artifact_ids=[geometry_artifact.id],
             output_ports={"geometry": geometry_artifact.id},
             parameter_sources={"geometry": f"rdkit:ETKDGv3:{used_seed}"},
@@ -353,6 +363,7 @@ def _run_embedding_helper(
         raise GeometryEmbeddingError(
             "RDKit helper returned no successful conformer", category="embedding_failed"
         )
+    result["rdkit_stderr"] = stderr.decode("utf-8", errors="replace")[:8192]
     return result
 
 

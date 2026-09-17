@@ -35,6 +35,7 @@ from bg6022.models import (
 from bg6022.molecule_identity import (
     MoleculeInputKind,
     build_identity_constraint,
+    formula_token_from_text,
     normalize_identity_for_storage,
     validate_resolve_binding,
 )
@@ -43,6 +44,7 @@ from bg6022.tools.molecule import parse_xyz_bytes
 from bg6022.tools.registry import ToolRegistry, merge_explicit_step_parameters
 
 Intent = Literal["chemistry_compute", "chemistry_qa", "daily_qa", "context_query"]
+PendingAction = Literal["none", "supplement_identity", "replace_identity", "clarify"]
 QuerySelectionStatus = Literal["selected", "clarify", "unavailable"]
 QuerySelectionReason = Literal[
     "ambiguous_subject",
@@ -139,6 +141,8 @@ class IntakeOutput(BaseModel):
     molecule_query: StrictStr | None = None
     molecule_input_kind: MoleculeInputKind | None = None
     molecule_name_evidence: StrictStr | None = None
+    pending_action: PendingAction = "none"
+    pending_action_evidence: StrictStr | None = Field(default=None, max_length=512)
     history_geometry_alias: StrictStr | None = None
     explicit_parameters: dict[str, Any] = Field(default_factory=dict)
     electronic_state_candidates: list[ElectronicStateCandidate] = Field(default_factory=list)
@@ -292,6 +296,7 @@ def intake_message(
     capability_catalog: list[Mapping[str, Any]] | None = None,
     registry: ToolRegistry | None = None,
     validation_feedback: str | None = None,
+    pending_context: Mapping[str, Any] | None = None,
     cancel: Any = None,
 ) -> IntakeOutput:
     if not message.strip():
@@ -319,6 +324,8 @@ def intake_message(
         capabilities,
         result_catalog=catalog,
         registry=registry,
+        message=message,
+        pending_context=pending_context,
     )
     value = client.complete_json(
         [
@@ -329,6 +336,7 @@ def intake_message(
                     {
                         "message": model_message,
                         "recent_context": _bounded_context(context),
+                        "pending_context": dict(pending_context or {}),
                         "result_catalog": catalog,
                         "geometry_catalog": [dict(item) for item in (geometry_catalog or [])],
                         "capability_catalog": capabilities,
@@ -353,6 +361,8 @@ def intake_message(
             "molecule_query": "water",
             "molecule_input_kind": "name",
             "molecule_name_evidence": "water",
+            "pending_action": "none",
+            "pending_action_evidence": None,
             "history_geometry_alias": None,
             "structure_input": {},
             "explicit_parameters": {},
@@ -1534,12 +1544,121 @@ def _bounded_context(context: Mapping[str, Any] | None) -> Mapping[str, Any]:
     }
 
 
+_HAN_NAME = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+
+
+def _structure_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, BaseModel):
+        payload = value.model_dump(mode="python", exclude_unset=True)
+    else:
+        payload = dict(value or {})
+    if payload.get("required_bindings") == []:
+        payload.pop("required_bindings")
+    return payload
+
+
+def _validate_lookup_name(value: Any, *, message: str) -> Any:
+    """Keep a name's source evidence separate from its bounded lookup spelling."""
+
+    if (
+        value.intent != "chemistry_compute"
+        or value.molecule_input_kind != "name"
+        or value.molecule_query is None
+    ):
+        return value
+    query = value.molecule_query
+    if not query.strip() or len(query) > 128 or "\n" in query or "\r" in query:
+        raise ValueError("name lookup must be a bounded single-line name")
+
+    evidence = value.molecule_name_evidence
+    if evidence is None and query in message:
+        evidence = query
+    if not evidence or not evidence.strip() or evidence not in message:
+        raise ValueError(
+            "molecule_name_evidence must quote the complete original name "
+            "from this user message; keep lookup spelling separate"
+        )
+
+    formula = formula_token_from_text(evidence)
+    if formula is not None and formula == evidence.strip():
+        raise ValueError(
+            "a formula is not name evidence; preserve the formula input "
+            "instead of translating it into one selected molecule"
+        )
+
+    if _HAN_NAME.search(query):
+        raise ValueError(
+            "NAME_LOOKUP_NOT_NORMALIZED: return a reliable English lookup "
+            "name and preserve the original Chinese name as exact evidence. "
+            "Do not invent CID/SMILES or remove chemical qualifiers. "
+            "If no reliable lookup name is available, leave molecule_query "
+            "and molecule_input_kind null and explicitly report the missing "
+            "identity in missing_fields; preserve all requested operations."
+        )
+    return value
+
+
+def _validate_pending_action(
+    value: IntakeOutput,
+    *,
+    message: str,
+    pending_context: Mapping[str, Any] | None,
+) -> IntakeOutput:
+    """Validate whether this Intake round may mutate a waiting Run's identity."""
+
+    action = value.pending_action
+    if action == "none":
+        if value.pending_action_evidence is not None:
+            raise ValueError("pending_action=none cannot contain action evidence")
+        return value
+
+    pending = pending_context or {}
+    if pending.get("waiting_for") not in {"clarification", "confirmation"}:
+        raise ValueError("there is no waiting task for a pending action")
+    if value.intent != "chemistry_compute":
+        raise ValueError("question answering cannot mutate a waiting task")
+    evidence = value.pending_action_evidence
+    if not evidence or not evidence.strip() or evidence not in message:
+        raise ValueError("pending action needs exact evidence from this message")
+
+    if (
+        value.operations
+        or value.requested_results
+        or value.unresolved_results
+        or value.missing_fields
+        or value.explicit_parameters
+        or value.electronic_state_candidates
+        or value.history_geometry_alias
+        or _structure_payload(value.structure_input)
+    ):
+        raise ValueError(
+            "identity-only actions cannot contain new calculations, outputs, "
+            "parameters, or geometry bindings; use pending_action=none and "
+            "preserve the complete request"
+        )
+
+    if action == "clarify":
+        if value.molecule_query or value.molecule_input_kind:
+            raise ValueError("clarify must not commit a molecule selection")
+        return value
+
+    if not value.molecule_query or not value.molecule_input_kind:
+        raise ValueError("an identity action needs a query and input kind")
+    if action == "supplement_identity" and not pending.get("identity_required"):
+        raise ValueError("the current task is not waiting for molecule identity")
+    if action == "replace_identity" and not pending.get("can_replace_identity"):
+        raise ValueError("the molecule replacement target is not unique")
+    return value
+
+
 def _intake_schema(
     candidate_refs: tuple[str, ...],
     capability_catalog: list[Mapping[str, Any]],
     *,
     result_catalog: list[Mapping[str, Any]] | None = None,
     registry: ToolRegistry | None = None,
+    message: str | None = None,
+    pending_context: Mapping[str, Any] | None = None,
 ) -> type[BaseModel]:
     """Constrain query subjects and calculation targets for one intake round."""
 
@@ -1675,6 +1794,19 @@ def _intake_schema(
             _required_geometry_bindings_are_valid
         ),
     }
+
+    def _dialogue_contract(value: IntakeOutput) -> IntakeOutput:
+        if message is None:
+            return value
+        _validate_pending_action(
+            value,
+            message=message,
+            pending_context=pending_context,
+        )
+        _validate_lookup_name(value, message=message)
+        return value
+
+    validators["_dialogue_contract"] = model_validator(mode="after")(_dialogue_contract)
     if allowed_targets:
         target_literal = Literal.__getitem__(allowed_targets)
         requested_results_type: Any = list[target_literal]

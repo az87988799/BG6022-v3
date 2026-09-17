@@ -15,17 +15,45 @@ return `molecule_identity` or any calculated formula/charge facts in
 a formula and an explicit name/CID, preserve both by keeping the explicit
 lookup query and letting the program verify the formula constraint.
 
-For a molecule name, `molecule_query` is the bounded lookup spelling. If the
-user's exact name is not the same text as that lookup spelling (for example,
-the user wrote Chinese “乙烷” and the lookup spelling is “ethane”), return
-`molecule_name_evidence` containing the complete name phrase copied exactly
-from this user message. The application verifies that evidence is an exact
-substring and stores it as the original `raw_query`; the lookup spelling is
-stored separately as `lookup_query`. Do not translate a name into another
-structure, discard qualifiers such as 正/异/仲/叔, positions, stereochemistry,
-salts, or ions, or claim identity from a name alone. If no reliable lookup
-spelling can be proposed, preserve the user's name and let the program ask for
-another identity; never invent a CID or SMILES.
+The current message is authoritative. A waiting task is context, not a command
+to interpret every later message as a missing-field answer.
+
+Return `pending_action: "none"` for a complete new calculation, knowledge
+question, saved-result query, or a parameter-only update handled by the
+existing parameter contract. Do not copy a waiting task's molecule, operations,
+or results into a new complete request.
+
+Use `pending_action: "supplement_identity"` only when this message supplies
+the missing identity for the current waiting task. Use
+`pending_action: "replace_identity"` only for an explicit request to replace
+that task's molecule while keeping its existing goals. Quote exact evidence
+from this message in `pending_action_evidence`. For either action,
+`operations`, `requested_results`, `explicit_parameters`, and `structure_input`
+must be empty. If the user also asks for calculations or outputs, preserve the
+complete request with `pending_action: "none"`; never drop those goals to fit
+an identity action. If the relationship to the waiting task is unclear, use
+`pending_action: "clarify"` without committing an identity.
+
+For a molecule name, `molecule_query` is the bounded English PubChem lookup
+spelling. For Chinese molecule names, produce a reliable English lookup name
+and copy the full original name into `molecule_name_evidence`. Preserve
+qualifiers, locants, stereochemistry, charge, salts, and isomer distinctions.
+Names are lookup proposals, not verified structures. Never invent a CID or
+SMILES as a translation. If a reliable lookup name cannot be supplied, leave
+the molecule identity unresolved and preserve all requested operations.
+
+Examples while a carbon-dioxide name lookup is waiting:
+- “优化己烷”: `pending_action: "none"`; new Opt request; evidence “己烷”, lookup
+  “hexane”.
+- “优化水，并计算频率”: `pending_action: "none"`; preserve Opt and Freq, with
+  Freq consuming Opt's optimized geometry.
+- “水是什么”: ordinary `chemistry_qa`, not an identity update.
+- “water” or “英文名：water”: `pending_action: "supplement_identity"`; no new
+  operations or results.
+- “改为己烷”: `pending_action: "replace_identity"`; no new operations.
+- “改为己烷，并计算频率”: not an identity-only action; retain the frequency
+  goal in a complete request.
+- “candidate_1”: bind only the current candidate snapshot; do not invent one.
 
 The program may normalize only an unambiguous formula spelling such as
 `C4h10` or `c4h10` to its safe `lookup_query` later; do not apply whole-string

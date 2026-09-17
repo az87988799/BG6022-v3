@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict
 
 from bg6022.config import LlmSettings
 from bg6022.llm import LlmClient, LlmError
+from bg6022.planner import intake_message
+from bg6022.tools.registry import build_registry
 
 
 class _Answer(BaseModel):
@@ -580,5 +582,51 @@ def test_cancellation_after_transport_does_not_apply_a_late_response() -> None:
         assert raised.value.category == "cancelled"
         assert len(llm.calls) == 1
         assert llm.calls[0].category == "cancelled"
+    finally:
+        http_client.close()
+
+
+def test_intake_corrects_non_normalized_name_lookup_with_one_structured_retry() -> None:
+    registry = build_registry()
+    rejected = {
+        "intent": "chemistry_compute",
+        "operations": ["Opt"],
+        "molecule_query": "水",
+        "molecule_input_kind": "name",
+        "molecule_name_evidence": "水",
+        "requested_results": ["opt_final_electronic_energy"],
+    }
+    corrected = {
+        **rejected,
+        "molecule_query": "water",
+    }
+    llm, requests, http_client = _offline_client(
+        [
+            _response(
+                json.dumps(rejected),
+                finish_reason="stop",
+                usage={"prompt_tokens": 8, "completion_tokens": 8},
+            ),
+            _response(
+                json.dumps(corrected),
+                finish_reason="stop",
+                usage={"prompt_tokens": 12, "completion_tokens": 8},
+            ),
+        ],
+        structured_output_corrections=1,
+    )
+    try:
+        intake = intake_message(
+            llm,
+            "优化水",
+            capability_catalog=registry.result_capabilities(),
+            registry=registry,
+        )
+        assert intake.molecule_query == "water"
+        assert intake.molecule_name_evidence == "水"
+        assert len(requests) == 2
+        assert "NAME_LOOKUP_NOT_NORMALIZED" in requests[1]["messages"][-1]["content"]
+        assert [call.category for call in llm.calls] == ["schema_error", "success"]
+        assert [call.structured_correction_count for call in llm.calls] == [0, 1]
     finally:
         http_client.close()

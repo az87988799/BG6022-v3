@@ -752,6 +752,7 @@ def test_llm_planner_failure_names_stage_without_creating_a_run(tmp_path: Path) 
                         "operations": ["Opt"],
                         "molecule_query": "water",
                         "molecule_input_kind": "name",
+                        "molecule_name_evidence": "水分子",
                         "requested_results": ["opt_final_electronic_energy"],
                     },
                     strict=True,

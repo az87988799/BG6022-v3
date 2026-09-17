@@ -956,13 +956,7 @@ def test_name_not_found_supplement_updates_lookup_only_on_same_run(
         return None
 
     monkeypatch.setattr(agent, "advance", fake_advance)
-    selection = _pending_molecule_selection("ethane", run.pending_data)
-    assert selection == {
-        "query": "ethane",
-        "input_kind": "name",
-        "explicit_new": True,
-        "preserve_identity": True,
-    }
+    assert _pending_molecule_selection("ethane", run.pending_data) is None
     response = agent._apply_molecule_clarification(
         run,
         "ethane",
@@ -1167,7 +1161,7 @@ def test_candidate_choice_and_bare_equivalent_smiles_keep_original_formula() -> 
             }
         ],
     }
-    selected = _pending_molecule_selection("C(C)CCCC", pending)
+    selected = _pending_molecule_selection("SMILES:C(C)CCCC", pending)
     assert selected is not None and selected.get("candidate") is not None
     assert selected["candidate"]["cid"] == 8058
     assert _pending_molecule_selection("candidate_8058", pending)["invalid"]

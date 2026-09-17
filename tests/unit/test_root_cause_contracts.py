@@ -402,8 +402,8 @@ def test_intake_corrects_parameter_name_once_using_real_tool_catalog() -> None:
     base = {
         "intent": "chemistry_compute",
         "operations": ["Opt"],
-        "molecule_query": "water",
-        "molecule_input_kind": "name",
+        "molecule_query": None,
+        "molecule_input_kind": None,
         "requested_results": ["opt_final_electronic_energy"],
     }
     bodies = [
@@ -584,6 +584,7 @@ def test_intake_corrects_generic_energy_before_request_and_planner() -> None:
             "operations": ["Opt", "SP"],
             "molecule_query": "water",
             "molecule_input_kind": "name",
+            "molecule_name_evidence": "水分子",
             "requested_results": ["energy"],
             "structure_input": {
                 "required_bindings": [
@@ -601,6 +602,7 @@ def test_intake_corrects_generic_energy_before_request_and_planner() -> None:
             "operations": ["Opt", "SP"],
             "molecule_query": "water",
             "molecule_input_kind": "name",
+            "molecule_name_evidence": "水分子",
             "requested_results": ["sp_electronic_energy"],
             "structure_input": {
                 "required_bindings": [
@@ -668,6 +670,7 @@ def test_intake_corrects_free_text_sp_energy_before_request_creation() -> None:
         "operations": ["SP"],
         "molecule_query": "water",
         "molecule_input_kind": "name",
+        "molecule_name_evidence": "水分子",
     }
     bodies = [
         {**base, "requested_results": ["SP electronic energy"]},
@@ -724,6 +727,7 @@ def test_intake_registry_binding_error_uses_bounded_structured_correction() -> N
         "operations": ["Opt", "SP"],
         "molecule_query": "water",
         "molecule_input_kind": "name",
+        "molecule_name_evidence": "水分子",
         "requested_results": ["sp_electronic_energy"],
         "structure_input": {
             "xyz_text": "3\nwater\nO 0 0 0\nH 0 0 0.96\nH 0.93 0 -0.24",
@@ -810,6 +814,7 @@ def test_intake_preserves_explicit_initial_geometry_binding_from_user_semantics(
         "operations": ["Opt", "SP"],
         "molecule_query": "water",
         "molecule_input_kind": "name",
+        "molecule_name_evidence": "水分子",
         "requested_results": ["sp_electronic_energy"],
         "structure_input": {
             "required_bindings": [
