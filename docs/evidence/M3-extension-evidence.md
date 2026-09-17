@@ -8,8 +8,8 @@ complete or accepted.
 | Field | Observed value |
 |---|---|
 | Branch | `codex/v3-m3-extension` |
-| Implementation candidate | `6504ec8b62baccdd503d16ff81d24e971d3aaef8` |
-| Baseline | `b5d37f07a040e7eb8dfc1dac7c06af51cf37f255` |
+| Implementation candidate | `f84f02d` (`fix: close identity resolution closure gaps`) |
+| Baseline | `1772cc4cea23bdc001b2c36ef1f7bbd5d15591f9` |
 | Python | 3.14.6 for current offline validation; project package gate requires Python 3.11.x |
 | Key packages | pydantic 2.13.5; httpx 0.28.1; pytest 9.0.3; rdkit 2026.03.5 |
 | Lock hash | `uv.lock` SHA-256 `4ebcff69853f57680c368e061b57e1ea0a1cd2171ebfb8e426c95a5b40128bf3` |
@@ -17,8 +17,8 @@ complete or accepted.
 | LLM | configured model `deepseek-flash`; live LLM suite passed with the key injected only into the current process |
 | Active resources | 4 cores; 1024 MB total; `%maxcore 192`; one concurrent job |
 | Live data root | `E:\BG6022-v3-data` |
-| Config record | `config.example.toml` SHA-256 `6047a76d41683b6d18059ed38130210adce8b99628f056dcbb522c3c645838b9`; only non-secret path/model/resource settings were recorded |
-| Prompt hashes | `intake.md` `1488abbe4405990d7e38556a2d24c07174a0c44b008b449397e64a26f6924c46`; `planner.md` `c88dc578545b2ebbc2add3b80fb73d70183ed56934e8a9fed984671b5b8deee7` |
+| Config record | `config.example.toml` SHA-256 `53f75bde62ae3fa6d464abbbb28368438248f68c9734fc2a5c008c4577985e07`; only non-secret path/model/resource settings were recorded |
+| Prompt hashes | `intake.md` `a216cdf4e5628eb356105c5a83f4504d44d10a608fc3a09d398488ee7d72edd5`; `planner.md` `c88dc578545b2ebbc2add3b80fb73d70183ed56934e8a9fed984671b5b8deee7` |
 
 The current machine did not have `uv`. Its Python 3.11 interpreter lacked the
 project's dev dependencies and `wheel`, while Python 3.14 correctly rejected
@@ -52,23 +52,30 @@ constraints are stored on the Request; formula input accepts ordinary ASCII or
 Unicode-subscript formulas, keeps `H20` distinct from `H2O`, and rejects model
 invention of identity facts. PubChem formula resolution uses the bounded
 `fastformula -> CID list -> batched properties` path: one shared 20-second
-budget, at most three total attempts, at most 20 CIDs, and at most five displayed
-candidates. RDKit-computed composition, component count, isotope state, and
+budget, at most three total attempts, at most 32 CIDs by default, and at most
+five displayed candidates. An explicit configured value of 20 remains legal and
+correctly reports an incomplete search when more than 20 CIDs are returned.
+RDKit-computed composition, component count, isotope state, and
 formal charge are authoritative; source metadata is checked and cannot replace
 those facts. Raw source responses are retained as molecule-source artifacts.
 
-The dedicated formula/boundary suite passed 36 tests. It covers Unicode and
-literal formula preservation, narrow case normalization, all five explicit
-SMILES label forms, no-hydrogen structures and legacy `H:0` compatibility,
-explicit-hydrogen accounting, selected-CID/selected-structure binding,
-wrong-isomer and wrong-CID rejection, candidate collision handling, local
-state preservation after an invalid choice, and a saved candidate continuation
-that reaches confirmation without Intake or Planner calls. The complete
-offline regression for this candidate passed 349 tests with 16 opt-in live
-tests skipped. A direct real PubChem smoke request for `C6H14` completed in
-two requests, observed 146 returned CIDs, capped the property lookup at 20
-CIDs, and returned the expected leading CIDs including 8058 and 7892; this
-was a lookup smoke test only and is not an ORCA scientific-success claim.
+The dedicated formula/boundary suite passed 54 tests. It covers Unicode and
+literal formula preservation, narrow case normalization, all labelled SMILES
+forms (including a label followed by spaces), no-hydrogen
+structures and legacy `H:0` compatibility, explicit-hydrogen accounting,
+selected-CID/selected-structure binding, wrong-isomer and wrong-CID rejection,
+candidate collision handling, local state preservation after an invalid choice,
+candidate classification and structure de-duplication, incomplete/unverified
+source evidence, formula suffix rejection, name evidence, and saved candidate
+and name-lookup continuations. The complete offline regression for this
+candidate passed 370 tests with 16 opt-in live tests skipped. Real PubChem
+formula resolution checked all 15 CO₂ and 23 H₂O records in one bounded
+two-request lookup; the resolver succeeded with one ordinary structure and
+excluded 14 and 22 verified out-of-scope records respectively. Real name
+lookups returned ethane CID 6324, butane CID 7843, and isobutane CID 6360;
+the name evidence path retained the original Chinese text separately from the
+English lookup spelling. These are source/identity smoke tests only and are
+not ORCA scientific-success claims.
 
 ### Identity-root fix T01–T16 evidence
 
@@ -87,7 +94,7 @@ evidence is tied to implementation candidate
 | T05 | A real `handle_message` continuation over fixture PubChem responses selects `candidate_1`, executes resolve and RDKit geometry, then reaches the original Opt confirmation with no ORCA call. **passed offline; real LLM/ORCA acceptance remains pending** |
 | T06 | Candidate number, CID, title, tagged SMILES, and equivalent bare SMILES resolve to the current snapshot while retaining candidate CID/title/source. **passed** |
 | T07 | `CCCCCCC` while waiting for C₆H₁₄ is rejected locally; the original identity, plan, and waiting state are unchanged. **passed** |
-| T08 | Invalid raw `cccccc` is never replaced by model-proposed `CCCCCC`; a later valid candidate remains selectable. **passed** |
+| T08 | Invalid raw `cccccc` is never replaced by model-proposed `CCCCCC`; the full `handle_message` path keeps the same Run waiting, and a later valid candidate remains selectable. **passed** |
 | T09 | Planner validation and direct Tool validation reject selected CID 8058 bound to query 7892 before source lookup. **passed** |
 | T10 | Missing/wrong CID and same-formula wrong-isomer candidates do not publish a molecule output. **passed** |
 | T11 | selected CID/SMILES checks still run when no formula constraint exists. **passed** |
@@ -104,6 +111,25 @@ accepted.
 
 The active resource contract remains 4 cores, 1024 MB total, `%maxcore 192`,
 and one concurrent job. The candidate remains awaiting user acceptance.
+
+### Identity-closure follow-up evidence
+
+The resolver now keeps four separate outcomes: verified structures, verified
+formula-scope exclusions, unverified source records, and explicit identity
+rejections. Accepted records are grouped by canonical isomeric SMILES while
+their source CIDs remain in the candidate evidence; a single verified neutral
+structure is therefore sufficient even when other returned records are
+isotopic, charged, multicomponent, or composition-mismatched. An incomplete
+bounded search or any unverified record still pauses for identity input.
+
+The full interaction regression confirms that a model-proposed replacement
+SMILES cannot overwrite a waiting formula Run. Labelled `SMILES` and `formula`
+values accept horizontal spaces, while `C6H14+`, `C6H14.Cl`, and
+`C6H14(OH)` are rejected as complete unsupported tokens rather than truncated.
+For names, `molecule_name_evidence` is verified against the original user
+message; a not-found name becomes a same-Run identity clarification, and a
+later English name updates only `lookup_query` while retaining the original
+name and calculation target.
 
 ## Minimal repairs applied
 
