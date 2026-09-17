@@ -58,7 +58,7 @@ class RepairSettings(StrictConfig):
 class MoleculeSettings(StrictConfig):
     pubchem_timeout_seconds: StrictInt = Field(default=20, gt=0)
     pubchem_max_attempts: StrictInt = Field(default=3, ge=1, le=3)
-    pubchem_formula_max_cids: StrictInt = Field(default=20, ge=1, le=20)
+    pubchem_formula_max_cids: StrictInt = Field(default=32, ge=1, le=32)
     pubchem_formula_max_display_candidates: StrictInt = Field(default=5, ge=1, le=5)
     embedding_timeout_seconds: StrictInt = Field(default=60, gt=0)
     embedding_seeds: list[StrictInt] = Field(

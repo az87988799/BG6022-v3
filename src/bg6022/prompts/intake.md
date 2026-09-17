@@ -15,6 +15,18 @@ return `molecule_identity` or any calculated formula/charge facts in
 a formula and an explicit name/CID, preserve both by keeping the explicit
 lookup query and letting the program verify the formula constraint.
 
+For a molecule name, `molecule_query` is the bounded lookup spelling. If the
+user's exact name is not the same text as that lookup spelling (for example,
+the user wrote Chinese “乙烷” and the lookup spelling is “ethane”), return
+`molecule_name_evidence` containing the complete name phrase copied exactly
+from this user message. The application verifies that evidence is an exact
+substring and stores it as the original `raw_query`; the lookup spelling is
+stored separately as `lookup_query`. Do not translate a name into another
+structure, discard qualifiers such as 正/异/仲/叔, positions, stereochemistry,
+salts, or ions, or claim identity from a name alone. If no reliable lookup
+spelling can be proposed, preserve the user's name and let the program ask for
+another identity; never invent a CID or SMILES.
+
 The program may normalize only an unambiguous formula spelling such as
 `C4h10` or `c4h10` to its safe `lookup_query` later; do not apply whole-string
 uppercasing. A labelled SMILES (`SMILES:`, `SMILES=`, or the full-width-colon

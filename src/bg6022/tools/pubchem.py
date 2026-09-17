@@ -22,6 +22,7 @@ from bg6022.molecule_identity import (
     MoleculeInputKind,
     canonical_formula,
     identity_matches_facts,
+    identity_mismatch_code,
     parse_formula_counts,
     validate_resolve_binding,
 )
@@ -242,8 +243,28 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                     relative=relative,
                 )
             accepted: list[tuple[dict[str, Any], dict[str, Any]]] = []
+            excluded: list[dict[str, Any]] = []
+            unverified: list[dict[str, Any]] = []
             rejected: list[dict[str, Any]] = []
+            checked_cid_count = 0
+            has_explicit_selection = bool(
+                identity
+                and (
+                    identity.get("selected_cid") is not None
+                    or identity.get("selected_smiles") is not None
+                )
+            )
+            formula_filter = bool(
+                identity
+                and identity.get("element_counts") is not None
+                and not has_explicit_selection
+            )
             for candidate in lookup.candidates:
+                checked_cid_count += 1
+                candidate_reference = {
+                    "cid": candidate.get("CID"),
+                    "title": candidate.get("Title"),
+                }
                 try:
                     candidate_facts = _facts_from_pubchem_candidate(
                         candidate,
@@ -254,18 +275,30 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                         ),
                     )
                 except PubChemError as error:
-                    rejected.append(
-                        {
-                            "cid": candidate.get("CID"),
-                            "title": candidate.get("Title"),
-                            "reason": str(error),
-                            "category": error.category,
-                        }
-                    )
+                    diagnostic = {
+                        **candidate_reference,
+                        "reason": str(error),
+                        "category": error.category,
+                    }
+                    if has_explicit_selection:
+                        rejected.append(diagnostic)
+                    else:
+                        unverified.append(diagnostic)
                     continue
                 matches, reason = identity_matches_facts(identity, candidate_facts)
                 if matches:
                     accepted.append((candidate, candidate_facts))
+                elif formula_filter:
+                    excluded.append(
+                        {
+                            "cid": candidate_facts.get("cid"),
+                            "title": candidate_facts.get("title"),
+                            "formula": candidate_facts.get("formula"),
+                            "reason": reason or "candidate is outside the formula scope",
+                            "reason_code": identity_mismatch_code(identity, candidate_facts)
+                            or "excluded_identity_mismatch",
+                        }
+                    )
                 else:
                     rejected.append(
                         {
@@ -278,18 +311,49 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                         }
                     )
 
-            if not accepted:
-                category = "identity_mismatch" if rejected and identity else "invalid_structure"
-                reason = (
-                    "no PubChem candidate satisfies the requested molecule identity"
-                    if identity
-                    else "PubChem returned no parseable structure"
+            grouped: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+            for candidate, candidate_facts in accepted:
+                structure_key = str(
+                    candidate_facts.get("isomeric_smiles")
+                    or candidate_facts.get("canonical_smiles")
                 )
+                grouped.setdefault(structure_key, []).append((candidate, candidate_facts))
+            groups = list(grouped.values())
+            for group in groups:
+                group.sort(key=lambda item: _candidate_cid_sort_key(item[0], item[1]))
+            candidate_views = [
+                _candidate_public_view(
+                    representative_candidate,
+                    representative_facts,
+                    index=index,
+                    source_cids=[
+                        item_facts.get("cid")
+                        for _item_candidate, item_facts in group
+                        if isinstance(item_facts.get("cid"), int)
+                    ],
+                )
+                for index, group in enumerate(groups, start=1)
+                for representative_candidate, representative_facts in [group[0]]
+            ]
+            complete = lookup.search_complete and not lookup.candidates_truncated
+            resolution_diagnostics = {
+                "returned_cid_count": lookup.returned_cid_count or len(lookup.candidates),
+                "checked_cid_count": checked_cid_count,
+                "accepted_structure_count": len(groups),
+                "excluded_candidates": excluded,
+                "unverified_candidates": unverified,
+                "rejected_candidates": rejected,
+                "search_complete": lookup.search_complete,
+                "candidates_truncated": lookup.candidates_truncated,
+                "source_url": lookup.url,
+            }
+
+            def pause_for_identity(category: str, reason: str) -> Result:
                 _record_attempt(
                     run,
                     step,
                     attempt,
-                    "failed",
+                    "needs_input",
                     artifact_ids=source_artifact_ids,
                 )
                 save_run(config.data_root_path, run)
@@ -297,33 +361,66 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                     run,
                     step,
                     attempt,
-                    "failed",
+                    "needs_input",
                     diagnostics={
+                        **resolution_diagnostics,
                         "category": category,
                         "reason": reason,
                         "requested_formula": identity.get("formula") if identity else None,
-                        "rejected_candidates": rejected,
-                        "candidates": list(lookup.candidates),
-                        "source_url": lookup.url,
+                        "input_kind": parameters.input_kind,
+                        "lookup_query": parameters.query,
+                        "raw_query": identity.get("raw_query") if identity else parameters.query,
+                        "candidates": candidate_views,
+                    },
+                    clarification={
+                        "question": _resolution_clarification(
+                            category,
+                            input_kind=parameters.input_kind,
+                            raw_query=(identity.get("raw_query") if identity else parameters.query),
+                            has_candidates=bool(candidate_views),
+                        ),
+                        "candidates": candidate_views[
+                            : config.molecule.pubchem_formula_max_display_candidates
+                        ],
+                        "input_requirement": "molecule_identity",
                     },
                     artifact_ids=source_artifact_ids,
                     relative=relative,
                 )
-            candidate_views = [
-                _candidate_public_view(candidate, candidate_facts, index=index)
-                for index, (candidate, candidate_facts) in enumerate(accepted, start=1)
-            ]
-            if (
-                len(accepted) != 1
-                or lookup.candidates_truncated
-                or rejected
-                or not lookup.search_complete
-            ):
+
+            if len(groups) > 1:
+                return pause_for_identity(
+                    "ambiguous_molecule",
+                    "PubChem returned multiple verified structures for this identity query",
+                )
+            if not complete:
+                return pause_for_identity(
+                    "molecule_search_incomplete",
+                    "the bounded PubChem search did not verify all returned records",
+                )
+            if unverified:
+                return pause_for_identity(
+                    "molecule_source_unverified",
+                    "one or more PubChem records could not be verified as structures",
+                )
+            if len(groups) == 1:
+                _, facts = groups[0][0]
+            else:
+                category = (
+                    "identity_mismatch"
+                    if has_explicit_selection or rejected
+                    else "molecule_identity_not_found"
+                )
+                if category == "molecule_identity_not_found":
+                    return pause_for_identity(
+                        category,
+                        "no verified structure satisfies the requested molecule identity",
+                    )
                 _record_attempt(
                     run,
                     step,
                     attempt,
-                    "needs_input",
+                    "failed",
                     artifact_ids=source_artifact_ids,
                 )
                 save_run(config.data_root_path, run)
@@ -331,31 +428,17 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                     run,
                     step,
                     attempt,
-                    "needs_input",
+                    "failed",
                     diagnostics={
-                        "category": "ambiguous_molecule",
-                        "reason": "PubChem returned more than one identity-compatible candidate",
-                        "candidates": candidate_views[
-                            : config.molecule.pubchem_formula_max_display_candidates
-                        ],
-                        "rejected_candidates": rejected,
-                        "search_complete": lookup.search_complete,
-                        "candidates_truncated": lookup.candidates_truncated,
-                        "returned_cid_count": lookup.returned_cid_count,
-                        "source_url": lookup.url,
-                        "input_requirement": "molecule_identity",
-                    },
-                    clarification={
-                        "question": "请回复候选编号、CID，或明确的 SMILES；确认后继续原计算任务。",
-                        "candidates": candidate_views[
-                            : config.molecule.pubchem_formula_max_display_candidates
-                        ],
-                        "input_requirement": "molecule_identity",
+                        **resolution_diagnostics,
+                        "category": category,
+                        "reason": "no PubChem candidate satisfies the requested molecule identity",
+                        "requested_formula": identity.get("formula") if identity else None,
+                        "candidates": candidate_views,
                     },
                     artifact_ids=source_artifact_ids,
                     relative=relative,
                 )
-            _, facts = accepted[0]
             raw_bytes = lookup.raw_bytes
             source_url = lookup.url
             lookup_attempts = lookup.attempts
@@ -429,6 +512,7 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
             attempt,
             "succeeded",
             values=values,
+            diagnostics=resolution_diagnostics if parameters.input_kind != "smiles" else {},
             artifact_ids=artifact_ids,
             output_ports={"molecule": molecule_artifact.id},
             parameter_sources={"structure": source_url},
@@ -443,21 +527,24 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
             error.source_responses or source_responses,
         )
         status = "cancelled" if error.category == "cancelled" else "failed"
-        if (
-            error.category == "not_found"
-            and identity is not None
-            and identity.get("element_counts") is not None
-        ):
+        if error.category == "not_found" and parameters.input_kind in {"name", "cas", "formula"}:
             status = "needs_input"
-        diagnostic_category = (
-            "molecule_identity_not_found" if status == "needs_input" else error.category
-        )
+        if status == "needs_input" and parameters.input_kind == "name":
+            diagnostic_category = "molecule_name_not_found"
+        elif status == "needs_input":
+            diagnostic_category = "molecule_identity_not_found"
+        else:
+            diagnostic_category = error.category
         diagnostics = {"category": diagnostic_category, "reason": str(error)}
         if status == "needs_input":
+            raw_query = identity.get("raw_query") if identity else parameters.query
             diagnostics.update(
                 {
                     "input_requirement": "molecule_identity",
-                    "requested_formula": identity.get("formula"),
+                    "requested_formula": identity.get("formula") if identity else None,
+                    "input_kind": parameters.input_kind,
+                    "lookup_query": parameters.query,
+                    "raw_query": raw_query,
                 }
             )
         _record_attempt(
@@ -476,7 +563,12 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
             diagnostics=diagnostics,
             clarification=(
                 {
-                    "question": "未找到与该分子式匹配的结构，请提供明确的 CID 或 SMILES。",
+                    "question": _resolution_clarification(
+                        diagnostic_category,
+                        input_kind=parameters.input_kind,
+                        raw_query=(identity.get("raw_query") if identity else parameters.query),
+                        has_candidates=False,
+                    ),
                     "input_requirement": "molecule_identity",
                 }
                 if status == "needs_input"
@@ -785,7 +877,11 @@ def _extract_candidates(payload: Any) -> list[dict[str, Any]]:
     )
     if not isinstance(properties, list):
         return []
-    return [dict(item) for item in properties if isinstance(item, dict) and _has_smiles(item)]
+    # Keep records without a structure in the local candidate set.  They are
+    # evidence that was returned by PubChem and must be classified as
+    # unverified, rather than silently disappearing before completeness is
+    # evaluated.
+    return [dict(item) for item in properties if isinstance(item, dict)]
 
 
 def _has_smiles(candidate: dict[str, Any]) -> bool:
@@ -814,7 +910,10 @@ def _facts_from_pubchem_candidate(
     _validate_remote_metadata(candidate, facts, strict_formula=strict_formula_metadata)
     raw_cid = candidate.get("CID")
     if raw_cid is None:
-        cid = None
+        raise PubChemError(
+            "PubChem property record is missing its CID",
+            category="invalid_response",
+        )
     elif type(raw_cid) is int and raw_cid > 0:
         cid = raw_cid
     elif isinstance(raw_cid, str) and raw_cid.isdecimal() and int(raw_cid) > 0:
@@ -837,6 +936,11 @@ def _validate_remote_metadata(
     """Treat PubChem formula/charge fields as evidence, never as calculated facts."""
 
     remote_formula = candidate.get("MolecularFormula")
+    if strict_formula and remote_formula is None:
+        raise PubChemError(
+            "PubChem formula property record is missing molecular formula",
+            category="invalid_response",
+        )
     if remote_formula is not None:
         try:
             remote_counts = _metadata_formula_counts(str(remote_formula))
@@ -854,6 +958,11 @@ def _validate_remote_metadata(
                 category="identity_mismatch",
             )
     remote_charge = candidate.get("Charge")
+    if strict_formula and remote_charge is None:
+        raise PubChemError(
+            "PubChem formula property record is missing formal charge",
+            category="invalid_response",
+        )
     if remote_charge is not None:
         try:
             parsed_charge = int(remote_charge)
@@ -922,9 +1031,13 @@ def _metadata_formula_counts(raw: str) -> dict[str, int]:
 
 
 def _candidate_public_view(
-    candidate: Mapping[str, Any], facts: Mapping[str, Any], *, index: int
+    candidate: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    *,
+    index: int,
+    source_cids: list[int] | None = None,
 ) -> dict[str, Any]:
-    return {
+    view = {
         "choice_id": f"candidate_{index}",
         "cid": facts.get("cid") or candidate.get("CID"),
         "title": facts.get("title") or candidate.get("Title"),
@@ -933,6 +1046,45 @@ def _candidate_public_view(
         "isomeric_smiles": facts.get("isomeric_smiles"),
         "source_url": facts.get("source_url"),
     }
+    if source_cids and len(source_cids) > 1:
+        view["source_cids"] = source_cids
+    return view
+
+
+def _candidate_cid_sort_key(
+    candidate: Mapping[str, Any], facts: Mapping[str, Any]
+) -> tuple[int, int | str]:
+    raw_cid = facts.get("cid", candidate.get("CID"))
+    try:
+        cid = int(raw_cid)
+    except (TypeError, ValueError):
+        return (1, str(facts.get("canonical_smiles") or ""))
+    if cid <= 0:
+        return (1, str(facts.get("canonical_smiles") or ""))
+    return (0, cid)
+
+
+def _resolution_clarification(
+    category: str,
+    *,
+    input_kind: str,
+    raw_query: Any,
+    has_candidates: bool,
+) -> str:
+    if category == "ambiguous_molecule":
+        return "已核验出多个不同结构，请回复候选编号、CID，或明确的 SMILES；确认后继续原计算任务。"
+    if category == "molecule_search_incomplete":
+        suffix = "当前已有可选候选。" if has_candidates else "当前没有可安全展示的完整候选。"
+        return f"{suffix}当前检索尚未完整，不能确认唯一结构；请回复候选编号、CID 或明确的 SMILES。"
+    if category == "molecule_source_unverified":
+        return "部分来源记录无法可靠核验；请明确提供 CID 或 SMILES 后继续原计算任务。"
+    if category == "molecule_name_not_found":
+        return f"来源未识别名称“{raw_query}”，原计算任务已保留。请补充英文名称、CID 或明确 SMILES。"
+    if category == "molecule_identity_not_found":
+        if input_kind == "formula":
+            return "没有找到符合当前分子式约束的结构；请提供明确的 CID 或 SMILES。"
+        return "没有找到可验证的结构；请补充明确的名称、CID 或 SMILES。"
+    return "候选结构与用户给出的分子身份约束不一致；请提供明确的 CID 或 SMILES。"
 
 
 def _extract_cids(payload: Any) -> list[int]:

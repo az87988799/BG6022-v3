@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from bg6022.agent import Agent
 from bg6022.answer import (
     render_already_finished,
@@ -368,6 +370,35 @@ def test_clarification_and_missing_property_do_not_dump_internal_data() -> None:
     assert "当前可查询范围内" in unavailable
     assert "从未进行过" in unavailable
     assert "{" not in clarification + unavailable
+
+
+@pytest.mark.parametrize(
+    ("category", "expected"),
+    [
+        ("ambiguous_molecule", "多个不同结构"),
+        ("molecule_search_incomplete", "检索尚未完整"),
+        ("molecule_source_unverified", "无法可靠核验"),
+    ],
+)
+def test_molecule_clarifications_explain_the_verified_failure_reason(
+    category: str, expected: str
+) -> None:
+    text = render_clarification(
+        {
+            "category": category,
+            "candidates": [
+                {
+                    "choice_id": "candidate_1",
+                    "cid": 1,
+                    "title": "ethanol",
+                    "formula": "C2H6O",
+                    "isomeric_smiles": "CCO",
+                }
+            ],
+        }
+    )
+    assert expected in text
+    assert "candidate_1" in text
 
 
 def test_structured_property_targets_cover_multiple_facts_for_one_task() -> None:

@@ -84,6 +84,16 @@ MAX_HISTORY_GEOMETRIES = 8
 MAX_FILE_PREVIEW_BYTES = 16 * 1024
 MAX_FILE_PREVIEW_LINES = 256
 MAX_TOTAL_FILE_PREVIEW_BYTES = 64 * 1024
+_PENDING_MOLECULE_CATEGORIES = frozenset(
+    {
+        "ambiguous_molecule",
+        "molecule_identity_not_found",
+        "molecule_name_not_found",
+        "molecule_search_incomplete",
+        "molecule_source_unverified",
+        "identity_mismatch",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -226,8 +236,7 @@ class Agent:
                 and current.waiting_for == "clarification"
                 and (
                     current.pending_data.get("input_requirement") == "molecule_identity"
-                    or current.pending_data.get("category")
-                    in {"ambiguous_molecule", "molecule_identity_not_found", "identity_mismatch"}
+                    or current.pending_data.get("category") in _PENDING_MOLECULE_CATEGORIES
                 )
             )
             if pending_identity:
@@ -245,6 +254,7 @@ class Agent:
                         str(selection["input_kind"]),
                         candidate=selection.get("candidate"),
                         preserve_identity=bool(selection.get("preserve_identity")),
+                        name_evidence=selection.get("name_evidence"),
                         message=text,
                         cancel=request_cancel,
                     )
@@ -469,8 +479,7 @@ class Agent:
                 and current.waiting_for == "clarification"
                 and (
                     current.pending_data.get("input_requirement") == "molecule_identity"
-                    or current.pending_data.get("category")
-                    in {"ambiguous_molecule", "molecule_identity_not_found", "identity_mismatch"}
+                    or current.pending_data.get("category") in _PENDING_MOLECULE_CATEGORIES
                 )
             )
             if pending_identity:
@@ -488,16 +497,7 @@ class Agent:
                         str(selection["input_kind"]),
                         candidate=selection.get("candidate"),
                         preserve_identity=bool(selection.get("preserve_identity")),
-                        message=text,
-                        cancel=request_cancel,
-                    )
-                    self._record_response(response, cancel=request_cancel)
-                    return response
-                if intake.molecule_query and not _looks_like_molecule_change(text):
-                    response = self._apply_molecule_clarification(
-                        current,
-                        intake.molecule_query,
-                        intake.molecule_input_kind,
+                        name_evidence=selection.get("name_evidence"),
                         message=text,
                         cancel=request_cancel,
                     )
@@ -513,6 +513,15 @@ class Agent:
                 )
                 self._record_response(response, cancel=request_cancel)
                 return response
+            if pending_identity and not (
+                intake.molecule_query and _looks_like_molecule_change(text)
+            ):
+                response = AgentResponse(
+                    "当前身份补充未匹配到候选、CID 或可验证的 SMILES；原任务保持等待。",
+                    run=current,
+                )
+                self._record_response(response, cancel=request_cancel)
+                return response
             if (
                 current is not None
                 and current.status == "waiting"
@@ -523,6 +532,7 @@ class Agent:
                     current,
                     intake.molecule_query,
                     intake.molecule_input_kind,
+                    name_evidence=intake.molecule_name_evidence,
                     message=text,
                     cancel=request_cancel,
                 )
@@ -1348,6 +1358,7 @@ class Agent:
         *,
         candidate: Mapping[str, Any] | None = None,
         preserve_identity: bool = False,
+        name_evidence: str | None = None,
         message: str | None = None,
         cancel: Event | None = None,
     ) -> AgentResponse:
@@ -1357,6 +1368,7 @@ class Agent:
             input_kind,
             candidate=candidate,
             preserve_identity=preserve_identity,
+            name_evidence=name_evidence,
             message=message,
             cancel=cancel,
         )
@@ -1369,6 +1381,7 @@ class Agent:
         *,
         candidate: Mapping[str, Any] | None = None,
         preserve_identity: bool = False,
+        name_evidence: str | None = None,
         message: str | None = None,
         cancel: Event | None = None,
     ) -> AgentResponse:
@@ -1434,6 +1447,15 @@ class Agent:
                     if corrected is None:
                         return AgentResponse("该分子式无法建立身份约束。", run=run)
                     selected_identity = corrected
+                elif kind == "name":
+                    if selected_identity.get("input_kind") != "name":
+                        return AgentResponse(
+                            "当前任务不是名称身份，无法只替换名称检索词。", run=run
+                        )
+                    selected_identity["lookup_query"] = query
+                    selected_identity.pop("selected_cid", None)
+                    selected_identity.pop("selected_choice_id", None)
+                    selected_identity.pop("selected_smiles", None)
                 else:
                     return AgentResponse("当前身份补充不是可识别的候选、CID 或 SMILES。", run=run)
                 structure_input["molecule_identity"] = selected_identity
@@ -1442,6 +1464,7 @@ class Agent:
                     message=message or query,
                     query=query,
                     input_kind=kind,
+                    name_evidence=name_evidence,
                 )
                 if identity is not None:
                     structure_input["molecule_identity"] = identity
@@ -4226,7 +4249,10 @@ def _pending_molecule_selection(
             "preserve_identity": True,
         }
 
-    formula = formula_token_from_text(stripped)
+    try:
+        formula = formula_token_from_text(stripped)
+    except ValueError:
+        return {"invalid": "该分子式包含不支持的后缀，请提供完整的分子式、CID 或 SMILES。"}
     if formula == stripped:
         try:
             normalized = normalize_formula_token(formula)
@@ -4238,6 +4264,26 @@ def _pending_molecule_selection(
             "explicit_new": True,
             "preserve_identity": True,
         }
+
+    if pending_data.get("category") == "molecule_name_not_found":
+        name_match = re.fullmatch(
+            r"(?i)(?:english\s+name|英文名称|英文名|name|名称)\s*[:=：]?\s*(\S(?:.*\S)?)",
+            stripped,
+        )
+        name = name_match.group(1).strip() if name_match is not None else stripped
+        if (
+            name
+            and len(name) <= 128
+            and "\n" not in name
+            and "\r" not in name
+            and not re.search(r"[=：:]", name)
+        ):
+            return {
+                "query": name,
+                "input_kind": "name",
+                "explicit_new": True,
+                "preserve_identity": True,
+            }
 
     # A bare structure is accepted only after RDKit proves it is a SMILES;
     # arbitrary model-generated text is not treated as a structure.

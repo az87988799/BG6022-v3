@@ -14,11 +14,19 @@ _SUBSCRIPTS = str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")
 _TOKEN = re.compile(r"([A-Z][a-z]?)([1-9][0-9]*)?")
 _FORMULA_TOKEN = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9₀-₉]*(?![A-Za-z0-9_])")
 _FORMULA_LABEL = re.compile(r"(?i)(?<![A-Za-z0-9_])(?:formula|molecular\s+formula|分子式)\s*[:=：]")
-_FORMULA_VALUE = re.compile(r"[A-Za-z0-9₀-₉]+")
+# Include ASCII chemistry punctuation in the labelled token.  This makes an
+# unsupported suffix (charge, component separator, bracketed isotope, or
+# parenthesized group) fail as a whole instead of being silently truncated to
+# a valid-looking formula prefix.  Chinese sentence punctuation remains a
+# delimiter, so ``formula:C6H14。`` still has the ordinary user-facing
+# meaning while ``formula:C6H14. Cl`` is rejected.
+_FORMULA_VALUE = re.compile(r"[A-Za-z0-9₀-₉.+()\-\[\]_^*/]+")
 _EXPLICIT_SMILES_LABEL = re.compile(r"(?i)(?<![A-Za-z0-9_])smiles\s*[:=：]")
 # Keep the structure token ASCII and narrow so Chinese text immediately after
 # a SMILES label cannot be swallowed as part of the query.
 _SMILES_VALUE = re.compile(r"[-A-Za-z0-9@+_=#\\/%().:\[\]]+")
+_HORIZONTAL_WHITESPACE = frozenset({" ", "\t"})
+_FORMULA_SUFFIX_CHARS = frozenset(".+-()[]_^*/")
 _SIMPLE_CASE_FORMULA = re.compile(r"(?:[A-Za-z][1-9][0-9]*)+")
 _SINGLE_LETTER_ELEMENTS = frozenset(
     element for element in SUPPORTED_FORMULA_ELEMENTS if len(element) == 1
@@ -102,7 +110,7 @@ def extract_explicit_smiles(message: str) -> tuple[dict[str, Any], ...]:
         return ()
     extracted: list[dict[str, Any]] = []
     for label in _EXPLICIT_SMILES_LABEL.finditer(message):
-        value = _SMILES_VALUE.match(message, label.end())
+        value = _match_label_value(message, label.end(), _SMILES_VALUE)
         if value is None:
             raise ValueError("SMILES input requires a complete structure after its label")
         extracted.append(
@@ -130,7 +138,7 @@ def _formula_tokens_from_text(message: str) -> list[str]:
     tokens: list[str] = []
     normalized_tokens: set[str] = set()
     for label in _FORMULA_LABEL.finditer(message):
-        value = _FORMULA_VALUE.match(message, label.end())
+        value = _match_label_value(message, label.end(), _FORMULA_VALUE)
         if value is None:
             raise ValueError("formula input requires a complete formula after its label")
         candidate = value.group(0)
@@ -144,6 +152,10 @@ def _formula_tokens_from_text(message: str) -> list[str]:
             continue
         if not re.search(r"[0-9₀-₉]", candidate):
             continue
+        if match.end() < len(message) and message[match.end()] in _FORMULA_SUFFIX_CHARS:
+            # The bare-token scanner must not turn ``C6H14+`` or
+            # ``C6H14.Cl`` into the valid prefix ``C6H14``.
+            continue
         if _looks_like_ring_smiles(candidate):
             continue
         try:
@@ -154,6 +166,16 @@ def _formula_tokens_from_text(message: str) -> list[str]:
             tokens.append(candidate)
             normalized_tokens.add(normalized)
     return tokens
+
+
+def _match_label_value(
+    message: str, position: int, pattern: re.Pattern[str]
+) -> re.Match[str] | None:
+    """Match a labelled value after horizontal, but not newline, whitespace."""
+
+    while position < len(message) and message[position] in _HORIZONTAL_WHITESPACE:
+        position += 1
+    return pattern.match(message, position)
 
 
 def _looks_like_ring_smiles(value: str) -> bool:
@@ -183,8 +205,19 @@ def build_identity_constraint(
     message: str,
     query: str | None,
     input_kind: str | None,
+    name_evidence: str | None = None,
 ) -> dict[str, Any] | None:
     """Construct the Request identity record without trusting model facts."""
+
+    if name_evidence is not None:
+        if input_kind != "name":
+            raise ValueError("molecule_name_evidence is only valid for name input")
+        if not isinstance(name_evidence, str) or not name_evidence.strip():
+            raise ValueError("molecule_name_evidence must be non-empty text")
+        if name_evidence not in message:
+            raise ValueError(
+                "molecule_name_evidence must be an exact substring of the user message"
+            )
 
     explicit_smiles = extract_explicit_smiles(message)
     if len(explicit_smiles) > 1:
@@ -223,7 +256,10 @@ def build_identity_constraint(
         normalized_formula = canonical_formula(formula["element_counts"])
         proposed_query = query.strip() if isinstance(query, str) and query.strip() else ""
         kind = normalized_kind if normalized_kind in {"name", "cas", "cid"} else None
-        if kind is not None and proposed_query and proposed_query in message:
+        query_is_user_bound = proposed_query and proposed_query in message
+        if kind == "name" and name_evidence is not None:
+            query_is_user_bound = True
+        if kind is not None and proposed_query and query_is_user_bound:
             lookup_query = proposed_query
         else:
             kind = "formula"
@@ -247,6 +283,9 @@ def build_identity_constraint(
     if normalized_kind not in {"name", "cas", "cid", "smiles", "formula"}:
         raise ValueError(f"unsupported molecule input kind: {normalized_kind!r}")
     raw_query = query
+    if normalized_kind == "name":
+        if name_evidence is not None:
+            raw_query = name_evidence
     selected_cid = None
     if normalized_kind == "cid":
         selected_cid = _positive_cid(query)
@@ -350,6 +389,43 @@ def identity_matches_facts(
     return True, None
 
 
+def identity_mismatch_code(
+    identity: Mapping[str, Any] | None, facts: Mapping[str, Any]
+) -> str | None:
+    """Return a stable reason code for a verified candidate mismatch."""
+
+    if identity is None:
+        return None
+    selected_cid = identity.get("selected_cid")
+    if selected_cid is None and identity.get("input_kind") == "cid":
+        selected_cid = _positive_cid(identity.get("lookup_query") or identity.get("raw_query"))
+    if selected_cid is not None and _positive_cid(facts.get("cid")) != selected_cid:
+        return "selected_cid_mismatch"
+    selected_smiles = identity.get("selected_smiles")
+    if selected_smiles is not None:
+        actual_smiles = facts.get("isomeric_smiles") or facts.get("canonical_smiles")
+        if not isinstance(actual_smiles, str):
+            return "selected_smiles_unavailable"
+        try:
+            if canonical_structure(actual_smiles) != canonical_structure(selected_smiles):
+                return "selected_smiles_mismatch"
+        except ValueError:
+            return "selected_smiles_invalid"
+    expected_counts = identity.get("element_counts")
+    if expected_counts is None:
+        return None
+    if facts.get("component_count") != 1:
+        return "excluded_multicomponent"
+    if facts.get("isotopic"):
+        return "excluded_isotopic"
+    if facts.get("formal_charge") != 0:
+        return "excluded_charged"
+    actual = facts.get("element_counts")
+    if not isinstance(actual, Mapping) or dict(actual) != dict(expected_counts):
+        return "excluded_composition"
+    return None
+
+
 def canonical_structure(smiles: str) -> str:
     """Canonicalize a structure without changing charge, isotope, or stereo."""
 
@@ -427,6 +503,7 @@ __all__ = [
     "formula_constraint",
     "formula_token_from_text",
     "identity_matches_facts",
+    "identity_mismatch_code",
     "normalize_formula_token",
     "normalize_identity_for_storage",
     "parse_formula_counts",

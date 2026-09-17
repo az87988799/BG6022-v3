@@ -34,7 +34,7 @@ max_plan_revisions = 2
 [molecule]
 pubchem_timeout_seconds = 20
 pubchem_max_attempts = 3
-pubchem_formula_max_cids = 20
+pubchem_formula_max_cids = 32
 pubchem_formula_max_display_candidates = 5
 embedding_timeout_seconds = 60
 embedding_seeds = [61453, 61454]

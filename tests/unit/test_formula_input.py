@@ -195,28 +195,72 @@ def test_co2_geometry_generation_uses_verified_no_hydrogen_composition(tmp_path:
 
 
 @pytest.mark.parametrize(
-    "text",
+    ("text", "expected"),
     [
-        "SMILES:C1CCCCC1",
-        "优化 SMILES:C1CCCCC1",
-        "优化SMILES:C1CCCCC1",
-        "SMILES：C1CCCCC1",
-        "SMILES=C1CCCCC1",
+        ("SMILES:C1CCCCC1", "C1CCCCC1"),
+        ("SMILES: C1CCCCC1", "C1CCCCC1"),
+        ("优化 SMILES:C1CCCCC1", "C1CCCCC1"),
+        ("优化SMILES:C1CCCCC1", "C1CCCCC1"),
+        ("SMILES：C1CCCCC1", "C1CCCCC1"),
+        ("SMILES： CCO", "CCO"),
+        ("SMILES=C1CCCCC1", "C1CCCCC1"),
     ],
 )
-def test_explicit_smiles_forms_are_extracted_once_and_never_formula_normalized(text: str) -> None:
+def test_explicit_smiles_forms_are_extracted_once_and_never_formula_normalized(
+    text: str, expected: str
+) -> None:
     extracted = extract_explicit_smiles(text)
     assert len(extracted) == 1
-    assert extracted[0]["raw_query"] == "C1CCCCC1"
+    assert extracted[0]["raw_query"] == expected
     assert formula_token_from_text(text) is None
     identity = build_identity_constraint(
         message=text,
-        query="CCCCCC",
+        query=expected,
         input_kind="smiles",
     )
     assert identity is not None
     assert identity["input_kind"] == "smiles"
-    assert identity["raw_query"] == "C1CCCCC1"
+    assert identity["raw_query"] == expected
+
+
+@pytest.mark.parametrize("text", ["formula: C6H14", "formula：\tC6H14", "分子式: C6H14"])
+def test_formula_labels_skip_horizontal_space_and_keep_complete_value(text: str) -> None:
+    assert formula_token_from_text(text) == "C6H14"
+    identity = build_identity_constraint(message=text, query="C6H14", input_kind="formula")
+    assert identity is not None
+    assert identity["formula"] == "C6H14"
+
+
+@pytest.mark.parametrize("text", ["formula:C6H14+", "formula:C6H14.Cl", "formula:C6H14(OH)"])
+def test_formula_suffixes_are_rejected_as_whole_tokens(text: str) -> None:
+    with pytest.raises(ValueError, match="unsupported formula"):
+        formula_token_from_text(text)
+    with pytest.raises(ValueError):
+        build_identity_constraint(message=text, query="C6H14", input_kind="formula")
+
+
+def test_name_evidence_keeps_original_name_separate_from_lookup_spelling(tmp_path: Path) -> None:
+    intake = IntakeOutput(
+        intent="chemistry_compute",
+        operations=["Opt"],
+        molecule_query="ethane",
+        molecule_input_kind="name",
+        molecule_name_evidence="乙烷",
+        requested_results=["opt_final_electronic_energy"],
+    )
+    request = request_from_intake(
+        "优化乙烷",
+        intake,
+        request_id="request_ethane_name",
+        registry=build_registry(_config(tmp_path)),
+    )
+    identity = request.structure_input["molecule_identity"]
+    assert identity["raw_query"] == "乙烷"
+    assert identity["lookup_query"] == "ethane"
+    fallback = build_identity_constraint(message="优化乙烷", query="ethane", input_kind="name")
+    assert fallback is not None
+    assert fallback["raw_query"] == "ethane"
+    assert fallback["lookup_query"] == "ethane"
 
 
 def test_conflicting_explicit_smiles_require_clarification() -> None:
@@ -402,6 +446,73 @@ def test_formula_pubchem_uses_fastformula_then_batched_properties(tmp_path: Path
     assert len(lookup.source_responses) == 2
 
 
+def test_formula_pubchem_default_bound_covers_twenty_three_records(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if "/fastformula/" in str(request.url):
+            return httpx.Response(200, json={"IdentifierList": {"CID": list(range(1, 24))}})
+        return httpx.Response(
+            200,
+            json={
+                "PropertyTable": {
+                    "Properties": [
+                        _candidate(cid, "water", "O", formula="H2O") for cid in range(1, 24)
+                    ]
+                }
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    lookup = fetch_pubchem("H2O", "formula", config=config, client=client)
+    client.close()
+    assert config.molecule.pubchem_formula_max_cids == 32
+    assert lookup.candidates_truncated is False
+    assert lookup.search_complete is True
+    assert len(lookup.candidates) == 23
+    assert ",23/property/" in calls[1]
+
+
+def test_formula_pubchem_explicit_bound_twenty_keeps_search_incomplete(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        f"""[orca]
+executable = '{(tmp_path / "missing-orca.exe").as_posix()}'
+
+[runtime]
+data_root = 'data'
+
+[molecule]
+pubchem_formula_max_cids = 20
+""",
+        encoding="utf-8",
+    )
+    config = load_config(path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/fastformula/" in str(request.url):
+            return httpx.Response(200, json={"IdentifierList": {"CID": list(range(1, 24))}})
+        return httpx.Response(
+            200,
+            json={
+                "PropertyTable": {
+                    "Properties": [
+                        _candidate(cid, "water", "O", formula="H2O") for cid in range(1, 21)
+                    ]
+                }
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    lookup = fetch_pubchem("H2O", "formula", config=config, client=client)
+    client.close()
+    assert config.molecule.pubchem_formula_max_cids == 20
+    assert lookup.candidates_truncated is True
+    assert lookup.search_complete is False
+
+
 def test_formula_pubchem_shares_retry_budget_across_endpoints(tmp_path: Path) -> None:
     config = _config(tmp_path)
     calls: list[str] = []
@@ -500,7 +611,7 @@ def test_formula_resolution_marks_no_match_as_identity_failure(tmp_path: Path, m
         query="C2H6O",
         input_kind="formula",
         url="test:properties",
-        candidates=(_candidate(1, "water", "O", formula="C2H6O"),),
+        candidates=(_candidate(1, "water", "O", formula="H2O"),),
         raw_bytes=b"properties",
         attempts=1,
         source_responses=({"url": "test:properties", "raw_bytes": b"properties"},),
@@ -508,10 +619,152 @@ def test_formula_resolution_marks_no_match_as_identity_failure(tmp_path: Path, m
     )
     monkeypatch.setattr("bg6022.tools.pubchem.fetch_pubchem", lambda *args, **kwargs: lookup)
     result = execute_resolve_molecule(config, step=step, run=run, cancel=Event())
-    assert result.status == "failed"
-    assert result.diagnostics["category"] == "identity_mismatch"
+    assert result.status == "needs_input"
+    assert result.diagnostics["category"] == "molecule_identity_not_found"
     assert result.output_ports == {}
     assert result.artifact_ids
+
+
+def test_formula_resolution_ignores_verified_exclusions_when_one_structure_is_unique(
+    tmp_path: Path, monkeypatch
+) -> None:
+    identity = build_identity_constraint(
+        message="formula C2H6O",
+        query="C2H6O",
+        input_kind="formula",
+    )
+    assert identity is not None
+    config, step, run = _run_for_resolve(tmp_path, identity)
+    lookup = PubChemLookup(
+        query="C2H6O",
+        input_kind="formula",
+        url="test:properties",
+        candidates=(
+            _candidate(1, "ethanol", "CCO", formula="C2H6O"),
+            _candidate(2, "charged ethanol", "CC[O-]", formula="C2H5O") | {"Charge": -1},
+        ),
+        raw_bytes=b"properties",
+        attempts=1,
+        source_responses=({"url": "test:properties", "raw_bytes": b"properties"},),
+        returned_cid_count=2,
+    )
+    monkeypatch.setattr("bg6022.tools.pubchem.fetch_pubchem", lambda *args, **kwargs: lookup)
+    result = execute_resolve_molecule(config, step=step, run=run, cancel=Event())
+    assert result.status == "succeeded"
+    assert result.diagnostics["accepted_structure_count"] == 1
+    assert result.diagnostics["excluded_candidates"][0]["reason_code"] == "excluded_charged"
+    assert result.output_ports["molecule"]
+
+
+def test_formula_resolution_deduplicates_same_verified_structure_and_keeps_source_cids(
+    tmp_path: Path, monkeypatch
+) -> None:
+    identity = build_identity_constraint(
+        message="formula C2H6O",
+        query="C2H6O",
+        input_kind="formula",
+    )
+    assert identity is not None
+    config, step, run = _run_for_resolve(tmp_path, identity)
+    lookup = PubChemLookup(
+        query="C2H6O",
+        input_kind="formula",
+        url="test:properties",
+        candidates=(
+            _candidate(20, "ethanol duplicate", "CCO"),
+            _candidate(10, "ethanol", "CCO"),
+        ),
+        raw_bytes=b"properties",
+        attempts=1,
+        source_responses=({"url": "test:properties", "raw_bytes": b"properties"},),
+        returned_cid_count=2,
+    )
+    monkeypatch.setattr("bg6022.tools.pubchem.fetch_pubchem", lambda *args, **kwargs: lookup)
+    result = execute_resolve_molecule(config, step=step, run=run, cancel=Event())
+    assert result.status == "succeeded"
+    assert result.diagnostics["accepted_structure_count"] == 1
+    molecule = next(
+        item for item in run.artifact_index if item.id == result.output_ports["molecule"]
+    )
+    assert molecule.metadata["cid"] == 10
+
+
+def test_formula_resolution_does_not_auto_accept_unverified_source_record(
+    tmp_path: Path, monkeypatch
+) -> None:
+    identity = build_identity_constraint(
+        message="formula C2H6O",
+        query="C2H6O",
+        input_kind="formula",
+    )
+    assert identity is not None
+    config, step, run = _run_for_resolve(tmp_path, identity)
+    lookup = PubChemLookup(
+        query="C2H6O",
+        input_kind="formula",
+        url="test:properties",
+        candidates=(_candidate(1, "ethanol", "CCO"), {"CID": 2, "Title": "missing structure"}),
+        raw_bytes=b"properties",
+        attempts=1,
+        source_responses=({"url": "test:properties", "raw_bytes": b"properties"},),
+        returned_cid_count=2,
+    )
+    monkeypatch.setattr("bg6022.tools.pubchem.fetch_pubchem", lambda *args, **kwargs: lookup)
+    result = execute_resolve_molecule(config, step=step, run=run, cancel=Event())
+    assert result.status == "needs_input"
+    assert result.diagnostics["category"] == "molecule_source_unverified"
+    assert result.diagnostics["unverified_candidates"][0]["cid"] == 2
+
+
+def test_formula_resolution_reports_incomplete_search_even_with_one_candidate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    identity = build_identity_constraint(
+        message="formula C2H6O",
+        query="C2H6O",
+        input_kind="formula",
+    )
+    assert identity is not None
+    config, step, run = _run_for_resolve(tmp_path, identity)
+    lookup = PubChemLookup(
+        query="C2H6O",
+        input_kind="formula",
+        url="test:properties",
+        candidates=(_candidate(1, "ethanol", "CCO"),),
+        raw_bytes=b"properties",
+        attempts=1,
+        source_responses=({"url": "test:properties", "raw_bytes": b"properties"},),
+        returned_cid_count=23,
+        candidates_truncated=True,
+    )
+    monkeypatch.setattr("bg6022.tools.pubchem.fetch_pubchem", lambda *args, **kwargs: lookup)
+    result = execute_resolve_molecule(config, step=step, run=run, cancel=Event())
+    assert result.status == "needs_input"
+    assert result.diagnostics["category"] == "molecule_search_incomplete"
+
+
+def test_name_not_found_preserves_identity_task_for_name_supplement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identity = build_identity_constraint(
+        message="优化乙烷",
+        query="ethane",
+        input_kind="name",
+        name_evidence="乙烷",
+    )
+    assert identity is not None
+    config, step, run = _run_for_resolve(tmp_path, identity)
+
+    def missing(*_args, **_kwargs):
+        raise PubChemError("PubChem found no structure", category="not_found")
+
+    monkeypatch.setattr("bg6022.tools.pubchem.fetch_pubchem", missing)
+    result = execute_resolve_molecule(config, step=step, run=run, cancel=Event())
+    assert result.status == "needs_input"
+    assert result.diagnostics["category"] == "molecule_name_not_found"
+    assert result.diagnostics["raw_query"] == "乙烷"
+    assert result.diagnostics["lookup_query"] == "ethane"
+    assert result.clarification["input_requirement"] == "molecule_identity"
 
 
 def test_direct_tool_rejects_selected_cid_binding_before_network(
@@ -617,6 +870,113 @@ def test_invalid_original_smiles_is_not_silently_replaced_by_model_case() -> Non
         "candidates": [{"choice_id": "candidate_1", "cid": 8058, "title": "hexane"}],
     }
     assert _pending_molecule_selection("cccccc", pending) is None
+
+
+def test_invalid_original_smiles_keeps_full_handle_message_waiting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    identity = build_identity_constraint(
+        message="优化 C6H14",
+        query="C6H14",
+        input_kind="formula",
+    )
+    assert identity is not None
+    config, step, run = _run_for_resolve(tmp_path, identity)
+    session_id = "session_invalid_raw_smiles"
+    run.session_id = session_id
+    run.status = "waiting"
+    run.waiting_for = "clarification"
+    run.pending_data = {
+        "category": "ambiguous_molecule",
+        "input_requirement": "molecule_identity",
+        "step_id": step.id,
+        "candidates": [{"choice_id": "candidate_1", "cid": 8058, "title": "hexane"}],
+    }
+    save_run(config.data_root_path, run)
+    save_session(
+        config.data_root_path,
+        session_id,
+        {
+            "session_id": session_id,
+            "active_run_id": run.id,
+            "recent_messages": [],
+            "recent_results": [],
+            "last_delivery": [],
+            "pending_prompt": None,
+        },
+    )
+    intake = IntakeOutput(
+        intent="chemistry_compute",
+        operations=["Opt"],
+        molecule_query="CCCCCC",
+        molecule_input_kind="smiles",
+        requested_results=["opt_final_electronic_energy"],
+    )
+    agent = Agent(config, build_registry(config), llm=object(), session_id=session_id)
+    monkeypatch.setattr("bg6022.agent.intake_message", lambda *args, **kwargs: intake)
+    monkeypatch.setattr(
+        "bg6022.agent.plan_message",
+        lambda *args, **kwargs: pytest.fail("invalid identity must not reach Planner"),
+    )
+    response = agent.handle_message("cccccc")
+    assert response.run is not None
+    assert response.run.status == "waiting"
+    assert response.run.waiting_for == "clarification"
+    assert response.run.request.structure_input["molecule_identity"] == identity
+    assert response.run.plan.steps[0].parameters == {
+        "query": "C6H14",
+        "input_kind": "formula",
+    }
+
+
+def test_name_not_found_supplement_updates_lookup_only_on_same_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    identity = build_identity_constraint(
+        message="优化乙烷",
+        query="乙烷",
+        input_kind="name",
+    )
+    assert identity is not None
+    config, step, run = _run_for_resolve(tmp_path, identity)
+    run.status = "waiting"
+    run.waiting_for = "clarification"
+    run.pending_data = {
+        "category": "molecule_name_not_found",
+        "input_requirement": "molecule_identity",
+        "step_id": step.id,
+        "raw_query": "乙烷",
+    }
+    agent = Agent(config, build_registry(config), llm=None)
+
+    def fake_advance(current_run: Run, *, cancel=None):
+        current_run.status = "waiting"
+        current_run.waiting_for = "confirmation"
+        current_run.pending_data = {"operation": "Opt"}
+        return None
+
+    monkeypatch.setattr(agent, "advance", fake_advance)
+    selection = _pending_molecule_selection("ethane", run.pending_data)
+    assert selection == {
+        "query": "ethane",
+        "input_kind": "name",
+        "explicit_new": True,
+        "preserve_identity": True,
+    }
+    response = agent._apply_molecule_clarification(
+        run,
+        "ethane",
+        "name",
+        preserve_identity=True,
+        message="ethane",
+    )
+    assert response.run is run
+    assert run.status == "waiting"
+    assert run.waiting_for == "confirmation"
+    updated_identity = run.request.structure_input["molecule_identity"]
+    assert updated_identity["raw_query"] == "乙烷"
+    assert updated_identity["lookup_query"] == "ethane"
+    assert run.plan.steps[0].parameters == {"query": "ethane", "input_kind": "name"}
 
 
 def test_saved_candidate_selection_skips_intake_and_planner(monkeypatch, tmp_path: Path) -> None:

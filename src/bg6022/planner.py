@@ -138,6 +138,7 @@ class IntakeOutput(BaseModel):
     operations: list[Operation] = Field(default_factory=list)
     molecule_query: StrictStr | None = None
     molecule_input_kind: MoleculeInputKind | None = None
+    molecule_name_evidence: StrictStr | None = None
     history_geometry_alias: StrictStr | None = None
     explicit_parameters: dict[str, Any] = Field(default_factory=dict)
     electronic_state_candidates: list[ElectronicStateCandidate] = Field(default_factory=list)
@@ -351,6 +352,7 @@ def intake_message(
             "operations": ["Opt"],
             "molecule_query": "water",
             "molecule_input_kind": "name",
+            "molecule_name_evidence": "water",
             "history_geometry_alias": None,
             "structure_input": {},
             "explicit_parameters": {},
@@ -379,6 +381,7 @@ def intake_message(
             update={
                 "molecule_query": None,
                 "molecule_input_kind": None,
+                "molecule_name_evidence": None,
                 "structure_input": structure,
             }
         )
@@ -732,6 +735,7 @@ def request_from_intake(
         message=message,
         query=intake.molecule_query,
         input_kind=intake.molecule_input_kind,
+        name_evidence=intake.molecule_name_evidence,
     )
     if identity is not None:
         structure_input["molecule_identity"] = normalize_identity_for_storage(identity)

@@ -467,7 +467,11 @@ def render_clarification(pending_data: Mapping[str, Any] | None) -> str:
         return f"当前可查询范围内没有找到所问结果{suffix}。这不表示该计算从未进行过。"
 
     category = data.get("category")
-    if category == "ambiguous_molecule":
+    if category in {
+        "ambiguous_molecule",
+        "molecule_search_incomplete",
+        "molecule_source_unverified",
+    }:
         candidates = data.get("candidates")
         details: list[str] = []
         if isinstance(candidates, list):
@@ -487,9 +491,20 @@ def render_clarification(pending_data: Mapping[str, Any] | None) -> str:
                     parts.append(f"SMILES {smiles}")
                 details.append("；".join(parts))
         suffix = f"候选包括：{'、'.join(details)}。" if details else ""
-        return (f"分子结构存在歧义，请回复候选编号、CID 或明确的 SMILES。{suffix}").strip()
+        if category == "ambiguous_molecule":
+            prefix = "已核验出多个不同结构，请回复候选编号、CID 或明确的 SMILES。"
+        elif category == "molecule_search_incomplete":
+            prefix = "当前检索尚未完整，不能确认唯一结构；请回复候选编号、CID 或明确的 SMILES。"
+        else:
+            prefix = "部分来源记录无法可靠核验；请明确提供 CID 或 SMILES 后继续。"
+        return f"{prefix}{suffix}".strip()
+    if category == "molecule_name_not_found":
+        raw_query = data.get("raw_query") or data.get("lookup_query") or "该名称"
+        return f"来源未识别名称“{raw_query}”，原计算任务已保留。请补充英文名称、CID 或明确 SMILES。"
     if category == "molecule_identity_not_found":
-        return "没有找到与用户分子式匹配的结构；请提供明确的 CID 或 SMILES。"
+        if data.get("input_kind") == "formula" or data.get("requested_formula"):
+            return "没有找到符合当前分子式约束的结构；请提供明确的 CID 或 SMILES。"
+        return "没有找到可验证的结构；请补充明确的名称、CID 或 SMILES。"
     if category == "identity_mismatch":
         return "候选结构与用户给出的分子身份约束不一致；请提供明确的 CID 或 SMILES。"
 
