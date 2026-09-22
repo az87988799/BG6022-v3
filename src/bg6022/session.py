@@ -17,6 +17,18 @@ from .models import Artifact, Result, Run
 MAX_RECENT_RUNS = 6
 
 
+class RunNotFoundError(ValueError):
+    """The requested durable Run record does not exist."""
+
+
+class RunRecordInvalidError(ValueError):
+    """The requested durable Run record exists but is not readable/valid."""
+
+
+class RuntimeLockBusy(RuntimeError):
+    """The data-root real-compute lock or its safety guard is occupied."""
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
@@ -170,14 +182,14 @@ class RuntimeLock:
         except OSError as error:
             self._handle.close()
             self._handle = None
-            raise RuntimeError(
+            raise RuntimeLockBusy(
                 f"another real calculation is active for {self.data_root}"
             ) from error
         guard = execution_guard_path(self.data_root)
         if guard.exists():
             message = _guard_message(guard)
             self.__exit__(None, None, None)
-            raise RuntimeError(message)
+            raise RuntimeLockBusy(message)
         return self
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
@@ -337,9 +349,9 @@ def load_run(data_root: str | Path, run_id: str) -> Run:
         payload = json.loads(path.read_text(encoding="utf-8"))
         return Run.model_validate(payload, strict=True)
     except FileNotFoundError as error:
-        raise ValueError(f"Run does not exist: {run_id}") from error
+        raise RunNotFoundError(f"Run does not exist: {run_id}") from error
     except (json.JSONDecodeError, ValueError) as error:
-        raise ValueError(f"Run file is invalid: {path}: {error}") from error
+        raise RunRecordInvalidError(f"Run file is invalid: {path}: {error}") from error
 
 
 def save_result(data_root: str | Path, run: Run, result: Result) -> Path:
@@ -473,6 +485,9 @@ def atomic_write_bytes(path: str | Path, content: bytes) -> None:
 __all__ = [
     "ChatSessionLock",
     "RuntimeLock",
+    "RunNotFoundError",
+    "RunRecordInvalidError",
+    "RuntimeLockBusy",
     "artifact_path",
     "attempt_directory",
     "atomic_write_bytes",

@@ -708,6 +708,7 @@ def test_expired_active_time_budget_stops_before_tool_execution(tmp_path: Path) 
         created_at=utc_now(),
         updated_at=utc_now(),
     )
+    create_run(config.data_root_path, run)
 
     Agent(config, registry, llm=None).advance(run)
 
@@ -749,15 +750,6 @@ def test_recovered_opt_geometry_flows_to_frequency_and_sp_without_repeating_prep
         scientific_checks: dict[str, ScientificCheckResult] | None = None,
     ) -> Result:
         output_artifacts = artifacts_out or []
-        run.attempts.append(
-            {
-                "step_id": step.id,
-                "attempt": attempt,
-                "phase": "finished",
-                "status": status,
-                "artifact_ids": [item.id for item in output_artifacts],
-            }
-        )
         return Result(
             run_id=run.id,
             step_id=step.id,
@@ -920,7 +912,8 @@ def test_recovered_opt_geometry_flows_to_frequency_and_sp_without_repeating_prep
                 update={
                     "execute_function": executor_by_name.get(
                         name, base_registry.get(name).execute_function
-                    )
+                    ),
+                    "preflight_function": lambda _config, _step: None,
                 }
             )
             for name in base_registry.names()
@@ -1018,6 +1011,7 @@ def test_recovered_opt_geometry_flows_to_frequency_and_sp_without_repeating_prep
     agent = Agent(config, registry, llm=object(), session_id="session_opt_retry_composition")
     run = agent._create_chat_run(request, registry.validate_plan(plan))
     run.execution_permission = True
+    save_run(config.data_root_path, run)
 
     agent.advance(run)
 
@@ -1172,7 +1166,8 @@ def test_chat_freq_only_request_runs_on_supplied_xyz_without_preparation(
                 update={
                     "execute_function": (
                         execute_frequency if name == "frequency" else unexpected_tool
-                    )
+                    ),
+                    "preflight_function": lambda _config, _step: None,
                 }
             )
             for name in base_registry.names()

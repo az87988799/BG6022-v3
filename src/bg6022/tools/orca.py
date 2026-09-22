@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from threading import Event
 from typing import Any, TypeVar
@@ -26,13 +27,13 @@ from bg6022.models import (
 from bg6022.orca.checks import CheckOutcome, evaluate_success
 from bg6022.orca.input import OrcaInputSpec, render_input
 from bg6022.orca.parser import EnergyObservation, inspect_attempt
-from bg6022.orca.profiles import get_profile
+from bg6022.orca.profiles import get_profile, resolve_parameters
 from bg6022.orca.repair_rules import applicable_repairs, applicable_scf_repair
 from bg6022.orca.runner import ProcessFacts, RunnerResources, run_orca
 from bg6022.session import (
     RuntimeLock,
+    RuntimeLockBusy,
     artifact_path,
-    attempt_directory,
     execution_fingerprint,
     find_artifact,
     new_id,
@@ -280,6 +281,8 @@ def _make_tool(
         parameter_preparation_function=prepare_orca_parameters,
         attempt_reservation_function=reserve_orca_attempt,
         preflight_function=preflight_orca,
+        repair_options_function=orca_repair_options,
+        repair_admission_function=admit_orca_repair,
         parameter_validation_function=validate_orca_parameters,
         deferred_parameters=["charge", "multiplicity"],
         request_parameters=request_parameters,
@@ -311,9 +314,72 @@ def _profile_repair_capabilities(
 
 
 def prepare_orca_parameters(context: Any, run: Run, step: Step) -> Step | None:
-    """Delegate electronic-state preparation to the ORCA Tool adapter."""
+    """Resolve ORCA electronic-state parameters from a restricted input view."""
 
-    return context._prepare_orca_step(run, step)
+    if not isinstance(context, Mapping):
+        raise TypeError("ORCA parameter preparation requires a validated input view")
+    tool = context.get("tool")
+    defaults = context.get("defaults")
+    facts = context.get("structure_facts", {})
+    parameter_fields = context.get("parameter_fields", frozenset())
+    verified_geometry = context.get("geometry")
+    if not isinstance(tool, Tool) or not isinstance(defaults, Mapping):
+        raise TypeError("ORCA parameter preparation context is incomplete")
+    original_parameters = dict(step.parameters)
+    checked_parameters = tool.validate_parameters(original_parameters, allow_deferred=True)
+    supplied_parameters = {
+        name: checked_parameters[name] for name in original_parameters if name in checked_parameters
+    }
+    if (
+        run.accepted_snapshot
+        and "charge" in step.parameters
+        and "multiplicity" in step.parameters
+    ):
+        validated = tool.validate_parameters(step.parameters)
+        validate_orca_profile(validated)
+        _validate_geometry_electronic_state(verified_geometry, validated)
+        return step.model_copy(update={"parameters": validated})
+    if (
+        run.pending_data.get("step_id") == step.id
+        and run.pending_data.get("parameters") == step.parameters
+        and run.pending_data.get("parameter_sources")
+    ):
+        validated = tool.validate_parameters(step.parameters)
+        validate_orca_profile(validated)
+        _validate_geometry_electronic_state(verified_geometry, validated)
+        return step.model_copy(update={"parameters": validated})
+    resolution = resolve_parameters(
+        run.request.explicit_parameters,
+        dict(facts) if isinstance(facts, Mapping) else {},
+        supplied_parameters,
+        dict(defaults),
+        user_modifications=run.request.user_modifications,
+        parameter_fields=frozenset(parameter_fields),
+    )
+    if resolution.missing_fields:
+        run.status = "waiting"
+        run.waiting_for = "clarification"
+        run.pending_data = {
+            "question": "Please provide the missing electronic state parameters.",
+            "step_id": step.id,
+            "missing_fields": list(resolution.missing_fields),
+            "parameter_sources": resolution.parameter_sources,
+            "parameters": dict(step.parameters),
+        }
+        return None
+    validated = tool.validate_parameters(resolution.effective_parameters)
+    validate_orca_profile(validated)
+    _validate_geometry_electronic_state(verified_geometry, validated)
+    replacement = Step.model_validate(
+        {**step.model_dump(mode="python"), "parameters": validated}, strict=True
+    )
+    run.pending_data = {
+        "step_id": step.id,
+        "parameters": dict(validated),
+        "parameter_sources": resolution.parameter_sources,
+        "effective_parameters": validated,
+    }
+    return replacement
 
 
 def reserve_orca_attempt(run: Run, step: Step) -> bool:
@@ -360,6 +426,41 @@ def validate_orca_parameters(parameters: dict[str, Any], _context: Any) -> None:
         )
 
 
+def validate_orca_profile(parameters: dict[str, Any]) -> None:
+    profile = get_profile(parameters["method_profile"])
+    if parameters["environment"] not in profile.supported_environments:
+        raise ValueError(
+            f"environment {parameters['environment']!r} is not implemented for {profile.name!r}"
+        )
+
+
+def _validate_geometry_electronic_state(geometry: Any, parameters: Mapping[str, Any]) -> None:
+    if geometry is None:
+        return
+    validate_electronic_state(
+        geometry,
+        charge=int(parameters["charge"]),
+        multiplicity=int(parameters["multiplicity"]),
+    )
+
+
+def orca_repair_options(run: Run, step: Step, result: Result) -> list[Any]:
+    return applicable_repairs(run, step, result) + applicable_scf_repair(run, step, result)
+
+
+def admit_orca_repair(run: Run, step: Step, _result: Result) -> bool:
+    origin = run.origin_step_map.get(step.id, step.origin_step_id or step.id)
+    count = int(run.attempt_counts.get(origin, 0))
+    max_extra = int(run.budget.get("max_extra_orca_executions", 3))
+    if count > 0 and run.extra_orca_executions >= max_extra:
+        run.pending_data = {
+            "budget_exhausted": "max_extra_orca_executions",
+            "step_id": step.id,
+        }
+        return False
+    return True
+
+
 def execute_orca_step(
     config: AppConfig,
     *,
@@ -368,6 +469,45 @@ def execute_orca_step(
     cancel: Event,
     operation: str,
     parameter_model: type[OrcaParameters],
+) -> Result:
+    # Reject an unauthorized direct adapter call before allocating a durable
+    # attempt.  The shared lifecycle remains the only allocation gateway.
+    _check_execution_contract(config, run, step)
+    context, owns_context = execution.ensure_attempt(config.data_root_path, run, step)
+    try:
+        result = _execute_orca_step(
+            config,
+            step=step,
+            run=run,
+            cancel=cancel,
+            operation=operation,
+            parameter_model=parameter_model,
+            context=context,
+        )
+    except Exception as error:
+        if owns_context:
+            execution.fail_attempt(
+                run,
+                context,
+                category="tool_exception",
+                reason=str(error),
+                persist=True,
+            )
+        raise
+    if owns_context:
+        execution.finish_attempt(run, context, result)
+    return result
+
+
+def _execute_orca_step(
+    config: AppConfig,
+    *,
+    step: Step,
+    run: Run,
+    cancel: Event,
+    operation: str,
+    parameter_model: type[OrcaParameters],
+    context: execution.AttemptContext,
 ) -> Result:
     _check_execution_contract(config, run, step)
     parameters = parameter_model.model_validate(step.parameters, strict=True)
@@ -411,6 +551,7 @@ def execute_orca_step(
             geometry=geometry,
             geometry_bytes=geometry_bytes,
             owns_active_interval=owns_active_interval,
+            context=context,
         )
     finally:
         if owns_active_interval:
@@ -429,10 +570,10 @@ def _execute_prepared_attempt(
     geometry: Any,
     geometry_bytes: bytes,
     owns_active_interval: bool,
+    context: execution.AttemptContext,
 ) -> Result:
-    attempt = execution.allocate_attempt(config.data_root_path, run, step.id)
-    attempt_dir = attempt_directory(config.data_root_path, run.id, step.id, attempt)
-    attempt_dir.mkdir(parents=True, exist_ok=False)
+    attempt = context.attempt
+    attempt_dir = context.directory
     (attempt_dir / "geometry.xyz").write_bytes(geometry_bytes)
     expected_geometry_sha = geometry_artifact.sha256
     if sha256_file(attempt_dir / "geometry.xyz") != expected_geometry_sha:
@@ -451,20 +592,18 @@ def _execute_prepared_attempt(
     )
     input_bytes = render_input(input_spec)
     (attempt_dir / "input.inp").write_bytes(input_bytes)
-    attempt_record = {
-        "step_id": step.id,
-        "attempt": attempt,
-        "relative_path": attempt_dir.relative_to(Path(config.data_root_path).resolve()).as_posix(),
-        "operation": operation,
-        "phase": "prepared",
-        "input_geometry_artifact_id": geometry_artifact.id,
-        "input_sha256": sha256_bytes(input_bytes),
-        "geometry_sha256": sha256_bytes(geometry_bytes),
-    }
-    run.step_status[step.id] = "running"
-    run.attempts.append(attempt_record)
-    # A prepared attempt is durable before any process can be created.
-    execution.persist_run(config.data_root_path, run)
+    attempt_record = context.record
+    attempt_record.update(
+        {
+            "operation": operation,
+            "input_geometry_artifact_id": geometry_artifact.id,
+            "input_sha256": sha256_bytes(input_bytes),
+            "geometry_sha256": sha256_bytes(geometry_bytes),
+        }
+    )
+    # The shared lifecycle owns the prepared record; this checkpoint only adds
+    # adapter facts needed to audit the input before a process is spawned.
+    execution.checkpoint_attempt(run, context)
 
     runner_resources = RunnerResources(
         cores=int(run.resources["cores"]),
@@ -513,7 +652,7 @@ def _execute_prepared_attempt(
                             "process_created_at": started.process_created_at,
                         },
                     )
-                    execution.persist_run(config.data_root_path, run)
+                    execution.checkpoint_attempt(run, context)
 
                 deadline = time.monotonic() + allowed_seconds
                 process_facts = run_orca(
@@ -526,7 +665,7 @@ def _execute_prepared_attempt(
                     execution_id=execution_id,
                     on_started=on_started,
                 )
-    except RuntimeError as error:
+    except RuntimeLockBusy as error:
         process_facts = _lock_failure_facts(str(error))
 
     stdout_path = attempt_dir / "stdout.out"
@@ -766,8 +905,6 @@ def _execute_prepared_attempt(
         )
     attempt_record.update(
         {
-            "phase": "finished",
-            "status": status,
             "result_category": outcome.failure_category,
             "artifact_ids": artifact_ids,
             "output_ports": output_ports,

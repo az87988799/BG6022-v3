@@ -29,7 +29,6 @@ from bg6022.molecule_identity import (
 )
 from bg6022.session import (
     register_bytes_artifact,
-    run_directory,
 )
 
 PUBCHEM_BASE_URL = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
@@ -117,10 +116,37 @@ def make_resolve_molecule_tool(config: AppConfig | None = None) -> Tool:
 
 
 def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel: Event) -> Result:
+    context, owns_context = execution.ensure_attempt(config.data_root_path, run, step)
+    try:
+        result = _execute_resolve_molecule(
+            config, step=step, run=run, cancel=cancel, context=context
+        )
+    except Exception as error:
+        if owns_context:
+            execution.fail_attempt(
+                run,
+                context,
+                category="tool_exception",
+                reason=str(error),
+                persist=True,
+            )
+        raise
+    if owns_context:
+        execution.finish_attempt(run, context, result)
+    return result
+
+
+def _execute_resolve_molecule(
+    config: AppConfig,
+    *,
+    step: Step,
+    run: Run,
+    cancel: Event,
+    context: execution.AttemptContext,
+) -> Result:
     parameters = ResolveMoleculeParameters.model_validate(step.parameters, strict=True)
-    attempt = execution.allocate_attempt(config.data_root_path, run, step.id)
-    relative = f"{step.id}/attempt-{attempt:02d}"
-    (run_directory(config.data_root_path, run.id) / relative).mkdir(parents=True, exist_ok=True)
+    attempt = context.attempt
+    relative = context.relative_path
     identity = run.request.structure_input.get("molecule_identity")
     identity = identity if isinstance(identity, Mapping) else None
     source_responses: tuple[dict[str, Any], ...] = ()
@@ -151,7 +177,6 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                 "failed",
                 artifact_ids=source_artifact_ids,
             )
-            execution.persist_run(config.data_root_path, run)
             return _result(
                 run,
                 step,
@@ -192,7 +217,6 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                     "failed",
                     artifact_ids=source_artifact_ids,
                 )
-                execution.persist_run(config.data_root_path, run)
                 return _result(
                     run,
                     step,
@@ -229,7 +253,6 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                     "cancelled",
                     artifact_ids=source_artifact_ids,
                 )
-                execution.persist_run(config.data_root_path, run)
                 return _result(
                     run,
                     step,
@@ -356,7 +379,6 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                     "needs_input",
                     artifact_ids=source_artifact_ids,
                 )
-                execution.persist_run(config.data_root_path, run)
                 return _result(
                     run,
                     step,
@@ -424,7 +446,6 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                     "failed",
                     artifact_ids=source_artifact_ids,
                 )
-                execution.persist_run(config.data_root_path, run)
                 return _result(
                     run,
                     step,
@@ -496,17 +517,6 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
             "molecule_formula": facts["formula"],
             "formal_charge": facts["formal_charge"],
         }
-        run.attempts.append(
-            {
-                "step_id": step.id,
-                "attempt": attempt,
-                "phase": "finished",
-                "status": "succeeded",
-                "artifact_ids": artifact_ids,
-                "output_ports": {"molecule": molecule_artifact.id},
-            }
-        )
-        execution.persist_run(config.data_root_path, run)
         return _result(
             run,
             step,
@@ -555,7 +565,6 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
             status,
             artifact_ids=source_artifact_ids,
         )
-        execution.persist_run(config.data_root_path, run)
         return _result(
             run,
             step,
@@ -587,7 +596,6 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
             "failed",
             artifact_ids=source_artifact_ids,
         )
-        execution.persist_run(config.data_root_path, run)
         return _result(
             run,
             step,
@@ -1151,12 +1159,14 @@ def _record_attempt(
     *,
     artifact_ids: list[str] | None = None,
 ) -> None:
-    run.attempts.append(
+    context = execution.active_attempt(run, step.id)
+    if context is None or context.attempt != attempt:
+        raise execution.AttemptLifecycleError(
+            "PubChem attempt is not owned by the shared lifecycle"
+        )
+    context.record.update(
         {
-            "step_id": step.id,
-            "attempt": attempt,
-            "phase": "finished",
-            "status": status,
+            "status_hint": status,
             "artifact_ids": list(artifact_ids or []),
             "output_ports": {},
         }

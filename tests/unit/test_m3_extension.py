@@ -345,7 +345,7 @@ def test_b3lyp_default_is_selected_when_step_omits_method(tmp_path: Path) -> Non
         created_at=utc_now(),
         updated_at=utc_now(),
     )
-    prepared = Agent(config, registry)._prepare_orca_step(run, step)
+    prepared = Agent(config, registry)._prepare_tool_step(run, step)
     assert prepared is not None
     assert prepared.parameters["method_profile"] == "b3lyp_d3bj_def2svp"
     assert run.parameter_sources_by_step[step.id]["method_profile"] == "default_policy"

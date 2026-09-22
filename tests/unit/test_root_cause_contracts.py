@@ -23,7 +23,7 @@ from bg6022.planner import (
     proposal_to_plan,
     request_from_intake,
 )
-from bg6022.session import execution_fingerprint, utc_now
+from bg6022.session import create_run, execution_fingerprint, utc_now
 from bg6022.tools.registry import build_registry
 
 
@@ -982,15 +982,17 @@ environment = 'gas'
         return None
 
     agent.advance = finish_confirmation
+    create_run(config.data_root_path, run)
     response = agent.confirm(run)
 
-    assert response.run is run
-    assert run.plan == original_plan
-    assert run.accepted_execution_sha256 == execution_fingerprint(
-        run.plan,
-        run.resources,
+    assert response.run is not run
+    assert response.run.id == run.id
+    assert response.run.plan == original_plan
+    assert response.run.accepted_execution_sha256 == execution_fingerprint(
+        response.run.plan,
+        response.run.resources,
         [],
-        snapshot=run.accepted_snapshot,
+        snapshot=response.run.accepted_snapshot,
     )
 
 
