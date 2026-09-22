@@ -233,6 +233,7 @@ R1 第一批工作应从本文件中的三个真实 gap 重新开始：统一 To
 |---|---|
 | 隔离工作树 | `E:\BG6022-rebuild` |
 | 分支/基线 | `codex/structural-rebuild`；R1 开始时 `5f0719d0567757fedae93d2d1c058e4cee553a6a` |
+| R1 实施提交/远端 | `b1fc5d59ce2fbc7cd063fbf353af037ad7c60bee`；已推送至 `origin/codex/structural-rebuild` |
 | 依赖/冻结项 | `uv.lock`、prompts、ORCA input/runner/parser/checks、配置科学标准未改；R1 未增加 Task、`result_field`、新 dialogue 或旧格式自动迁移 |
 | 运行边界 | Run owner 为短生命周期跨线程/跨进程锁；Agent 负责一次生命周期收口；Tool hooks 负责参数准备、preflight、attempt 预算；生产工具的 Run checkpoint 统一经 `src/bg6022/execution.py` |
 | 失败收口 | 普通 Tool `Exception`、Result 写盘失败、Run checkpoint 失败均形成结构化 `pending_data`；候选 Result 在 Run checkpoint 前不进入 `current_results`；连续写盘失败只做一次 best-effort checkpoint，并标记 `not_persisted` |

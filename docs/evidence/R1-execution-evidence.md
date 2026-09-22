@@ -1,6 +1,6 @@
 # BG6022-v3 R1 execution-boundary evidence
 
-状态：`implementation_verified_live_pending` / `awaiting_user_acceptance`。本文件是 R1 的小型脱敏索引；原始日志、JUnit、临时配置、Run、Artifact 和真实 ORCA 输出均保存在仓库外。
+状态：`implementation_verified_live_pending` / `awaiting_user_acceptance`。实施提交：`b1fc5d59ce2fbc7cd063fbf353af037ad7c60bee`，已推送至 `origin/codex/structural-rebuild`。本文件是 R1 的小型脱敏索引；原始日志、JUnit、临时配置、Run、Artifact 和真实 ORCA 输出均保存在仓库外。
 
 ## 范围
 
