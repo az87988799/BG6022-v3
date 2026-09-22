@@ -5,6 +5,8 @@
 采集日期：2026-09-22（Asia/Hong_Kong）
 工程状态：`ready_for_r1_repair`
 用户接受状态：`awaiting_user_acceptance`
+tested_commit：`b472c58c4ba732d6086702bc15add830351ed8a9`
+documentation_commit：`pending`（本次证据摘要更新）
 
 本文是 R0 的唯一准备记录。它只记录本次在 Windows 工作机上实际核对到的事实；总方案、R0 方案中的模板和未执行的目标不被当作已验证证据。
 
@@ -94,6 +96,8 @@ repair.md  b5220c281ec8936ae2e79462bd63f5f16e1dc00e0686ba1d593b62c2974fe6d2
 
 wheel 冒烟同时执行 `python -I -m bg6022 --help`，成功显示 CLI 子命令。没有由此启动 ORCA、LLM 或 PubChem。
 
+提交 `b472c58c4ba732d6086702bc15add830351ed8a9` 的最终候选回归重新执行为：396 items collected；离线选择 380 项，其中 377 passed、3 strict xfailed、16 deselected，退出码 0；Windows 选择集 2 passed、394 deselected，退出码 0；ruff check、ruff format、compileall、`git diff --check` 和候选 source/wheel 构建均退出码 0。最终候选 wheel 在新的仓库外环境中再次以 `python -I` 导入，四份提示词 hash 保持一致，CLI `--help` 成功。
+
 ## 5. 保留合同与实际测试映射
 
 以下是 R0 盘点用的代表性 nodeid；它们来自 collect-only 或当前源码，不把待 R2 替换的旧限制当作新合同。
@@ -179,13 +183,13 @@ R0 候选文件只包含：
 | G07 状态和接口归属 | pass：当前函数、目标负责人和后续阶段已列出 |
 | G08 异常/写盘/竞态探针 | pass as evidence：三项缺口可控复现，一项取消保护通过 |
 | G09 未把缺口隐藏为成功 | pass：缺口 strict xfail；不计入 passed |
-| G10 候选无不明退化 | pending final candidate run：需在提交前完成同条件回归和范围审查 |
+| G10 候选无不明退化 | pass：`b472c58` 后同条件离线/Windows/静态/构建/wheel 回归无新增普通失败 |
 | G11 loader 专门验收 | not applicable：可选整理未执行 |
 | G12 回滚、外部调用和数据政策 | pass for R0：live 调用 pending，回滚和数据边界已记录 |
 
 ## 10. 交接与未运行项目
 
-测试提交和最终证据提交 SHA 在提交后填入本文件；当前工作树阶段暂记为 `pending`。R0 不自行进入 R1，不启动真实 ORCA，不宣称用户机器或全链可用。
+测试内容已提交为 `b472c58c4ba732d6086702bc15add830351ed8a9`；本文件和小型证据摘要的 documentation commit 在推送前补齐。R0 不自行进入 R1，不启动真实 ORCA，不宣称用户机器或全链可用。
 
 R1 第一批工作应从本文件中的三个真实 gap 重新开始：统一 Tool 普通异常闭合、Result/Run 持久化失败闭合、确认授权的单次消费/并发边界。所有修复必须继续保留当前真实 ORCA input/runner/parser/checks 的单一生产实现、4 cores/1024 MB/`%maxcore 192`/并发 1 约束和原始文件诊断。
 
