@@ -10,9 +10,10 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
-from threading import Event
+from threading import Event, get_ident
 from typing import Any
 
+from . import execution
 from .answer import (
     AnswerOutput,
     AnswerSection,
@@ -26,7 +27,7 @@ from .answer import (
     select_facts_for_question,
     validate_result_answer,
 )
-from .config import AppConfig, validate_execution_environment
+from .config import AppConfig, validate_execution_environment  # noqa: F401
 from .llm import LlmClient, LlmError
 from .models import InputReference, Plan, Request, Result, Run, Step, Tool
 from .molecule_identity import (
@@ -65,7 +66,6 @@ from .session import (
     register_bytes_artifact,
     register_file_artifact,
     run_directory,
-    save_result,
     save_run,
     save_session,
     utc_now,
@@ -169,6 +169,9 @@ class Agent:
         self._query_bindings: dict[tuple[str, str], dict[str, Any]] = {}
         self._request_sequence = 0
         self._active_request: tuple[int, Event] | None = None
+        # Entries exist only while this Agent's current thread holds the
+        # short-lived Run owner.  They are not durable runtime state.
+        self._owned_run_owners: dict[tuple[int, str], execution.RunOwner] = {}
         try:
             self._session = load_session(config.data_root_path, self.session_id)
         except ValueError:
@@ -206,8 +209,8 @@ class Agent:
         _validate_request_parameter_scope(request, plan, self.registry)
         # The explicit command has always checked the machine before creating a
         # Run. Chat intentionally defers this check until an ORCA Tool starts.
-        if any(self.registry.get(step.tool).execution_budget == "orca" for step in plan.steps):
-            validate_execution_environment(self.config)
+        for step in plan.steps:
+            self.registry.get(step.tool).preflight(self.config, step)
         geometry_path = Path(xyz_path).resolve()
         parse_xyz_bytes(geometry_path.read_bytes())
         run = Run(
@@ -707,24 +710,51 @@ class Agent:
             self._finish_request(request_token, request_cancel)
 
     def advance(self, run: Run, *, cancel: Event | None = None) -> Result | None:
-        """Continue the current Run until a result, wait point, or terminal state."""
+        """Continue one Run while holding its single lifecycle owner."""
 
+        if run.status in {"succeeded", "failed", "cancelled", "interrupted"}:
+            return self._latest_result(run)
+        if run.waiting_for is not None:
+            return self._latest_result(run)
+        owner_key = (get_ident(), run.id)
+        held_owner = self._owned_run_owners.get(owner_key)
+        if held_owner is not None:
+            return self._advance_owned(run, cancel=cancel)
+        try:
+            with execution.RunOwner(self.config.data_root_path, run.id) as owner:
+                self._owned_run_owners[owner_key] = owner
+                try:
+                    return self._advance_owned(run, cancel=cancel)
+                finally:
+                    self._owned_run_owners.pop(owner_key, None)
+        except execution.ExecutionBusy:
+            # A competing worker is authoritative.  Do not mutate the
+            # caller's stale object and do not re-enter the Tool boundary.
+            try:
+                current = load_run(self.config.data_root_path, run.id)
+            except (OSError, ValueError):
+                current = run
+            return self._latest_result(current)
+
+    def _advance_owned(self, run: Run, *, cancel: Event | None = None) -> Result | None:
+        """Advance a Run whose owner has already been admitted."""
         cancel_event = cancel or self._cancel_events.setdefault(run.id, Event())
         if run.status in {"succeeded", "failed", "cancelled", "interrupted"}:
             return self._latest_result(run)
         if run.waiting_for is not None:
             return self._latest_result(run)
-        run.status = "running"
-        run.start_active_interval()
-        save_run(self.config.data_root_path, run)
         last_result: Result | None = self._latest_result(run)
+        step_id: str | None = None
         try:
+            run.status = "running"
+            run.start_active_interval()
+            execution.persist_run(self.config.data_root_path, run)
             while True:
                 if cancel_event.is_set():
                     run.status = "cancelled"
                     run.waiting_for = None
                     run.finish_active_interval()
-                    save_run(self.config.data_root_path, run)
+                    execution.persist_run(self.config.data_root_path, run)
                     return last_result
                 if self._remaining_active_seconds(run) <= 0:
                     run.status = "failed"
@@ -733,13 +763,13 @@ class Agent:
                         "reason": "Run active time budget exhausted",
                     }
                     run.finish_active_interval()
-                    save_run(self.config.data_root_path, run)
+                    execution.persist_run(self.config.data_root_path, run)
                     return last_result
                 if _requested_results_satisfied(self.config.data_root_path, run, self.registry):
                     run.status = "succeeded"
                     run.waiting_for = None
                     run.finish_active_interval()
-                    save_run(self.config.data_root_path, run)
+                    execution.persist_run(self.config.data_root_path, run)
                     return last_result
                 step = _next_ready_step(run, self.config.data_root_path)
                 if step is None:
@@ -763,8 +793,9 @@ class Agent:
                             ),
                         }
                     run.finish_active_interval()
-                    save_run(self.config.data_root_path, run)
+                    execution.persist_run(self.config.data_root_path, run)
                     return last_result
+                step_id = step.id
                 tool = self.registry.get(step.tool)
                 if tool.requires_compute_permission and not run.execution_permission:
                     try:
@@ -777,32 +808,32 @@ class Agent:
                             "reason": str(error),
                         }
                         run.finish_active_interval()
-                        save_run(self.config.data_root_path, run)
+                        execution.persist_run(self.config.data_root_path, run)
                         return last_result
-                if tool.parameter_preparation == "orca_electronic_state":
+                if tool.parameter_preparation_function is not None:
                     preparing_step_id = step.id
                     try:
                         if tool.requires_compute_permission and not run.execution_permission:
-                            # Resolve every ORCA Step before showing one confirmation
-                            # for the whole Plan. Later operations often consume a
-                            # future geometry port, so structure facts are traced
-                            # back through that port to the already prepared input.
+                            # Resolve every Tool with a preparation hook before
+                            # showing one confirmation for the whole Plan.
                             for planned_step in run.plan.steps:
                                 planned_tool = self.registry.get(planned_step.tool)
-                                if planned_tool.parameter_preparation != "orca_electronic_state":
+                                if planned_tool.parameter_preparation_function is None:
                                     continue
                                 preparing_step_id = planned_step.id
-                                prepared_step = self._prepare_orca_step(run, planned_step)
+                                prepared_step = planned_tool.prepare_parameters(
+                                    self, run, planned_step
+                                )
                                 if prepared_step is None:
                                     run.finish_active_interval()
-                                    save_run(self.config.data_root_path, run)
+                                    execution.persist_run(self.config.data_root_path, run)
                                     return last_result
                             step = next(item for item in run.plan.steps if item.id == step.id)
                         else:
-                            prepared_step = self._prepare_orca_step(run, step)
+                            prepared_step = tool.prepare_parameters(self, run, step)
                             if prepared_step is None:
                                 run.finish_active_interval()
-                                save_run(self.config.data_root_path, run)
+                                execution.persist_run(self.config.data_root_path, run)
                                 return last_result
                             # Parameter resolution may replace a deferred Step. The
                             # exact replacement must be used for preview, fingerprint,
@@ -817,13 +848,14 @@ class Agent:
                             "step_id": preparing_step_id,
                         }
                         run.finish_active_interval()
-                        save_run(self.config.data_root_path, run)
+                        execution.persist_run(self.config.data_root_path, run)
                         return last_result
                     tool = self.registry.get(step.tool)
+                    step_id = step.id
                 if tool.requires_compute_permission and not run.execution_permission:
                     self._prepare_confirmation(run, step)
                     run.finish_active_interval()
-                    save_run(self.config.data_root_path, run)
+                    execution.persist_run(self.config.data_root_path, run)
                     return last_result
                 if tool.requires_compute_permission and not run.accepted_snapshot:
                     run.pending_data["permission_source"] = "config.confirm_before_compute=false"
@@ -834,26 +866,26 @@ class Agent:
                         run.artifact_index,
                         snapshot=run.accepted_snapshot,
                     )
-                if not self._reserve_attempt(run, step, tool):
+                if not tool.reserve_attempt(run, step):
                     run.status = "failed"
                     run.finish_active_interval()
-                    save_run(self.config.data_root_path, run)
+                    execution.persist_run(self.config.data_root_path, run)
                     return last_result
                 run.step_status[step.id] = "running"
-                save_run(self.config.data_root_path, run)
+                execution.persist_run(self.config.data_root_path, run)
                 try:
                     result = tool.execute(step, run, cancel=cancel_event)
-                except (PermissionError, ValueError, OSError) as error:
-                    run.status = "failed"
-                    run.pending_data = {
-                        "category": "execution_boundary",
-                        "reason": str(error),
-                        "step_id": step.id,
-                    }
-                    run.finish_active_interval()
-                    save_run(self.config.data_root_path, run)
+                except execution.PersistenceFailure:
                     raise
-                last_result = result
+                except Exception as error:
+                    return self._close_execution_failure(
+                        run,
+                        category="execution_boundary",
+                        error=error,
+                        stage="tool.execute",
+                        step_id=step.id,
+                        last_result=last_result,
+                    )
                 result.step_fingerprint = _step_fingerprint(step)
                 step_parameter_sources = run.parameter_sources_by_step.get(step.id)
                 if step_parameter_sources:
@@ -866,7 +898,34 @@ class Agent:
                     if (artifact := self._artifact_from_reference(run, reference)) is not None
                 }
                 result.input_artifact_ids = list(result.input_bindings.values())
-                save_result(self.config.data_root_path, run, result)
+                execution.persist_result(self.config.data_root_path, run, result)
+
+                missing = object()
+                previous_step_status = run.step_status.get(step.id, missing)
+                previous_current_result = run.current_results.get(step.id, missing)
+                previous_result_index = list(run.result_index)
+                previous_pending_data = dict(run.pending_data)
+
+                def restore_commit_state(
+                    *,
+                    _step_id: str = step.id,
+                    _missing: object = missing,
+                    _previous_step_status: object = previous_step_status,
+                    _previous_current_result: object = previous_current_result,
+                    _previous_result_index: list[str] = previous_result_index,
+                    _previous_pending_data: dict[str, Any] = previous_pending_data,
+                ) -> None:
+                    run.result_index[:] = _previous_result_index
+                    if _previous_step_status is _missing:
+                        run.step_status.pop(_step_id, None)
+                    else:
+                        run.step_status[_step_id] = _previous_step_status  # type: ignore[assignment]
+                    if _previous_current_result is _missing:
+                        run.current_results.pop(_step_id, None)
+                    else:
+                        run.current_results[_step_id] = _previous_current_result  # type: ignore[assignment]
+                    run.pending_data = _previous_pending_data
+
                 result_path = result.attempt_relative_path + "/result.json"
                 if result_path not in run.result_index:
                     run.result_index.append(result_path)
@@ -874,8 +933,13 @@ class Agent:
                 if result.status == "succeeded":
                     run.current_results[step.id] = result_path
                     run.pending_data = {}
+                    try:
+                        execution.persist_run(self.config.data_root_path, run)
+                    except execution.PersistenceFailure:
+                        restore_commit_state()
+                        raise
+                    last_result = result
                     self._record_result_summary(run, result)
-                    save_run(self.config.data_root_path, run)
                     continue
                 if result.status == "needs_input":
                     run.status = "waiting"
@@ -887,48 +951,133 @@ class Agent:
                         "result_path": result.attempt_relative_path + "/result.json",
                     }
                     run.finish_active_interval()
-                    save_run(self.config.data_root_path, run)
+                    try:
+                        execution.persist_run(self.config.data_root_path, run)
+                    except execution.PersistenceFailure:
+                        restore_commit_state()
+                        raise
+                    last_result = result
                     return result
-                save_run(self.config.data_root_path, run)
+                execution.persist_run(self.config.data_root_path, run)
+                last_result = result
                 if self._try_repair(run, step, result, cancel_event):
                     run.start_active_interval()
                     continue
                 run.status = result.status
                 run.finish_active_interval()
-                save_run(self.config.data_root_path, run)
+                execution.persist_run(self.config.data_root_path, run)
                 return result
+        except execution.PersistenceFailure as error:
+            return self._close_execution_failure(
+                run,
+                category=error.stage,
+                error=error.error,
+                stage=error.stage,
+                step_id=step_id,
+                last_result=last_result,
+            )
         except KeyboardInterrupt:
             cancel_event.set()
             run.status = "cancelled"
+            run.waiting_for = None
             run.finish_active_interval()
-            save_run(self.config.data_root_path, run)
+            try:
+                execution.persist_run(self.config.data_root_path, run)
+            except execution.PersistenceFailure:
+                # KeyboardInterrupt is intentionally not converted into an
+                # ordinary failure.  The in-memory state remains conservative.
+                pass
             raise
-        finally:
-            if run.status in {"succeeded", "failed", "cancelled", "interrupted"}:
-                run.finish_active_interval()
-                save_run(self.config.data_root_path, run)
+        except Exception as error:
+            return self._close_execution_failure(
+                run,
+                category="execution_boundary",
+                error=error,
+                stage="advance",
+                step_id=step_id,
+                last_result=last_result,
+            )
+
+    def _close_execution_failure(
+        self,
+        run: Run,
+        *,
+        category: str,
+        error: Exception,
+        stage: str,
+        step_id: str | None,
+        last_result: Result | None,
+    ) -> Result | None:
+        """Close one ordinary failure with one bounded best-effort checkpoint."""
+
+        run.status = "failed"
+        run.waiting_for = None
+        if step_id is not None:
+            run.step_status[step_id] = "failed"
+        diagnostic: dict[str, Any] = {
+            "category": category,
+            "stage": stage,
+            "exception_type": type(error).__name__,
+            "reason": str(error),
+        }
+        if step_id is not None:
+            diagnostic["step_id"] = step_id
+        run.pending_data = diagnostic
+        run.finish_active_interval()
+        try:
+            execution.persist_run(self.config.data_root_path, run)
+        except execution.PersistenceFailure as checkpoint_error:
+            # A continuously unwritable Run is reported as not persisted.  Do
+            # not retry from finally blocks or turn this into an unbounded loop.
+            run.pending_data["persistence"] = {
+                "status": "not_persisted",
+                "stage": checkpoint_error.stage,
+                "exception_type": type(checkpoint_error.error).__name__,
+                "reason": str(checkpoint_error.error),
+            }
+        return last_result
 
     def confirm(self, run: Run | str | None = None) -> AgentResponse:
+        candidate = self._coerce_run(run)
+        if candidate is None:
+            return AgentResponse("当前没有等待确认的计算。")
+
+        # Admission happens before _begin_request.  A competing confirmation
+        # therefore cannot cancel or replace the first request's Event.
+        try:
+            owner = execution.RunOwner(self.config.data_root_path, candidate.id)
+            owner.__enter__()
+        except execution.ExecutionBusy:
+            try:
+                authoritative = load_run(self.config.data_root_path, candidate.id)
+            except (OSError, ValueError):
+                authoritative = candidate
+            return AgentResponse(
+                "该计算正在被其他确认或执行占用，未重复执行；请稍后查看当前状态。",
+                run=authoritative,
+                result=self._latest_result(authoritative),
+            )
+
+        owner_key = (get_ident(), candidate.id)
+        self._owned_run_owners[owner_key] = owner
         request_token, request_cancel = self._begin_request()
         origin_session = self.session_id
+        current = candidate
         try:
-            current = self._coerce_run(run)
-            if current is None:
-                response = AgentResponse("当前没有等待确认的计算。")
-                self._record_response(
-                    response,
-                    cancel=request_cancel,
-                    request_token=request_token,
-                    session_id=origin_session,
-                )
-                return response
+            # The object supplied by the caller may be stale.  Reload after
+            # admission so authorization is consumed only from the owner state.
+            try:
+                current = load_run(self.config.data_root_path, candidate.id)
+            except ValueError:
+                if not isinstance(run, Run):
+                    raise
+                # Compatibility for callers that construct an in-memory Run
+                # before its first durable checkpoint (the normal chat path
+                # has already created run.json).
+                current = candidate
             if current.status in {"succeeded", "failed", "cancelled", "interrupted"}:
                 result = self._latest_result(current)
-                response = self._response_for_run(
-                    current,
-                    result,
-                    cancel=request_cancel,
-                )
+                response = self._response_for_run(current, result, cancel=request_cancel)
                 self._record_response(
                     response,
                     cancel=request_cancel,
@@ -945,8 +1094,8 @@ class Agent:
                     session_id=origin_session,
                 )
                 return response
-            current.execution_permission = True
-            current.waiting_for = None
+
+            preview_fingerprint = current.pending_data.get("confirmation_fingerprint")
             current.accepted_snapshot = self._acceptance_snapshot(current)
             current.accepted_execution_sha256 = execution_fingerprint(
                 current.plan,
@@ -954,15 +1103,28 @@ class Agent:
                 current.artifact_index,
                 snapshot=current.accepted_snapshot,
             )
-            save_run(self.config.data_root_path, current)
-            self._cancel_events[current.id] = request_cancel
-            try:
-                result = self.advance(current, cancel=request_cancel)
-            except (PermissionError, ValueError, OSError) as error:
+            if (
+                isinstance(preview_fingerprint, str)
+                and preview_fingerprint != current.accepted_execution_sha256
+            ):
                 current.status = "failed"
-                current.pending_data = {"category": "execution_boundary", "reason": str(error)}
-                save_run(self.config.data_root_path, current)
-                result = self._latest_result(current)
+                current.waiting_for = None
+                current.pending_data = {
+                    "category": "confirmation_stale",
+                    "reason": "confirmation preview no longer matches the authoritative Run",
+                }
+                current.finish_active_interval()
+                try:
+                    execution.persist_run(self.config.data_root_path, current)
+                except execution.PersistenceFailure:
+                    pass
+                return AgentResponse("确认预览已变化，任务已停止；请重新提交请求。", run=current)
+
+            current.execution_permission = True
+            current.waiting_for = None
+            execution.persist_run(self.config.data_root_path, current)
+            self._cancel_events[current.id] = request_cancel
+            result = self.advance(current, cancel=request_cancel)
             response = self._response_for_run(current, result, cancel=request_cancel)
             self._record_response(
                 response,
@@ -971,8 +1133,20 @@ class Agent:
                 session_id=origin_session,
             )
             return response
+        except execution.PersistenceFailure as error:
+            result = self._close_execution_failure(
+                current,
+                category=error.stage,
+                error=error.error,
+                stage=error.stage,
+                step_id=None,
+                last_result=self._latest_result(current),
+            )
+            return self._response_for_run(current, result, cancel=request_cancel)
         finally:
             self._finish_request(request_token, request_cancel)
+            self._owned_run_owners.pop(owner_key, None)
+            owner.__exit__(None, None, None)
 
     def cancel(self, run: Run | str | None = None) -> AgentResponse:
         active_request = self._active_request
@@ -983,20 +1157,47 @@ class Agent:
             if active_request is not None:
                 return AgentResponse("已请求取消当前请求。")
             return AgentResponse("当前没有活动中的计算。")
-        event = self._cancel_events.setdefault(current.id, Event())
-        event.set()
-        if current.status == "waiting" and current.status not in {
-            "succeeded",
-            "failed",
-            "cancelled",
-            "interrupted",
-        }:
-            current.status = "cancelled"
-            current.waiting_for = None
-            save_run(self.config.data_root_path, current)
         if active_request is not None:
             return AgentResponse("已请求取消当前请求。", run=current)
-        return AgentResponse("已请求取消当前计算。", run=current)
+        if current.status in {"succeeded", "failed", "cancelled", "interrupted"}:
+            return AgentResponse("当前计算已经结束。", run=current)
+
+        try:
+            owner = execution.RunOwner(self.config.data_root_path, current.id)
+            owner.__enter__()
+        except execution.ExecutionBusy:
+            return AgentResponse(
+                "当前计算正由其他执行者占用，未强行改写其状态；请稍后查看。", run=current
+            )
+        try:
+            authoritative = load_run(self.config.data_root_path, current.id)
+            event = self._cancel_events.setdefault(authoritative.id, Event())
+            event.set()
+            if authoritative.status not in {
+                "succeeded",
+                "failed",
+                "cancelled",
+                "interrupted",
+            }:
+                authoritative.status = "cancelled"
+                authoritative.waiting_for = None
+                authoritative.pending_data = {
+                    "category": "cancelled",
+                    "reason": "user requested cancellation",
+                }
+                authoritative.finish_active_interval()
+                try:
+                    execution.persist_run(self.config.data_root_path, authoritative)
+                except execution.PersistenceFailure as error:
+                    authoritative.pending_data["persistence"] = {
+                        "status": "not_persisted",
+                        "stage": error.stage,
+                        "exception_type": type(error.error).__name__,
+                        "reason": str(error.error),
+                    }
+            return AgentResponse("已请求取消当前计算。", run=authoritative)
+        finally:
+            owner.__exit__(None, None, None)
 
     def request_cancel(self) -> AgentResponse:
         """Signal cancellation without mutating a Run owned by the worker.
@@ -1272,7 +1473,7 @@ class Agent:
                     candidate_steps.append(step)
                     continue
 
-                if tool.parameter_preparation != "orca_electronic_state":
+                if tool.parameter_preparation_function is None:
                     replacement = merge_explicit_step_parameters(tool, step, candidate_request)
                     candidate_steps.append(replacement)
                     candidate_sources[step.id] = {
@@ -1310,8 +1511,7 @@ class Agent:
                     resolution.effective_parameters,
                     allow_deferred=bool(resolution.missing_fields),
                 )
-                if tool.execution_budget == "orca":
-                    _validate_orca_profile(effective)
+                if tool.parameter_preparation_function is not None:
                     reference = step.inputs.get("geometry")
                     if (
                         "charge" in effective
@@ -1620,37 +1820,22 @@ class Agent:
         return True
 
     def _reserve_attempt(self, run: Run, step: Step, tool: Tool) -> bool:
-        if tool.execution_budget != "orca":
-            return True
-        origin = run.origin_step_map.get(step.id, step.origin_step_id or step.id)
-        known_origin = step.id in run.origin_step_map or origin in run.origin_step_map.values()
-        new_science_step = bool(run.accepted_snapshot) and not known_origin
-        if step.id not in run.origin_step_map:
-            run.origin_step_map[step.id] = origin
-        count = int(run.attempt_counts.get(origin, 0))
-        if count >= int(run.budget.get("max_attempts_per_science_step", 3)):
-            run.pending_data = {
-                "budget_exhausted": "max_attempts_per_science_step",
-                "step_id": step.id,
-            }
-            return False
-        if (count > 0 or new_science_step) and run.extra_orca_executions >= int(
-            run.budget.get("max_extra_orca_executions", 3)
-        ):
-            run.pending_data = {
-                "budget_exhausted": "max_extra_orca_executions",
-                "step_id": step.id,
-            }
-            return False
-        run.attempt_counts[origin] = count + 1
-        if count > 0 or new_science_step:
-            run.extra_orca_executions += 1
-        return True
+        """Compatibility wrapper for the Tool-owned attempt policy."""
+
+        return tool.reserve_attempt(run, step)
 
     def _prepare_confirmation(self, run: Run, step: Step) -> None:
         run.status = "waiting"
         run.waiting_for = "confirmation"
-        run.pending_data = self._preview(run, step)
+        preview = self._preview(run, step)
+        preview_snapshot = self._acceptance_snapshot(run)
+        preview["confirmation_fingerprint"] = execution_fingerprint(
+            run.plan,
+            run.resources,
+            run.artifact_index,
+            snapshot=preview_snapshot,
+        )
+        run.pending_data = preview
 
     def _validate_known_plan_parameters(self, run: Run, plan: Plan | None = None) -> None:
         """Validate parameters against any trusted geometry already available."""
@@ -1658,7 +1843,10 @@ class Agent:
         candidate_plan = plan or run.plan
         for step in candidate_plan.steps:
             tool = self.registry.get(step.tool)
-            if tool.parameter_validation_function is None:
+            if (
+                tool.parameter_validation_function is None
+                or tool.parameter_preparation_function is not None
+            ):
                 continue
             context = self._parameter_validation_context(run, candidate_plan, step)
             try:
@@ -4019,12 +4207,11 @@ def _normalize_explicit_plan(
                 for name in original_parameters
                 if name in checked_parameters
             }
-            if defaults is not None and tool.parameter_preparation == "orca_electronic_state":
-                supplied_parameters.setdefault("method_profile", defaults.method_profile)
-                supplied_parameters.setdefault("environment", defaults.environment)
+            if defaults is not None and tool.parameter_preparation_function is not None:
+                for name in ("method_profile", "environment"):
+                    if name in tool.request_parameters:
+                        supplied_parameters.setdefault(name, getattr(defaults, name))
             parameters = tool.validate_parameters(supplied_parameters)
-            if tool.execution_budget == "orca":
-                _validate_orca_profile(parameters)
             step = step.model_copy(update={"parameters": parameters})
         steps.append(step)
     return plan.model_copy(update={"steps": steps})

@@ -11,6 +11,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator
 
+from bg6022 import execution
 from bg6022.config import AppConfig, validate_execution_environment
 from bg6022.models import (
     InputReference,
@@ -38,7 +39,6 @@ from bg6022.session import (
     register_bytes_artifact,
     register_file_artifact,
     run_directory,
-    save_run,
     sha256_bytes,
     sha256_file,
     utc_now,
@@ -277,6 +277,10 @@ def _make_tool(
         requires_compute_permission=True,
         parameter_preparation="orca_electronic_state",
         execution_budget="orca",
+        parameter_preparation_function=prepare_orca_parameters,
+        attempt_reservation_function=reserve_orca_attempt,
+        preflight_function=preflight_orca,
+        parameter_validation_function=validate_orca_parameters,
         deferred_parameters=["charge", "multiplicity"],
         request_parameters=request_parameters,
         geometry_output_input_ports=(
@@ -304,6 +308,56 @@ def _profile_repair_capabilities(
         return []
     allowed = set(profile.repair_options_by_operation.get(operation, ()))
     return [action for action in declared if action in allowed]
+
+
+def prepare_orca_parameters(context: Any, run: Run, step: Step) -> Step | None:
+    """Delegate electronic-state preparation to the ORCA Tool adapter."""
+
+    return context._prepare_orca_step(run, step)
+
+
+def reserve_orca_attempt(run: Run, step: Step) -> bool:
+    """Apply the bounded ORCA attempt policy without Agent engine branches."""
+
+    origin = run.origin_step_map.get(step.id, step.origin_step_id or step.id)
+    known_origin = step.id in run.origin_step_map or origin in run.origin_step_map.values()
+    new_science_step = bool(run.accepted_snapshot) and not known_origin
+    if step.id not in run.origin_step_map:
+        run.origin_step_map[step.id] = origin
+    count = int(run.attempt_counts.get(origin, 0))
+    max_attempts = int(run.budget.get("max_attempts_per_science_step", 3))
+    if count >= max_attempts:
+        run.pending_data = {
+            "budget_exhausted": "max_attempts_per_science_step",
+            "step_id": step.id,
+        }
+        return False
+    if (count > 0 or new_science_step) and run.extra_orca_executions >= int(
+        run.budget.get("max_extra_orca_executions", 3)
+    ):
+        run.pending_data = {
+            "budget_exhausted": "max_extra_orca_executions",
+            "step_id": step.id,
+        }
+        return False
+    run.attempt_counts[origin] = count + 1
+    if count > 0 or new_science_step:
+        run.extra_orca_executions += 1
+    return True
+
+
+def preflight_orca(config: AppConfig, _step: Step) -> None:
+    validate_execution_environment(config)
+
+
+def validate_orca_parameters(parameters: dict[str, Any], _context: Any) -> None:
+    if "method_profile" not in parameters or "environment" not in parameters:
+        return
+    profile = get_profile(parameters["method_profile"])
+    if parameters["environment"] not in profile.supported_environments:
+        raise ValueError(
+            f"environment {parameters['environment']!r} is not implemented for {profile.name!r}"
+        )
 
 
 def execute_orca_step(
@@ -376,7 +430,7 @@ def _execute_prepared_attempt(
     geometry_bytes: bytes,
     owns_active_interval: bool,
 ) -> Result:
-    attempt = _next_attempt(run, step.id)
+    attempt = execution.allocate_attempt(config.data_root_path, run, step.id)
     attempt_dir = attempt_directory(config.data_root_path, run.id, step.id, attempt)
     attempt_dir.mkdir(parents=True, exist_ok=False)
     (attempt_dir / "geometry.xyz").write_bytes(geometry_bytes)
@@ -410,7 +464,7 @@ def _execute_prepared_attempt(
     run.step_status[step.id] = "running"
     run.attempts.append(attempt_record)
     # A prepared attempt is durable before any process can be created.
-    save_run(config.data_root_path, run)
+    execution.persist_run(config.data_root_path, run)
 
     runner_resources = RunnerResources(
         cores=int(run.resources["cores"]),
@@ -459,7 +513,7 @@ def _execute_prepared_attempt(
                             "process_created_at": started.process_created_at,
                         },
                     )
-                    save_run(config.data_root_path, run)
+                    execution.persist_run(config.data_root_path, run)
 
                 deadline = time.monotonic() + allowed_seconds
                 process_facts = run_orca(
@@ -942,11 +996,6 @@ def _allowed_seconds(run: Run) -> float:
         float(run.resources["run_active_timeout_seconds"]) - run.current_active_seconds()
     )
     return min(float(run.resources["attempt_timeout_seconds"]), run_remaining)
-
-
-def _next_attempt(run: Run, step_id: str) -> int:
-    attempts = [item.get("attempt", 0) for item in run.attempts if item.get("step_id") == step_id]
-    return max(attempts, default=0) + 1
 
 
 def _check_input_hashes(

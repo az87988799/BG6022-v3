@@ -372,6 +372,9 @@ class Run(StrictModel):
 
 ExecuteFunction = Callable[[Step, Run, Any], Result]
 ParameterValidationFunction = Callable[[dict[str, Any], Mapping[str, Any]], None]
+ParameterPreparationFunction = Callable[[Any, Run, Step], Step | None]
+AttemptReservationFunction = Callable[[Run, Step], bool]
+PreflightFunction = Callable[[Any, Step], None]
 ResultProperty = StrictStr
 
 
@@ -393,6 +396,13 @@ class Tool(StrictModel):
     requires_compute_permission: bool = True
     parameter_preparation: Literal["none", "orca_electronic_state"] = "none"
     execution_budget: Literal["none", "orca"] = "none"
+    parameter_preparation_function: ParameterPreparationFunction | None = Field(
+        default=None, exclude=True, repr=False
+    )
+    attempt_reservation_function: AttemptReservationFunction | None = Field(
+        default=None, exclude=True, repr=False
+    )
+    preflight_function: PreflightFunction | None = Field(default=None, exclude=True, repr=False)
     deferred_parameters: list[str] = Field(default_factory=list)
     request_parameters: list[str] = Field(default_factory=list)
     geometry_output_input_ports: dict[str, str] = Field(default_factory=dict)
@@ -501,6 +511,20 @@ class Tool(StrictModel):
             raise RuntimeError(f"tool {self.name!r} has no executable implementation")
         return self.execute_function(step, run, cancel)
 
+    def prepare_parameters(self, context: Any, run: Run, step: Step) -> Step | None:
+        if self.parameter_preparation_function is None:
+            return step
+        return self.parameter_preparation_function(context, run, step)
+
+    def reserve_attempt(self, run: Run, step: Step) -> bool:
+        if self.attempt_reservation_function is None:
+            return True
+        return self.attempt_reservation_function(run, step)
+
+    def preflight(self, config: Any, step: Step) -> None:
+        if self.preflight_function is not None:
+            self.preflight_function(config, step)
+
     def validate_parameters(
         self,
         parameters: dict[str, Any],
@@ -524,7 +548,10 @@ class Tool(StrictModel):
             if undeclared:
                 raise ValueError(f"missing required parameters: {sorted(undeclared)}")
             if missing:
-                return _validate_partial_model(self.parameter_type, parameters)
+                partial = _validate_partial_model(self.parameter_type, parameters)
+                if self.parameter_validation_function is not None:
+                    self.parameter_validation_function(partial, context or {})
+                return partial
         validated = self.parameter_type.model_validate(parameters, strict=True).model_dump(
             mode="python", exclude_none=True
         )

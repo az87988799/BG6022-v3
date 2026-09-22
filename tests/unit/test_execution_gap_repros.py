@@ -1,28 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from threading import Barrier, Event, Lock, Thread
+from threading import Event, Lock, Thread
 from typing import Any
 
 import pytest
 
+from bg6022 import execution
 from bg6022.agent import Agent
 from bg6022.config import load_config
 from bg6022.models import Plan, Request, Result, ResultTarget, Run, Step, Tool
-from bg6022.session import create_run, load_run, save_run, save_session, utc_now
+from bg6022.session import create_run, load_run, save_result, save_run, save_session, utc_now
 from bg6022.tools.registry import ToolRegistry
-
-
-class ExpectedToolBoundaryGap(AssertionError):
-    """Only the known Tool exception escape is allowed to xfail."""
-
-
-class ExpectedPersistenceGap(AssertionError):
-    """Only the known persistence escape is allowed to xfail."""
-
-
-class ExpectedConfirmationRaceGap(AssertionError):
-    """Only duplicate execution of one confirmation may xfail."""
 
 
 def _config(tmp_path: Path):
@@ -135,11 +124,6 @@ def _run(
         pytest.param(TypeError, "synthetic tool type failure", id="type-error"),
     ],
 )
-@pytest.mark.xfail(
-    strict=True,
-    raises=ExpectedToolBoundaryGap,
-    reason="R1-GAP-TOOL-UNEXPECTED-EXCEPTION: ordinary Tool exceptions escape Agent.advance",
-)
 def test_unexpected_tool_exception_is_closed_at_tool_boundary(
     tmp_path: Path,
     error_type: type[Exception],
@@ -178,34 +162,18 @@ def test_unexpected_tool_exception_is_closed_at_tool_boundary(
     )
     agent = Agent(config, registry, llm=object(), session_id=run.session_id)
 
-    escaped: Exception | None = None
-    try:
-        agent.advance(run)
-    except error_type as error:
-        escaped = error
+    agent.advance(run)
 
     assert injection["hits"] == 1
     assert tool_calls == ["boom"]
     assert injection["error_type"] == error_type.__name__
     assert injection["error_message"] == error_message
-    if escaped is not None:
-        assert type(escaped) is error_type
-        assert str(escaped) == error_message
-        raise ExpectedToolBoundaryGap(
-            f"{error_type.__name__} escaped Agent.advance after the Tool injection"
-        )
-
     persisted = load_run(config.data_root_path, run.id)
     assert persisted.status == "failed"
     assert persisted.step_status == {"boom": "failed"}
     assert persisted.pending_data["category"] == "execution_boundary"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ExpectedPersistenceGap,
-    reason="R1-GAP-RESULT-PERSISTENCE: save_result failure is not closed as a Run outcome",
-)
 def test_result_persistence_failure_is_acknowledged_and_stops_successor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -251,36 +219,22 @@ def test_result_persistence_failure_is_acknowledged_and_stops_successor(
             injection["error_message"] = str(error)
             raise
 
-    monkeypatch.setattr("bg6022.agent.save_result", fail_result_save)
+    monkeypatch.setattr(execution, "save_result", fail_result_save)
     agent = Agent(config, registry, llm=object(), session_id=run.session_id)
 
-    escaped: OSError | None = None
-    try:
-        agent.advance(run)
-    except OSError as error:
-        escaped = error
+    agent.advance(run)
 
     assert injection["hits"] == 1
     assert injection["error_type"] == "OSError"
     assert injection["error_message"] == "synthetic result persistence failure"
     assert calls == ["first"]
     assert run.status != "succeeded"
-    if escaped is not None:
-        assert type(escaped) is OSError
-        assert str(escaped) == "synthetic result persistence failure"
-        raise ExpectedPersistenceGap("save_result OSError escaped Agent.advance")
-
     persisted = load_run(config.data_root_path, run.id)
     assert persisted.status == "failed"
     assert persisted.pending_data["category"] == "result_persistence"
     assert persisted.current_results == {}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ExpectedPersistenceGap,
-    reason="R1-GAP-RUN-PERSISTENCE: save_run failure is not closed as a Run outcome",
-)
 def test_run_persistence_failure_stops_successor_without_claiming_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -315,7 +269,7 @@ def test_run_persistence_failure_stops_successor_without_claiming_success(
         execution_permission=True,
     )
 
-    original_save_run = save_run
+    original_save_run = execution.save_run
     injection = {
         "hits": 0,
         "save_calls": 0,
@@ -341,14 +295,10 @@ def test_run_persistence_failure_stops_successor_without_claiming_success(
                 raise
         original_save_run(data_root, current)
 
-    monkeypatch.setattr("bg6022.agent.save_run", fail_after_first_result)
+    monkeypatch.setattr(execution, "save_run", fail_after_first_result)
     agent = Agent(config, registry, llm=object(), session_id=run.session_id)
 
-    escaped: OSError | None = None
-    try:
-        agent.advance(run)
-    except OSError as error:
-        escaped = error
+    agent.advance(run)
 
     assert injection["hits"] == 1
     assert injection["save_calls"] >= 1
@@ -356,11 +306,6 @@ def test_run_persistence_failure_stops_successor_without_claiming_success(
     assert injection["error_message"] == "synthetic Run persistence failure"
     assert calls == ["first"]
     assert run.status != "succeeded"
-    if escaped is not None:
-        assert type(escaped) is OSError
-        assert str(escaped) == "synthetic Run persistence failure"
-        raise ExpectedPersistenceGap("save_run OSError escaped Agent.advance")
-
     persisted = load_run(config.data_root_path, run.id)
     assert persisted.status == "failed"
     assert persisted.pending_data["category"] == "run_persistence"
@@ -393,7 +338,7 @@ def test_cancel_between_confirmation_and_tool_start_prevents_start(
     )
     agent = Agent(config, registry, llm=object(), session_id=run.session_id)
 
-    original_save_run = save_run
+    original_save_run = execution.save_run
     save_entered = Event()
     release_save = Event()
     save_calls = 0
@@ -407,7 +352,7 @@ def test_cancel_between_confirmation_and_tool_start_prevents_start(
                 raise RuntimeError("timed out waiting for cancellation probe")
         original_save_run(data_root, current)
 
-    monkeypatch.setattr("bg6022.agent.save_run", gate_first_save)
+    monkeypatch.setattr(execution, "save_run", gate_first_save)
     errors: list[Exception] = []
 
     def confirm() -> None:
@@ -435,19 +380,18 @@ def test_cancel_between_confirmation_and_tool_start_prevents_start(
     assert persisted.status == "cancelled"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ExpectedConfirmationRaceGap,
-    reason="R1-GAP-CONFIRM-RACE: concurrent confirmations can execute one Run twice",
-)
 def test_duplicate_confirmation_cannot_consume_one_waiting_authorization_twice(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
     calls: list[str] = []
     calls_lock = Lock()
+    tool_started = Event()
+    release_tool = Event()
 
     def execute(step: Step, run: Run, cancel: Event) -> Result:
+        tool_started.set()
+        assert release_tool.wait(timeout=2), "held Tool exceeded its bounded probe timeout"
         with calls_lock:
             calls.append(step.id)
         return _successful_result(step, run, "value")
@@ -467,14 +411,6 @@ def test_duplicate_confirmation_cannot_consume_one_waiting_authorization_twice(
         execution_permission=False,
     )
     agent = Agent(config, registry, llm=object(), session_id=run.session_id)
-    confirmation_barrier = Barrier(2)
-    original_snapshot = agent._acceptance_snapshot
-
-    def gated_snapshot(current: Run) -> dict[str, Any]:
-        confirmation_barrier.wait(timeout=2)
-        return original_snapshot(current)
-
-    monkeypatch.setattr(agent, "_acceptance_snapshot", gated_snapshot)
     errors: list[Exception] = []
 
     def confirm() -> None:
@@ -487,10 +423,10 @@ def test_duplicate_confirmation_cannot_consume_one_waiting_authorization_twice(
     try:
         for worker in workers:
             worker.start()
-        for worker in workers:
-            worker.join(timeout=2)
+        assert tool_started.wait(timeout=2), "first confirmation did not reach the Tool"
+        release_tool.set()
     finally:
-        confirmation_barrier.abort()
+        release_tool.set()
         for worker in workers:
             worker.join(timeout=2)
 
@@ -498,8 +434,171 @@ def test_duplicate_confirmation_cannot_consume_one_waiting_authorization_twice(
         "duplicate confirmation probe exceeded its bounded timeout"
     )
     assert errors == []
-    if calls == ["confirmed", "confirmed"]:
-        raise ExpectedConfirmationRaceGap("one waiting authorization started the same Tool twice")
     assert calls == ["confirmed"]
     persisted = load_run(config.data_root_path, run.id)
     assert persisted.status == "succeeded"
+
+
+def test_run_checkpoint_failure_preserves_an_existing_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    calls: list[str] = []
+    names = {
+        "existing": "existing_value",
+        "candidate": "candidate_value",
+        "successor": "successor_value",
+    }
+
+    def execute(step: Step, run: Run, cancel: Event) -> Result:
+        calls.append(step.id)
+        return _successful_result(step, run, names[step.id])
+
+    tools = [
+        _tool(
+            f"{step_id}_tool",
+            result_name,
+            execute,
+            requires_compute_permission=False,
+        )
+        for step_id, result_name in names.items()
+    ]
+    registry = ToolRegistry(tools)
+    run = _run(
+        config,
+        [
+            Step(id=step_id, tool=f"{step_id}_tool", parameters={"result_name": result_name})
+            for step_id, result_name in names.items()
+        ],
+        session_id="existing_success_checkpoint",
+        execution_permission=True,
+    )
+    existing_step = run.plan.steps[0]
+    existing_result = _successful_result(existing_step, run, names["existing"])
+    existing_path = save_result(config.data_root_path, run, existing_result)
+    existing_relative = (
+        existing_path.relative_to(Path(config.data_root_path) / "runs" / run.id).parent.as_posix()
+        + "/result.json"
+    )
+    run.result_index = [existing_relative]
+    run.current_results = {"existing": existing_relative}
+    run.step_status = {"existing": "succeeded"}
+    save_run(config.data_root_path, run)
+
+    original_save_run = execution.save_run
+    injection = {"hits": 0}
+
+    def fail_candidate_checkpoint(data_root: str, current: Run) -> None:
+        candidate_published = (
+            current.step_status.get("candidate") == "succeeded"
+            and "candidate" in current.current_results
+            and current.status == "running"
+            and not current.pending_data
+        )
+        if candidate_published and injection["hits"] == 0:
+            injection["hits"] += 1
+            raise OSError("synthetic candidate Run persistence failure")
+        original_save_run(data_root, current)
+
+    monkeypatch.setattr(execution, "save_run", fail_candidate_checkpoint)
+    Agent(config, registry, llm=object(), session_id=run.session_id).advance(run)
+
+    assert injection["hits"] == 1
+    assert calls == ["candidate"]
+    persisted = load_run(config.data_root_path, run.id)
+    assert persisted.status == "failed"
+    assert persisted.pending_data["category"] == "run_persistence"
+    assert persisted.current_results == {"existing": existing_relative}
+    assert persisted.step_status["existing"] == "succeeded"
+    assert "candidate" not in persisted.current_results
+
+
+def test_cross_agent_confirmation_observes_the_same_run_owner(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    calls: list[str] = []
+    tool_started = Event()
+    release_tool = Event()
+
+    def execute(step: Step, run: Run, cancel: Event) -> Result:
+        calls.append(step.id)
+        tool_started.set()
+        assert release_tool.wait(timeout=2), "cross-agent Tool exceeded its bounded probe timeout"
+        return _successful_result(step, run, "value")
+
+    tool = _tool(
+        "cross_agent_confirmation_tool",
+        "value",
+        execute,
+        requires_compute_permission=True,
+    )
+    registry = ToolRegistry([tool])
+    run = _run(
+        config,
+        [Step(id="cross", tool=tool.name, parameters={"result_name": "value"})],
+        session_id="cross_agent_confirmation",
+        waiting_for="confirmation",
+        execution_permission=False,
+    )
+    first_agent = Agent(config, registry, llm=object(), session_id=run.session_id)
+    second_agent = Agent(config, registry, llm=object(), session_id=run.session_id)
+    first_errors: list[Exception] = []
+
+    def first_confirm() -> None:
+        try:
+            first_agent.confirm(run.id)
+        except Exception as error:
+            first_errors.append(error)
+
+    worker = Thread(target=first_confirm, daemon=True)
+    worker.start()
+    assert tool_started.wait(timeout=2), "first Agent did not reach the Tool"
+    competing = second_agent.confirm(run.id)
+    release_tool.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert first_errors == []
+    assert "占用" in competing.text
+    assert calls == ["cross"]
+    assert load_run(config.data_root_path, run.id).status == "succeeded"
+
+
+def test_continuous_run_checkpoint_failure_is_bounded_and_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    calls: list[str] = []
+
+    def execute(step: Step, run: Run, cancel: Event) -> Result:
+        calls.append(step.id)
+        return _successful_result(step, run, "value")
+
+    tool = _tool(
+        "continuous_checkpoint_tool",
+        "value",
+        execute,
+        requires_compute_permission=False,
+    )
+    registry = ToolRegistry([tool])
+    run = _run(
+        config,
+        [Step(id="bounded", tool=tool.name, parameters={"result_name": "value"})],
+        session_id="continuous_checkpoint",
+        execution_permission=True,
+    )
+    hits = {"count": 0}
+
+    def always_fail(_data_root: str, _current: Run) -> None:
+        hits["count"] += 1
+        raise OSError("synthetic continuous disk failure")
+
+    monkeypatch.setattr(execution, "save_run", always_fail)
+    Agent(config, registry, llm=object(), session_id=run.session_id).advance(run)
+
+    assert hits["count"] == 2
+    assert calls == []
+    assert run.status == "failed"
+    assert run.pending_data["category"] == "run_persistence"
+    assert run.pending_data["persistence"]["status"] == "not_persisted"

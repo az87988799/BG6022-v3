@@ -9,9 +9,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
+from bg6022 import execution
 from bg6022.config import AppConfig
 from bg6022.models import Result, Run, Step, Tool
-from bg6022.session import artifact_path, run_directory, save_run
+from bg6022.session import artifact_path, run_directory
 from bg6022.tools.molecule import parse_xyz_bytes, resolve_artifact_reference
 
 
@@ -102,7 +103,7 @@ def execute_geometry_distance(config: AppConfig, *, step: Step, run: Run, cancel
     """Read, verify, and measure one geometry without changing its bytes."""
 
     parameters = GeometryDistanceParameters.model_validate(step.parameters, strict=True)
-    attempt = _next_attempt(run, step.id)
+    attempt = execution.allocate_attempt(config.data_root_path, run, step.id)
     relative = f"{step.id}/attempt-{attempt:02d}"
     (run_directory(config.data_root_path, run.id) / relative).mkdir(parents=True, exist_ok=True)
 
@@ -177,7 +178,7 @@ def execute_geometry_distance(config: AppConfig, *, step: Step, run: Run, cancel
             "input_artifact_ids": [input_artifact_id] if input_artifact_id else [],
         }
     )
-    save_run(config.data_root_path, run)
+    execution.persist_run(config.data_root_path, run)
     return Result(
         run_id=run.id,
         step_id=step.id,
@@ -188,13 +189,6 @@ def execute_geometry_distance(config: AppConfig, *, step: Step, run: Run, cancel
         input_artifact_ids=[input_artifact_id] if input_artifact_id else [],
         attempt_relative_path=relative,
     )
-
-
-def _next_attempt(run: Run, step_id: str) -> int:
-    attempts = [
-        int(item.get("attempt", 0)) for item in run.attempts if item.get("step_id") == step_id
-    ]
-    return max(attempts, default=0) + 1
 
 
 __all__ = [

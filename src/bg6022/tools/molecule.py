@@ -18,6 +18,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, StrictInt
 
+from bg6022 import execution
 from bg6022.config import AppConfig
 from bg6022.models import InputReference, Result, Run, Step, Tool
 from bg6022.session import (
@@ -25,7 +26,6 @@ from bg6022.session import (
     find_artifact,
     register_bytes_artifact,
     run_directory,
-    save_run,
 )
 
 SUPPORTED_ELEMENTS = frozenset({"H", "C", "N", "O", "F", "P", "S", "Cl", "Br", "I"})
@@ -151,7 +151,7 @@ def make_generate_geometry_tool(config: AppConfig | None = None) -> Tool:
 
 def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel: Event) -> Result:
     parameters = GenerateGeometryParameters.model_validate(step.parameters, strict=True)
-    attempt = _next_attempt(run, step.id)
+    attempt = execution.allocate_attempt(config.data_root_path, run, step.id)
     relative = f"{step.id}/attempt-{attempt:02d}"
     (run_directory(config.data_root_path, run.id) / relative).mkdir(parents=True, exist_ok=True)
     try:
@@ -249,7 +249,7 @@ def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel
                 "output_ports": {"geometry": geometry_artifact.id},
             }
         )
-        save_run(config.data_root_path, run)
+        execution.persist_run(config.data_root_path, run)
         return _molecule_result(
             run,
             step,
@@ -499,13 +499,6 @@ def _molecule_result(
         parameter_sources=parameter_sources or {},
         attempt_relative_path=relative,
     )
-
-
-def _next_attempt(run: Run, step_id: str) -> int:
-    attempts = [
-        int(item.get("attempt", 0)) for item in run.attempts if item.get("step_id") == step_id
-    ]
-    return max(attempts, default=0) + 1
 
 
 def _step_fingerprint(step: Step) -> str:

@@ -224,3 +224,29 @@ R0 候选文件只包含：
 R1 第一批工作应从本文件中的三个真实 gap 重新开始：统一 Tool 普通异常闭合、Result/Run 持久化失败闭合、确认授权的单次消费/并发边界。所有修复必须继续保留当前真实 ORCA input/runner/parser/checks 的单一生产实现、4 cores/1024 MB/`%maxcore 192`/并发 1 约束和原始文件诊断。
 
 用户明确验收前，本阶段只能报告为 `awaiting_user_acceptance`，不能标记为已完成。
+
+## 12. R1 执行边界实施记录（2026-09-22）
+
+本节追加 R1 的实际实施事实，不改写上面的 R0 历史记录。R1 详细方案已复制到仓库入口 [`stages/R1.md`](stages/R1.md)，源文件 SHA-256 为 `4566D4F066C91D6D9F22AC2C8173D45DAC51C9CF9F2E3DDE4B6DBBA1E6E96684`。用户当前请求明确授权开始 R1；R0 的用户验收状态仍保持未接受。
+
+| 项目 | R1 实际事实 |
+|---|---|
+| 隔离工作树 | `E:\BG6022-rebuild` |
+| 分支/基线 | `codex/structural-rebuild`；R1 开始时 `5f0719d0567757fedae93d2d1c058e4cee553a6a` |
+| 依赖/冻结项 | `uv.lock`、prompts、ORCA input/runner/parser/checks、配置科学标准未改；R1 未增加 Task、`result_field`、新 dialogue 或旧格式自动迁移 |
+| 运行边界 | Run owner 为短生命周期跨线程/跨进程锁；Agent 负责一次生命周期收口；Tool hooks 负责参数准备、preflight、attempt 预算；生产工具的 Run checkpoint 统一经 `src/bg6022/execution.py` |
+| 失败收口 | 普通 Tool `Exception`、Result 写盘失败、Run checkpoint 失败均形成结构化 `pending_data`；候选 Result 在 Run checkpoint 前不进入 `current_results`；连续写盘失败只做一次 best-effort checkpoint，并标记 `not_persisted` |
+| 确认/取消 | 确认 admission 在 `_begin_request` 前完成；同一授权最多进入一个 Tool；竞争确认返回占用状态；取消不会改写其他 owner 正在持有的 Run |
+| attempt | ORCA、分子、PubChem、几何 Tool 共用 `execution.allocate_attempt`，同时检查 durable attempt 记录和既有目录，避免重启覆盖 raw 文件 |
+
+### R1 验证快照
+
+| 验证 | 结果 |
+|---|---|
+| R1 gap 回归 | 9 passed：普通 RuntimeError/TypeError、Result/Run 持久化、取消边界、同 Agent 重复确认、跨 Agent 确认 owner、已有成功结果保留、连续磁盘失败有界 |
+| 离线全套 | 386 passed、16 deselected、退出码 0；JUnit/log 在 `E:\BG6022-r1-evidence-20260922\r1-final-offline.*` |
+| Windows 进程测试 | 2 passed、400 deselected、退出码 0；日志在 `E:\BG6022-r1-evidence-20260922\r1-final-windows.log` |
+| 静态/构建 | `ruff check .`、`ruff format --check .`、`compileall`、`git diff --check`、`uv lock --check`、`uv build` 均通过 |
+| 真实 ORCA | 独立数据根 `E:\BG6022-r1-live-20260922` 完成一次授权水分子 SP；Run `run_f2250da3c18d45ed836243d0039242f4` succeeded，能量 `-76.417246084177 Eh`，输入为 4 cores / `%maxcore 192`，process tree empty；日志在 `E:\BG6022-r1-evidence-20260922\r1-live-orca-sp-actual.log` |
+
+R1 当前报告状态为 `implementation_verified_live_pending` / `awaiting_user_acceptance`。未执行真实 LLM 或 PubChem，不以离线结果冒充全链外部服务验收；仍需用户审阅本次提交及证据后明确接受，才能标记 R1 为完成。
