@@ -6,7 +6,7 @@
 工程状态：`ready_for_r1_repair`
 用户接受状态：`awaiting_user_acceptance`
 tested_commit：`b472c58c4ba732d6086702bc15add830351ed8a9`
-documentation_commit：`pending`（本次证据摘要更新）
+documentation_commit：`4dae113`（R0 证据摘要提交）
 
 本文是 R0 的唯一准备记录。它只记录本次在 Windows 工作机上实际核对到的事实；总方案、R0 方案中的模板和未执行的目标不被当作已验证证据。
 
