@@ -310,3 +310,47 @@ def test_identity_supplement_updates_same_waiting_run_with_structured_intake(
     assert response.run.plan.steps[0].parameters == {"query": "water", "input_kind": "name"}
     assert seen["pending_context"]["identity_required"] is True
     assert seen["pending_context"]["can_replace_identity"] is True
+
+
+def test_identity_supplement_keeps_real_advance_until_confirmation(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    old_run = _waiting_name_run(config, "session_identity_real_advance")
+    registry = build_registry(config)
+
+    def fake_intake(_llm, message: str, **_kwargs: Any) -> IntakeOutput:
+        assert message == "water"
+        return IntakeOutput(
+            intent="chemistry_compute",
+            molecule_query="water",
+            molecule_input_kind="name",
+            molecule_name_evidence="water",
+            pending_action="supplement_identity",
+            pending_action_evidence="water",
+        )
+
+    monkeypatch.setattr("bg6022.agent.intake_message", fake_intake)
+    monkeypatch.setattr(
+        "bg6022.tools.pubchem.fetch_pubchem", lambda *_args, **_kwargs: _water_lookup()
+    )
+    orca_calls: list[object] = []
+
+    def fail_if_orca(*_args: Any, **_kwargs: Any) -> None:
+        orca_calls.append(object())
+        raise AssertionError("identity supplement must stop before ORCA confirmation")
+
+    monkeypatch.setattr("bg6022.tools.orca.run_orca", fail_if_orca)
+    agent = Agent(config, registry, llm=object(), session_id="session_identity_real_advance")
+
+    response = agent.handle_message("water")
+
+    assert response.run is not None
+    assert response.run.id == old_run.id
+    assert response.run.status == "waiting"
+    assert response.run.waiting_for == "confirmation"
+    assert response.run.plan.steps[0].parameters == {"query": "water", "input_kind": "name"}
+    assert response.run.current_results.keys() >= {"molecule", "geometry"}
+    assert response.run.step_status["molecule"] == "succeeded"
+    assert response.run.step_status["geometry"] == "succeeded"
+    assert orca_calls == []
