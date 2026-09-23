@@ -148,9 +148,11 @@ def test_b028_queries_a_published_verified_result_without_recomputation(
     assert [item["purpose"] for item in observation.llm_structured_outputs] == ["intake"]
     assert "-76.418938720985" in observation.response_text
 
-    session_path = _case_data_root(
-        tmp_path / "benchmark-data", "B028_history_energy_query", 1
-    ) / "sessions" / "bench_live_B028_history_energy_query_1.json"
+    session_path = (
+        _case_data_root(tmp_path / "benchmark-data", "B028_history_energy_query", 1)
+        / "sessions"
+        / "bench_live_B028_history_energy_query_1.json"
+    )
     session = json.loads(session_path.read_text(encoding="utf-8"))
     assert len(session["recent_results"]) == 1
     assert session["recent_results"][0]["status"] == "succeeded"

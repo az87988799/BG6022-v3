@@ -129,16 +129,10 @@ def summarize_results(
         "supported_task_success": _rate_for_support(results, "supported"),
         "boundary_accuracy": dimensions["boundary_correct"],
         "unrequested_compute": unrequested_compute,
-        "unrequested_compute_rate": (
-            unrequested_compute / case_count
-            if case_count
-            else None
-        ),
+        "unrequested_compute_rate": (unrequested_compute / case_count if case_count else None),
         "unexpected_recomputation": unexpected_recomputation,
         "unexpected_recomputation_rate": (
-            unexpected_recomputation / case_count
-            if case_count
-            else None
+            unexpected_recomputation / case_count if case_count else None
         ),
         "critical_violations": violations,
         "critical_violation_count": len(violations),
@@ -199,6 +193,168 @@ def write_report(
     return summary
 
 
+def write_matrix_report(
+    output_dir: str | Path,
+    expanded_cases: list[Any],
+    results: list[CaseResult],
+) -> dict[str, Any]:
+    """Write scientific matrix cell detail alongside the standard benchmark report."""
+
+    destination = Path(output_dir).resolve()
+    if not destination.is_dir():
+        raise ValueError(f"benchmark report directory does not exist: {destination}")
+    results_by_case: dict[str, list[CaseResult]] = defaultdict(list)
+    for result in results:
+        results_by_case[result.case_id].append(result)
+
+    cells: list[dict[str, Any]] = []
+    for expanded in expanded_cases:
+        case_results = sorted(
+            results_by_case.get(expanded.case.id, []), key=lambda item: item.run_index
+        )
+        failed = [item for item in case_results if not item.passed]
+        cells.append(
+            {
+                "case_id": expanded.case.id,
+                "object_id": expanded.object_id,
+                "object_label": expanded.object_label,
+                "task_id": expanded.task_id,
+                "task_label": expanded.task_label,
+                "cost_class": expanded.cost_class,
+                "run_count": len(case_results),
+                "passed_runs": sum(item.passed for item in case_results),
+                "orca_attempts": sum(item.observation.orca_attempts for item in case_results),
+                "wall_time_seconds": sum(item.observation.elapsed_seconds for item in case_results),
+                "failed_stages": sorted(
+                    {item.failed_stage for item in failed if item.failed_stage is not None}
+                ),
+                "error_categories": sorted(
+                    {
+                        item.observation.error_category
+                        for item in failed
+                        if item.observation.error_category is not None
+                    }
+                ),
+            }
+        )
+
+    by_task = _aggregate_matrix_cells(cells, "task_id", "task_label")
+    by_object = _aggregate_matrix_cells(cells, "object_id", "object_label")
+    matrix_summary = {
+        "schema": "bg6022.scientific_matrix.v1",
+        "cell_count": len(cells),
+        "run_count": sum(cell["run_count"] for cell in cells),
+        "passed_runs": sum(cell["passed_runs"] for cell in cells),
+        "orca_attempts": sum(cell["orca_attempts"] for cell in cells),
+        "wall_time_seconds": sum(cell["wall_time_seconds"] for cell in cells),
+        "cells": cells,
+        "by_task": by_task,
+        "by_object": by_object,
+    }
+    _write_json(destination / "matrix.json", matrix_summary)
+    (destination / "matrix.md").write_text(render_matrix_markdown(matrix_summary), encoding="utf-8")
+    return matrix_summary
+
+
+def render_matrix_markdown(summary: dict[str, Any]) -> str:
+    cells = summary["cells"]
+    objects: list[tuple[str, str]] = []
+    tasks: list[tuple[str, str]] = []
+    for cell in cells:
+        if (cell["object_id"], cell["object_label"]) not in objects:
+            objects.append((cell["object_id"], cell["object_label"]))
+        if (cell["task_id"], cell["task_label"]) not in tasks:
+            tasks.append((cell["task_id"], cell["task_label"]))
+    by_coordinate = {(cell["task_id"], cell["object_id"]): cell for cell in cells}
+    lines = [
+        "# Scientific Matrix v1",
+        "",
+        f"Enabled cells: {summary['cell_count']}",
+        f"Runs passed: {summary['passed_runs']}/{summary['run_count']}",
+        f"ORCA attempts: {summary['orca_attempts']}",
+        f"Wall time: {summary['wall_time_seconds']:.2f}s",
+        "",
+        "## Task × Scientific Object",
+        "",
+        "| Task / Object | " + " | ".join(label for _, label in objects) + " |",
+        "|---|" + "---|" * len(objects),
+    ]
+    for task_id, task_label in tasks:
+        values = [
+            _format_matrix_cell(by_coordinate.get((task_id, object_id))) for object_id, _ in objects
+        ]
+        lines.append(f"| {task_id} {task_label} | " + " | ".join(values) + " |")
+
+    for heading, key in (("By Task", "by_task"), ("By Object", "by_object")):
+        lines.extend(
+            [
+                "",
+                f"## {heading}",
+                "",
+                "| Name | Cells | Passed runs | ORCA attempts | Wall time |",
+                "|---|---:|---:|---:|---:|",
+            ]
+        )
+        for group in summary[key]:
+            name = f"{group['id']} {group['label']}"
+            lines.append(
+                f"| {name} | {group['cell_count']} | "
+                f"{group['passed_runs']}/{group['run_count']} | "
+                f"{group['orca_attempts']} | {group['wall_time_seconds']:.2f}s |"
+            )
+
+    failures = [cell for cell in cells if cell["passed_runs"] < cell["run_count"]]
+    lines.extend(["", "## Failed cells", ""])
+    if failures:
+        lines.extend(
+            [
+                "| Cell | Passed runs | Failed stage | Error category |",
+                "|---|---:|---|---|",
+            ]
+        )
+        for cell in failures:
+            stage = ", ".join(cell["failed_stages"]) or "unknown"
+            category = ", ".join(cell["error_categories"]) or "unknown"
+            lines.append(
+                f"| {cell['case_id']} | {cell['passed_runs']}/{cell['run_count']} | "
+                f"{stage} | {category} |"
+            )
+    else:
+        lines.append("No failed cells.")
+    return "\n".join(lines) + "\n"
+
+
+def _aggregate_matrix_cells(
+    cells: list[dict[str, Any]], id_key: str, label_key: str
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for cell in cells:
+        groups.setdefault(cell[id_key], []).append(cell)
+    return [
+        {
+            "id": group_id,
+            "label": grouped[0][label_key],
+            "cell_count": len(grouped),
+            "run_count": sum(cell["run_count"] for cell in grouped),
+            "passed_runs": sum(cell["passed_runs"] for cell in grouped),
+            "orca_attempts": sum(cell["orca_attempts"] for cell in grouped),
+            "wall_time_seconds": sum(cell["wall_time_seconds"] for cell in grouped),
+        }
+        for group_id, grouped in groups.items()
+    ]
+
+
+def _format_matrix_cell(cell: dict[str, Any] | None) -> str:
+    if cell is None:
+        return "—"
+    rendered = f"{cell['passed_runs']}/{cell['run_count']}"
+    if cell["passed_runs"] < cell["run_count"]:
+        stages = ", ".join(cell["failed_stages"]) or "unknown stage"
+        categories = ", ".join(cell["error_categories"]) or "unknown error"
+        rendered += f" ({stages}; {categories})"
+    return rendered
+
+
 def render_summary_markdown(summary: dict[str, Any]) -> str:
     dimensions = summary["dimensions"]
     cost = summary["cost"]
@@ -254,9 +410,7 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
         lines.extend([f"Not selected: {len(skipped)} live/holdout cases", ""])
     failures = [item for item in summary["cases"] if not item["passed"]]
     diagnostic_cases = [
-        item
-        for item in summary["cases"]
-        if item.get("observation", {}).get("error_diagnostics")
+        item for item in summary["cases"] if item.get("observation", {}).get("error_diagnostics")
     ]
     if diagnostic_cases:
         lines.extend(["", "## LLM diagnostics", ""])
@@ -269,9 +423,7 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
                 purpose = diagnostic.get("purpose", "llm")
                 category = diagnostic.get("category", "error")
                 message = diagnostic.get("message", "")
-                lines.append(
-                    f"- `{path}` ({purpose}/{category}): {message or 'no detail'}"
-                )
+                lines.append(f"- `{path}` ({purpose}/{category}): {message or 'no detail'}")
             lines.append("")
     if failures:
         lines.extend(["", "## Failed cases", ""])

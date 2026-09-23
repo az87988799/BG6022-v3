@@ -39,3 +39,21 @@ Compare two runs with:
 ```
 
 The summary reports separate capability dimensions, live/replay pass rates, LLM usage, ORCA attempts, critical assertion failures, critical case failures, and execution-safety violations. It also retains structured LLM outputs and schema diagnostics in case records. Compare rejects reports whose benchmark versions differ because their case semantics are not directly comparable.
+
+## Scientific Matrix v1
+
+The separate scientific execution matrix uses fixed neutral-singlet objects
+and 11 selected task/object cells. It makes no LLM or PubChem calls and does
+not enable repair. From the repository root, run:
+
+```powershell
+.venv\Scripts\python.exe -m bg6022.benchmark matrix `
+    benchmarks\scientific_v1 `
+    --live-orca `
+    --config config.toml
+```
+
+The command requires explicit `--live-orca` permission. It writes the standard
+benchmark report plus `matrix.json` and `matrix.md`; see
+[`scientific_v1/README.md`](scientific_v1/README.md) for the cell layout and
+data format.

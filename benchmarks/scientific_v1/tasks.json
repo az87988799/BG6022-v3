@@ -1,0 +1,188 @@
+{
+  "tasks": [
+    {
+      "id": "T001",
+      "label": "r2SCAN-3c single point",
+      "fixture_template": "task_templates/T001_sp_r2scan.json",
+      "cost_class": "low",
+      "assertions": [
+        {
+          "type": "requirement_capabilities",
+          "value": ["single_point"]
+        },
+        {
+          "type": "requirement_method_profiles",
+          "value": ["r2scan3c"]
+        },
+        {
+          "type": "result_status",
+          "value": "succeeded",
+          "critical": true
+        },
+        {
+          "type": "artifact_type_present",
+          "value": "energy_data"
+        },
+        {
+          "type": "max_orca_attempts",
+          "value": 1
+        }
+      ]
+    },
+    {
+      "id": "T002",
+      "label": "r2SCAN-3c optimization",
+      "fixture_template": "task_templates/T002_opt_r2scan.json",
+      "cost_class": "medium",
+      "assertions": [
+        {
+          "type": "requirement_capabilities",
+          "value": ["optimize_geometry"]
+        },
+        {
+          "type": "requirement_method_profiles",
+          "value": ["r2scan3c"]
+        },
+        {
+          "type": "result_status",
+          "value": "succeeded",
+          "critical": true
+        },
+        {
+          "type": "artifact_type_present",
+          "value": [
+            "molecular_geometry",
+            "energy_data"
+          ]
+        },
+        {
+          "type": "max_orca_attempts",
+          "value": 1
+        }
+      ]
+    },
+    {
+      "id": "T003",
+      "label": "r2SCAN-3c optimization and frequencies",
+      "fixture_template": "task_templates/T003_opt_freq_r2scan.json",
+      "cost_class": "high",
+      "assertions": [
+        {
+          "type": "requirement_capabilities",
+          "value": ["optimize_geometry", "frequency"]
+        },
+        {
+          "type": "requirement_method_profiles",
+          "value": ["r2scan3c", "r2scan3c"]
+        },
+        {
+          "type": "step_count",
+          "value": 2
+        },
+        {
+          "type": "input_from_tool_port",
+          "tool": "frequency",
+          "other_tool": "optimize_geometry",
+          "value": "optimized_geometry"
+        },
+        {
+          "type": "scientific_check",
+          "value": {
+            "name": "frequency_complete",
+            "status": "passed"
+          }
+        },
+        {
+          "type": "scientific_check",
+          "value": {
+            "name": "local_minimum_supported",
+            "status": "passed"
+          }
+        },
+        {
+          "type": "result_status",
+          "value": "succeeded",
+          "critical": true
+        },
+        {
+          "type": "max_orca_attempts",
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "T004",
+      "label": "same-geometry dual single point energy difference",
+      "fixture_template": "task_templates/T004_dual_sp_difference.json",
+      "cost_class": "medium",
+      "assertions": [
+        {
+          "type": "requirement_capabilities",
+          "value": [
+            "single_point",
+            "single_point",
+            "same_geometry_method_energy_difference"
+          ]
+        },
+        {
+          "type": "requirement_method_profiles",
+          "value": ["r2scan3c", "pbe0_d3bj_def2svp", null]
+        },
+        {
+          "type": "step_count",
+          "value": 3
+        },
+        {
+          "type": "same_input_geometry",
+          "value": true
+        },
+        {
+          "type": "result_status",
+          "value": "succeeded",
+          "critical": true
+        },
+        {
+          "type": "max_orca_attempts",
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "T005",
+      "label": "independent dual optimization comparison",
+      "fixture_template": "task_templates/T005_dual_opt_compare.json",
+      "cost_class": "high",
+      "assertions": [
+        {
+          "type": "requirement_capabilities",
+          "value": ["optimize_geometry", "optimize_geometry"]
+        },
+        {
+          "type": "requirement_method_profiles",
+          "value": ["r2scan3c", "pbe0_d3bj_def2svp"]
+        },
+        {
+          "type": "step_count",
+          "value": 2
+        },
+        {
+          "type": "requirement_count",
+          "value": 2
+        },
+        {
+          "type": "same_input_geometry",
+          "value": true
+        },
+        {
+          "type": "result_status",
+          "value": "succeeded",
+          "critical": true
+        },
+        {
+          "type": "max_orca_attempts",
+          "value": 2
+        }
+      ]
+    }
+  ]
+}

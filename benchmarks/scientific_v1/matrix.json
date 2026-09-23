@@ -1,0 +1,48 @@
+{
+  "cells": [
+    {
+      "object_id": "h2",
+      "task_id": "T001"
+    },
+    {
+      "object_id": "water",
+      "task_id": "T001"
+    },
+    {
+      "object_id": "water",
+      "task_id": "T002"
+    },
+    {
+      "object_id": "water",
+      "task_id": "T003"
+    },
+    {
+      "object_id": "water",
+      "task_id": "T004"
+    },
+    {
+      "object_id": "water",
+      "task_id": "T005"
+    },
+    {
+      "object_id": "ammonia",
+      "task_id": "T002"
+    },
+    {
+      "object_id": "ammonia",
+      "task_id": "T003"
+    },
+    {
+      "object_id": "co2",
+      "task_id": "T003"
+    },
+    {
+      "object_id": "methane",
+      "task_id": "T002"
+    },
+    {
+      "object_id": "ethanol",
+      "task_id": "T002"
+    }
+  ]
+}

@@ -63,9 +63,7 @@ def fixture_reference_path(
         raise BenchmarkConfigurationError(f"{label} cannot use a symlink")
     candidate = raw_candidate.resolve()
     if candidate != root and root not in candidate.parents:
-        raise BenchmarkConfigurationError(
-            f"{label} must remain inside {root}: {reference}"
-        )
+        raise BenchmarkConfigurationError(f"{label} must remain inside {root}: {reference}")
     if not candidate.is_file() or candidate.is_symlink():
         raise BenchmarkConfigurationError(f"{label} is not a regular file")
     return candidate

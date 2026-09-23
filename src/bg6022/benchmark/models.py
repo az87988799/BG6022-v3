@@ -173,9 +173,7 @@ class LiveSetup(BenchmarkModel):
                     "a waiting Run needs waiting_for and cannot seed a published Result"
                 )
         elif self.waiting_for is not None or not self.published_result_fixture:
-            raise ValueError(
-                "a succeeded Run needs published_result_fixture and cannot be waiting"
-            )
+            raise ValueError("a succeeded Run needs published_result_fixture and cannot be waiting")
         return self
 
 

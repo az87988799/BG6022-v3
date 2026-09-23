@@ -150,9 +150,7 @@ def test_fresh_session_separates_results_from_capabilities_and_blocks_unsupporte
     assert observation.intake["unresolved_requirements"]
 
 
-def test_live_agent_retries_a_locally_invalid_planner_proposal(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_live_agent_retries_a_locally_invalid_planner_proposal(monkeypatch, tmp_path: Path) -> None:
     planner_contexts = []
 
     def scripted(purpose, messages):
@@ -196,9 +194,7 @@ def test_live_agent_retries_a_locally_invalid_planner_proposal(
                             "charge": 0,
                             "multiplicity": 1,
                         },
-                        "inputs": {
-                            "geometry": {"artifact_alias": "request_geometry"}
-                        },
+                        "inputs": {"geometry": {"artifact_alias": "request_geometry"}},
                     }
                 ],
                 "requested_results": [target],

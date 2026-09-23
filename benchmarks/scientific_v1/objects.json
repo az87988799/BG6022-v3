@@ -1,0 +1,70 @@
+{
+  "objects": [
+    {
+      "id": "h2",
+      "label": "H2",
+      "geometry": "geometries/h2.xyz",
+      "charge": 0,
+      "multiplicity": 1,
+      "tags": [
+        "diatomic",
+        "baseline"
+      ]
+    },
+    {
+      "id": "water",
+      "label": "H2O",
+      "geometry": "geometries/water.xyz",
+      "charge": 0,
+      "multiplicity": 1,
+      "tags": [
+        "nonlinear",
+        "main-benchmark"
+      ]
+    },
+    {
+      "id": "ammonia",
+      "label": "NH3",
+      "geometry": "geometries/ammonia.xyz",
+      "charge": 0,
+      "multiplicity": 1,
+      "tags": [
+        "nonlinear",
+        "nitrogen"
+      ]
+    },
+    {
+      "id": "co2",
+      "label": "CO2",
+      "geometry": "geometries/co2.xyz",
+      "charge": 0,
+      "multiplicity": 1,
+      "tags": [
+        "linear",
+        "frequency"
+      ]
+    },
+    {
+      "id": "methane",
+      "label": "CH4",
+      "geometry": "geometries/methane.xyz",
+      "charge": 0,
+      "multiplicity": 1,
+      "tags": [
+        "symmetric",
+        "nonlinear"
+      ]
+    },
+    {
+      "id": "ethanol",
+      "label": "ethanol",
+      "geometry": "geometries/ethanol.xyz",
+      "charge": 0,
+      "multiplicity": 1,
+      "tags": [
+        "flexible",
+        "larger-molecule"
+      ]
+    }
+  ]
+}

@@ -81,8 +81,6 @@ def test_llm_schema_diagnostics_and_structured_outputs_reach_report(
     report = (report_dir / "summary.md").read_text(encoding="utf-8")
     assert "answer_goals.0.output" in report
     assert "expected a declared result field" in report
-    failure = (report_dir / "failures" / "B001_single_opt_1.json").read_text(
-        encoding="utf-8"
-    )
+    failure = (report_dir / "failures" / "B001_single_opt_1.json").read_text(encoding="utf-8")
     assert "llm_structured_outputs" in failure
     assert "error_diagnostics" in failure

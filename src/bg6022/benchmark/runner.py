@@ -59,9 +59,12 @@ def run_case(
     allow_live_pubchem: bool = False,
     benchmark_dir: str | Path,
     data_root: str | Path | None = None,
+    fixture_override: dict[str, Any] | None = None,
 ) -> list[CaseObservation]:
     """Run the requested repetitions; live work is impossible without explicit flags."""
 
+    if fixture_override is not None and case.mode != "live_orca":
+        raise ValueError("fixture_override is only supported for live ORCA benchmark cases")
     _check_live_permissions(
         case,
         allow_live_llm=allow_live_llm,
@@ -96,6 +99,7 @@ def run_case(
                 benchmark_dir=benchmark_dir,
                 config=_required_config(config),
                 data_root=data_root,
+                fixture_override=fixture_override,
             )
         else:
             observation = _run_live_e2e(
@@ -441,9 +445,7 @@ def _run_live_llm(
     try:
         fixture = load_fixture(case, benchmark_dir) if case.fixture is not None else {}
         try:
-            live_setup = LiveSetup.model_validate(
-                fixture.get("live_setup", {}), strict=True
-            )
+            live_setup = LiveSetup.model_validate(fixture.get("live_setup", {}), strict=True)
         except (TypeError, ValueError) as error:
             raise BenchmarkConfigurationError(
                 f"invalid live_setup for case {case.id}: {error}"
@@ -570,18 +572,14 @@ def _seed_live_scenario(
             setup.published_result_fixture, benchmark_dir
         )
         try:
-            result_fixture = LiveResultFixture.model_validate(
-                result_fixture_payload, strict=True
-            )
+            result_fixture = LiveResultFixture.model_validate(result_fixture_payload, strict=True)
         except (TypeError, ValueError) as error:
             raise BenchmarkConfigurationError(
                 f"invalid published result fixture for {case_id}: {error}"
             ) from error
         _publish_live_result_fixture(agent, run, result_fixture, benchmark_dir, registry)
     else:
-        raise BenchmarkConfigurationError(
-            f"active Run for {case_id} needs a supported status"
-        )
+        raise BenchmarkConfigurationError(f"active Run for {case_id} needs a supported status")
 
     agent._session["active_run_id"] = run.id
     if setup.active_run_status == "succeeded":
@@ -634,9 +632,7 @@ def _seed_live_result_delivery(agent: _PlanningBarrierAgent, run: Run) -> None:
         )
     prior = agent._session.get("last_delivery", [])
     existing = (
-        [dict(item) for item in prior if isinstance(item, dict)]
-        if isinstance(prior, list)
-        else []
+        [dict(item) for item in prior if isinstance(item, dict)] if isinstance(prior, list) else []
     )
     agent._session["last_delivery"] = [*existing, *locators][-8:]
     agent._save_session()
@@ -907,11 +903,7 @@ def _flatten_llm_errors(errors: list[dict[str, Any]]) -> list[dict[str, str]]:
                 if isinstance(item, dict):
                     flattened.append(
                         context
-                        | {
-                            key: str(item[key])
-                            for key in ("path", "message")
-                            if key in item
-                        }
+                        | {key: str(item[key]) for key in ("path", "message") if key in item}
                     )
         else:
             flattened.append(context | {"message": str(error.get("message", ""))})
@@ -938,9 +930,12 @@ def _run_live_orca(
     benchmark_dir: str | Path,
     config: AppConfig,
     data_root: str | Path | None,
+    fixture_override: dict[str, Any] | None = None,
 ) -> CaseObservation:
     started = time.monotonic()
-    fixture = load_fixture(case, benchmark_dir)
+    fixture = (
+        fixture_override if fixture_override is not None else load_fixture(case, benchmark_dir)
+    )
     registry = build_registry(config)
     try:
         _validate_compute_budget(config)
