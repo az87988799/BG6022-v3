@@ -304,12 +304,35 @@ class _QueuedMessage:
     confirmation_queued: bool = False
 
 
+class _DisplayedConfirmation:
+    """Snapshot only the confirmation preview that the display loop showed."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._token: tuple[str, str] | None = None
+
+    def observe(self, agent: Agent, response: AgentResponse) -> None:
+        run = response.run
+        token = (
+            agent.confirmation_token(run)
+            if run is not None and run.waiting_for == "confirmation"
+            else None
+        )
+        with self._lock:
+            self._token = token
+
+    def snapshot(self) -> tuple[str, str] | None:
+        with self._lock:
+            return self._token
+
+
 def _chat_loop(agent: Agent) -> int:
     """Keep input, display, and the one Agent worker separate."""
 
     incoming: queue.Queue[_QueuedMessage | None] = queue.Queue()
     outgoing: queue.Queue[AgentResponse] = queue.Queue()
     stop_input = threading.Event()
+    displayed_confirmation = _DisplayedConfirmation()
 
     def read_input() -> None:
         while not stop_input.is_set():
@@ -332,7 +355,7 @@ def _chat_loop(agent: Agent) -> int:
                 }:
                     agent.request_cancel()
                 if normalized in {"/confirm", "confirm", "确认"}:
-                    token = agent.confirmation_token()
+                    token = displayed_confirmation.snapshot()
                     incoming.put(
                         _QueuedMessage(
                             message,
@@ -391,6 +414,7 @@ def _chat_loop(agent: Agent) -> int:
             except queue.Empty:
                 continue
             print(response.text)
+            displayed_confirmation.observe(agent, response)
             if response.text.startswith("Exiting after"):
                 exiting = True
                 stop_input.set()

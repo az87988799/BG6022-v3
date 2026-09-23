@@ -47,6 +47,7 @@ from bg6022.tools.pubchem import (
     fetch_pubchem,
 )
 from bg6022.tools.registry import build_registry
+from tests.support.admitted_adapter import execute_adapter_under_test_gateway
 
 
 def _config(tmp_path: Path):
@@ -61,6 +62,17 @@ data_root = 'data'
         encoding="utf-8",
     )
     return load_config(path)
+
+
+def _execute_adapter(config, step: Step, run: Run, adapter):
+    tool = build_registry(config).get(step.tool)
+    return execute_adapter_under_test_gateway(
+        config,
+        run,
+        step,
+        tool,
+        lambda: adapter(config, step=step, run=run, cancel=Event()),
+    )
 
 
 def _run_for_resolve(tmp_path: Path, identity: dict[str, object]) -> tuple[object, Step, Run]:
@@ -186,7 +198,7 @@ def test_co2_geometry_generation_uses_verified_no_hydrogen_composition(tmp_path:
         extension=".json",
     )
     step.inputs["molecule"] = InputReference(artifact_id=molecule.id)
-    result = execute_generate_geometry(config, step=step, run=run, cancel=Event())
+    result = _execute_adapter(config, step, run, execute_generate_geometry)
     assert result.status == "succeeded"
     geometry = next(
         item for item in run.artifact_index if item.id == result.output_ports["geometry"]
@@ -591,7 +603,7 @@ def test_formula_resolution_returns_bounded_candidates_and_raw_sources(
         returned_cid_count=2,
     )
     monkeypatch.setattr("bg6022.tools.pubchem.fetch_pubchem", lambda *args, **kwargs: lookup)
-    result = execute_resolve_molecule(config, step=step, run=run, cancel=Event())
+    result = _execute_adapter(config, step, run, execute_resolve_molecule)
     assert result.status == "needs_input"
     assert result.diagnostics["category"] == "ambiguous_molecule"
     assert len(result.clarification["candidates"]) == 2
@@ -618,7 +630,7 @@ def test_formula_resolution_marks_no_match_as_identity_failure(tmp_path: Path, m
         returned_cid_count=1,
     )
     monkeypatch.setattr("bg6022.tools.pubchem.fetch_pubchem", lambda *args, **kwargs: lookup)
-    result = execute_resolve_molecule(config, step=step, run=run, cancel=Event())
+    result = _execute_adapter(config, step, run, execute_resolve_molecule)
     assert result.status == "needs_input"
     assert result.diagnostics["category"] == "molecule_identity_not_found"
     assert result.output_ports == {}
@@ -649,7 +661,7 @@ def test_formula_resolution_ignores_verified_exclusions_when_one_structure_is_un
         returned_cid_count=2,
     )
     monkeypatch.setattr("bg6022.tools.pubchem.fetch_pubchem", lambda *args, **kwargs: lookup)
-    result = execute_resolve_molecule(config, step=step, run=run, cancel=Event())
+    result = _execute_adapter(config, step, run, execute_resolve_molecule)
     assert result.status == "succeeded"
     assert result.diagnostics["accepted_structure_count"] == 1
     assert result.diagnostics["excluded_candidates"][0]["reason_code"] == "excluded_charged"
@@ -680,7 +692,7 @@ def test_formula_resolution_deduplicates_same_verified_structure_and_keeps_sourc
         returned_cid_count=2,
     )
     monkeypatch.setattr("bg6022.tools.pubchem.fetch_pubchem", lambda *args, **kwargs: lookup)
-    result = execute_resolve_molecule(config, step=step, run=run, cancel=Event())
+    result = _execute_adapter(config, step, run, execute_resolve_molecule)
     assert result.status == "succeeded"
     assert result.diagnostics["accepted_structure_count"] == 1
     molecule = next(
@@ -710,7 +722,7 @@ def test_formula_resolution_does_not_auto_accept_unverified_source_record(
         returned_cid_count=2,
     )
     monkeypatch.setattr("bg6022.tools.pubchem.fetch_pubchem", lambda *args, **kwargs: lookup)
-    result = execute_resolve_molecule(config, step=step, run=run, cancel=Event())
+    result = _execute_adapter(config, step, run, execute_resolve_molecule)
     assert result.status == "needs_input"
     assert result.diagnostics["category"] == "molecule_source_unverified"
     assert result.diagnostics["unverified_candidates"][0]["cid"] == 2
@@ -738,7 +750,7 @@ def test_formula_resolution_reports_incomplete_search_even_with_one_candidate(
         candidates_truncated=True,
     )
     monkeypatch.setattr("bg6022.tools.pubchem.fetch_pubchem", lambda *args, **kwargs: lookup)
-    result = execute_resolve_molecule(config, step=step, run=run, cancel=Event())
+    result = _execute_adapter(config, step, run, execute_resolve_molecule)
     assert result.status == "needs_input"
     assert result.diagnostics["category"] == "molecule_search_incomplete"
 
@@ -759,7 +771,7 @@ def test_name_not_found_preserves_identity_task_for_name_supplement(
         raise PubChemError("PubChem found no structure", category="not_found")
 
     monkeypatch.setattr("bg6022.tools.pubchem.fetch_pubchem", missing)
-    result = execute_resolve_molecule(config, step=step, run=run, cancel=Event())
+    result = _execute_adapter(config, step, run, execute_resolve_molecule)
     assert result.status == "needs_input"
     assert result.diagnostics["category"] == "molecule_name_not_found"
     assert result.diagnostics["raw_query"] == "乙烷"
@@ -784,7 +796,7 @@ def test_direct_tool_rejects_selected_cid_binding_before_network(
         raise AssertionError("identity binding must fail before PubChem")
 
     monkeypatch.setattr("bg6022.tools.pubchem.fetch_pubchem", unexpected_fetch)
-    result = execute_resolve_molecule(config, step=step, run=run, cancel=Event())
+    result = _execute_adapter(config, step, run, execute_resolve_molecule)
     assert result.status == "failed"
     assert result.diagnostics["category"] == "identity_binding"
     assert result.output_ports == {}
@@ -819,7 +831,7 @@ def test_selected_cid_and_structure_are_both_required(
         source_responses=({"url": "test:cid", "raw_bytes": b"cid"},),
     )
     monkeypatch.setattr("bg6022.tools.pubchem.fetch_pubchem", lambda *args, **kwargs: lookup)
-    result = execute_resolve_molecule(config, step=step, run=run, cancel=Event())
+    result = _execute_adapter(config, step, run, execute_resolve_molecule)
     assert result.status == "failed"
     assert result.diagnostics["category"] == "identity_mismatch"
     assert result.output_ports == {}

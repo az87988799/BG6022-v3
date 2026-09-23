@@ -7,7 +7,8 @@ from typing import Any
 import pytest
 
 from bg6022 import execution
-from bg6022.agent import Agent, _step_fingerprint
+from bg6022.agent import Agent, AgentResponse, _step_fingerprint
+from bg6022.cli import _DisplayedConfirmation
 from bg6022.config import load_config
 from bg6022.models import Plan, Request, Result, ResultTarget, Run, Step, Tool
 from bg6022.session import (
@@ -99,6 +100,24 @@ def _success(step: Step, run: Run, attempt: int, *, value: str = "ok") -> Result
     )
 
 
+def _store_unindexed_result(
+    config: Any, run: Run, step: Step, *, status: str, value: str = "ok"
+) -> Result:
+    context = execution.begin_attempt(config.data_root_path, run, step)
+    result = _success(step, run, context.attempt, value=value).model_copy(
+        update={
+            "status": status,
+            "values": {"value": value} if status == "succeeded" else {},
+            "diagnostics": {"category": status, "reason": f"stored {status}"},
+        }
+    )
+    result.step_fingerprint = _step_fingerprint(step)
+    execution.finish_attempt(run, context, result, persist=True, release=False)
+    execution.persist_result(config.data_root_path, run, result)
+    execution.release_attempt(run, context)
+    return result
+
+
 def test_advance_reloads_authoritative_state_and_never_falls_back_on_corruption(
     tmp_path: Path,
 ) -> None:
@@ -173,6 +192,85 @@ def test_run_owner_is_scoped_by_normalized_root_and_run_id(tmp_path: Path) -> No
             pass
 
 
+def test_public_tool_entry_rejects_execution_without_owner_admission(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def execute(step: Step, run: Run, _cancel: Event) -> Result:
+        calls.append(step.id)
+        return _success(step, run, 1)
+
+    config = _config(tmp_path)
+    tool = _tool("unadmitted", execute)
+    run = _run(config, tool)
+    step = run.plan.steps[0]
+
+    with pytest.raises(execution.AttemptLifecycleError, match="Agent.advance"):
+        tool.execute(step, run, cancel=Event())
+
+    assert calls == []
+    assert run.attempts == []
+
+
+def test_agent_budget_admission_stops_before_allocating_attempt(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def execute(step: Step, run: Run, _cancel: Event) -> Result:
+        calls.append(step.id)
+        return _success(step, run, 1)
+
+    config = _config(tmp_path)
+    tool = _tool("budget_denied", execute).model_copy(
+        update={"attempt_reservation_function": lambda _run, _step: False}
+    )
+    registry = ToolRegistry([tool])
+    run = _run(config, tool)
+
+    Agent(config, registry, llm=object()).advance(run)
+
+    durable = load_run(config.data_root_path, run.id)
+    assert durable.status == "failed"
+    assert durable.attempts == []
+    assert calls == []
+
+
+def test_agent_busy_owner_does_not_allocate_or_execute(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def execute(step: Step, run: Run, _cancel: Event) -> Result:
+        calls.append(step.id)
+        return _success(step, run, 1)
+
+    config = _config(tmp_path)
+    tool = _tool("busy_owner", execute)
+    registry = ToolRegistry([tool])
+    run = _run(config, tool)
+    agent = Agent(config, registry, llm=object())
+
+    with execution.RunOwner(config.data_root_path, run.id):
+        agent.advance(run)
+
+    durable = load_run(config.data_root_path, run.id)
+    assert durable.status == "planned"
+    assert durable.attempts == []
+    assert calls == []
+
+
+def test_cancel_busy_owner_does_not_claim_remote_signal_was_delivered(tmp_path: Path) -> None:
+    def execute(step: Step, run: Run, _cancel: Event) -> Result:
+        return _success(step, run, 1)
+
+    config = _config(tmp_path)
+    tool = _tool("cancel_busy_owner", execute)
+    run = _run(config, tool)
+    agent = Agent(config, ToolRegistry([tool]), llm=object())
+
+    with execution.RunOwner(config.data_root_path, run.id):
+        response = agent.cancel(run.id)
+
+    assert "无法确认对方已收到取消请求" in response.text
+    assert load_run(config.data_root_path, run.id).status == "planned"
+
+
 def test_candidate_result_is_rejected_before_result_publish(tmp_path: Path) -> None:
     config = _config(tmp_path)
 
@@ -226,6 +324,150 @@ def test_recovery_indexes_verified_result_without_restarting_tool(tmp_path: Path
     assert load_run(config.data_root_path, run.id).status == "succeeded"
 
 
+def test_recovery_of_latest_failed_result_stops_without_restarting_tool(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    def execute(step: Step, run: Run, _cancel: Event) -> Result:
+        calls.append(step.id)
+        return _success(step, run, 1)
+
+    config = _config(tmp_path)
+    tool = _tool("recovery_failed", execute)
+    run = _run(config, tool)
+    step = run.plan.steps[0]
+    _store_unindexed_result(config, run, step, status="failed")
+
+    Agent(config, ToolRegistry([tool]), llm=object()).advance(run)
+
+    durable = load_run(config.data_root_path, run.id)
+    assert durable.status == "failed"
+    assert durable.step_status[step.id] == "failed"
+    assert durable.pending_data["recovered_attempt"] == 1
+    assert calls == []
+
+
+@pytest.mark.parametrize("status", ["cancelled", "interrupted"])
+def test_recovery_of_latest_stopped_result_does_not_restart_tool(
+    tmp_path: Path, status: str
+) -> None:
+    calls: list[str] = []
+
+    def execute(step: Step, run: Run, _cancel: Event) -> Result:
+        calls.append(step.id)
+        return _success(step, run, 1)
+
+    config = _config(tmp_path)
+    tool = _tool(f"recovery_{status}", execute)
+    run = _run(config, tool)
+    step = run.plan.steps[0]
+    _store_unindexed_result(config, run, step, status=status)
+
+    Agent(config, ToolRegistry([tool]), llm=object()).advance(run)
+
+    durable = load_run(config.data_root_path, run.id)
+    assert durable.status == status
+    assert durable.step_status[step.id] == status
+    assert calls == []
+
+
+def test_recovered_needs_input_waits_until_user_changes_step_revision(
+    tmp_path: Path,
+) -> None:
+    calls: list[int] = []
+
+    def execute(step: Step, run: Run, _cancel: Event) -> Result:
+        context = execution.active_attempt(run, step.id)
+        assert context is not None
+        calls.append(context.attempt)
+        return _success(step, run, context.attempt)
+
+    config = _config(tmp_path)
+    tool = _tool("recovery_needs_input", execute)
+    run = _run(config, tool)
+    step = run.plan.steps[0]
+    _store_unindexed_result(config, run, step, status="needs_input")
+    agent = Agent(config, ToolRegistry([tool]), llm=object())
+
+    agent.advance(run)
+    waiting = load_run(config.data_root_path, run.id)
+    assert waiting.status == "waiting"
+    assert waiting.waiting_for == "clarification"
+    assert calls == []
+
+    agent.advance(waiting)
+    assert calls == []
+    assert load_run(config.data_root_path, run.id).attempts[-1]["attempt"] == 1
+
+    revised = load_run(config.data_root_path, run.id)
+    changed_step = revised.plan.steps[0].model_copy(
+        update={"parameters": {"user_supplement": "verified"}}
+    )
+    revised.plan = revised.plan.model_copy(update={"revision": 2, "steps": [changed_step]})
+    revised.status = "running"
+    revised.waiting_for = None
+    revised.pending_data = {}
+    save_run(config.data_root_path, revised)
+
+    result = agent.advance(revised)
+
+    durable = load_run(config.data_root_path, run.id)
+    assert result is not None and result.status == "succeeded"
+    assert durable.status == "succeeded"
+    assert calls == [2]
+
+
+def test_newer_unknown_attempt_blocks_older_verified_success(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def execute(step: Step, run: Run, _cancel: Event) -> Result:
+        calls.append(step.id)
+        return _success(step, run, 2)
+
+    config = _config(tmp_path)
+    tool = _tool("recovery_new_unknown", execute)
+    run = _run(config, tool)
+    step = run.plan.steps[0]
+    _store_unindexed_result(config, run, step, status="succeeded", value="older")
+    context = execution.begin_attempt(config.data_root_path, run, step)
+    context.record["phase"] = "started"
+    execution.persist_run(config.data_root_path, run)
+    execution.release_attempt(run, context)
+
+    Agent(config, ToolRegistry([tool]), llm=object()).advance(run)
+
+    durable = load_run(config.data_root_path, run.id)
+    assert durable.status == "interrupted"
+    assert durable.pending_data["category"] == "recovery_unknown"
+    assert step.id not in durable.current_results
+    assert calls == []
+
+
+def test_newer_verified_success_supersedes_older_failure(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def execute(step: Step, run: Run, _cancel: Event) -> Result:
+        calls.append(step.id)
+        return _success(step, run, 3)
+
+    config = _config(tmp_path)
+    tool = _tool("recovery_new_success", execute)
+    run = _run(config, tool)
+    step = run.plan.steps[0]
+    _store_unindexed_result(config, run, step, status="failed")
+    latest = _store_unindexed_result(config, run, step, status="succeeded", value="latest")
+
+    recovered = Agent(config, ToolRegistry([tool]), llm=object()).advance(run)
+
+    durable = load_run(config.data_root_path, run.id)
+    assert durable.status == "succeeded"
+    assert durable.step_status[step.id] == "succeeded"
+    assert durable.current_results[step.id].endswith("attempt-02/result.json")
+    assert recovered is not None and recovered.values["value"] == latest.values["value"]
+    assert calls == []
+
+
 def test_queued_confirmation_requires_the_captured_preview_version(tmp_path: Path) -> None:
     calls: list[str] = []
 
@@ -241,7 +483,9 @@ def test_queued_confirmation_requires_the_captured_preview_version(tmp_path: Pat
     agent = Agent(config, registry, llm=object())
     agent._prepare_confirmation(run, run.plan.steps[0])
     save_run(config.data_root_path, run)
-    token = agent.confirmation_token(run.id)
+    displayed = _DisplayedConfirmation()
+    displayed.observe(agent, AgentResponse("preview A", run=run))
+    token = displayed.snapshot()
     assert token is not None
 
     changed = load_run(config.data_root_path, run.id)
@@ -249,6 +493,7 @@ def test_queued_confirmation_requires_the_captured_preview_version(tmp_path: Pat
         update={"steps": [changed.plan.steps[0].model_copy(update={"parameters": {"revision": 2}})]}
     )
     save_run(config.data_root_path, changed)
+    assert displayed.snapshot() == token
 
     response = agent.confirm(
         presented_run_id=token[0],
@@ -288,6 +533,4 @@ def test_final_run_checkpoint_failure_preserves_committed_result_but_not_success
     assert run.status == "failed"
     assert run.step_status["step"] == "succeeded"
     assert run.current_results["step"].endswith("result.json")
-    assert load_run(config.data_root_path, run.id).current_results["step"].endswith(
-        "result.json"
-    )
+    assert load_run(config.data_root_path, run.id).current_results["step"].endswith("result.json")

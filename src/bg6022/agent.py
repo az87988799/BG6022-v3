@@ -929,8 +929,18 @@ class Agent:
                     run.finish_active_interval()
                     execution.persist_run(self.config.data_root_path, run)
                     return last_result
+                owner = self._owned_run_owners.get((get_ident(), run.id))
+                if owner is None or not owner.is_held:
+                    raise execution.AttemptLifecycleError(
+                        "Run advancement has no active owner admission"
+                    )
                 attempt_context = execution.begin_attempt(
-                    self.config.data_root_path, run, step
+                    self.config.data_root_path,
+                    run,
+                    step,
+                    owner=owner,
+                    budget_reserved=True,
+                    step_fingerprint=_step_fingerprint(step),
                 )
                 try:
                     result = tool.execute(step, run, cancel=cancel_event)
@@ -1077,7 +1087,7 @@ class Agent:
             )
 
     def _recover_unfinished_run(self, run: Run) -> bool:
-        """Index only verifiable finished attempts; stop on unknown work."""
+        """Recover the newest verified attempt for each current Step revision."""
 
         try:
             guard = read_execution_guard(self.config.data_root_path)
@@ -1110,12 +1120,119 @@ class Agent:
         blocked: list[dict[str, Any]] = []
         root = run_directory(self.config.data_root_path, run.id).resolve()
         for step in run.plan.steps:
-            if step.id in run.current_results:
+            step_dir = root / step.id
+            if step_dir.is_symlink() or (step_dir.exists() and not step_dir.is_dir()):
+                blocked.append(
+                    {"step_id": step.id, "reason": "Step attempt path is not a regular directory"}
+                )
                 continue
-            candidates = self._recovery_result_candidates(root, run, step)
-            valid: list[tuple[int, Result, Path]] = []
-            for attempt, result, path in candidates:
+            directories: dict[int, Path] = {}
+            malformed_directories: list[str] = []
+            if step_dir.is_dir():
+                for item in step_dir.glob("attempt-*"):
+                    try:
+                        attempt_number = int(item.name.removeprefix("attempt-"))
+                    except ValueError:
+                        if item.is_dir() or item.is_symlink() or item.is_file():
+                            malformed_directories.append(item.name)
+                        continue
+                    if (
+                        attempt_number < 1
+                        or attempt_number in directories
+                        or (not item.is_dir() and not item.is_symlink())
+                    ):
+                        malformed_directories.append(item.name)
+                        continue
+                    directories[attempt_number] = item
+
+            records_by_attempt: dict[int, list[dict[str, Any]]] = {}
+            for record in run.attempts:
+                if record.get("step_id") != step.id:
+                    continue
                 try:
+                    attempt_number = int(record.get("attempt", 0))
+                except (TypeError, ValueError):
+                    blocked.append(
+                        {"step_id": step.id, "reason": "attempt record has an invalid number"}
+                    )
+                    continue
+                if attempt_number < 1:
+                    blocked.append(
+                        {"step_id": step.id, "reason": "attempt record has an invalid number"}
+                    )
+                    continue
+                records_by_attempt.setdefault(attempt_number, []).append(record)
+
+            attempt_numbers = set(directories) | set(records_by_attempt)
+            if not attempt_numbers:
+                if malformed_directories:
+                    blocked.append(
+                        {
+                            "step_id": step.id,
+                            "directories": malformed_directories,
+                            "reason": "attempt directory name cannot be ordered safely",
+                        }
+                    )
+                continue
+            latest_attempt = max(attempt_numbers)
+            if malformed_directories:
+                blocked.append(
+                    {
+                        "step_id": step.id,
+                        "attempt": latest_attempt,
+                        "directories": malformed_directories,
+                        "reason": "attempt directory name cannot be ordered safely",
+                    }
+                )
+                continue
+            attempt_dir = directories.get(latest_attempt)
+            result_path = attempt_dir / "result.json" if attempt_dir is not None else None
+            has_result_path = bool(
+                result_path is not None and (result_path.exists() or result_path.is_symlink())
+            )
+            latest_records = records_by_attempt.get(latest_attempt, [])
+            if len(latest_records) > 1:
+                blocked.append(
+                    {
+                        "step_id": step.id,
+                        "attempt": latest_attempt,
+                        "reason": "multiple lifecycle records claim the latest attempt",
+                    }
+                )
+                continue
+            latest_record = latest_records[-1] if latest_records else None
+
+            if has_result_path:
+                try:
+                    if (
+                        result_path is None
+                        or attempt_dir is None
+                        or attempt_dir.is_symlink()
+                        or result_path.is_symlink()
+                        or not result_path.is_file()
+                    ):
+                        raise ValueError("latest attempt Result path is not a regular file")
+                    resolved_result_path = result_path.resolve()
+                    if root not in resolved_result_path.parents:
+                        raise ValueError("latest attempt Result path escapes the Run directory")
+                    result = Result.model_validate(
+                        json.loads(resolved_result_path.read_text(encoding="utf-8")), strict=True
+                    )
+                    if (
+                        result.run_id != run.id
+                        or result.step_id != step.id
+                        or result.attempt != latest_attempt
+                    ):
+                        raise ValueError("latest attempt Result identity does not match its path")
+                    if result.step_fingerprint != _step_fingerprint(step):
+                        recovered.append(
+                            {
+                                "step_id": step.id,
+                                "attempt": latest_attempt,
+                                "status": "superseded_revision",
+                            }
+                        )
+                        continue
                     expected = self._expected_input_bindings(run, step)
                     execution.validate_result_candidate(
                         run,
@@ -1124,92 +1241,140 @@ class Agent:
                         expected_input_bindings=expected,
                         tool=self.registry.get(step.tool),
                     )
-                    if (
-                        result.status != "needs_input"
-                        and result.step_fingerprint != _step_fingerprint(step)
-                    ):
-                        raise execution.AttemptLifecycleError(
-                            "recovered Result fingerprint is stale"
-                        )
                     for artifact_id in [*result.artifact_ids, *result.input_artifact_ids]:
                         artifact = find_artifact(run, artifact_id)
                         artifact_path(self.config.data_root_path, run, artifact)
-                except (OSError, ValueError, execution.AttemptLifecycleError) as error:
+                except (
+                    OSError,
+                    json.JSONDecodeError,
+                    TypeError,
+                    ValueError,
+                    execution.AttemptLifecycleError,
+                ) as error:
                     blocked.append(
-                        {"step_id": step.id, "attempt": attempt, "reason": str(error)}
-                    )
-                    continue
-                valid.append((attempt, result, path))
-            if valid:
-                attempt, result, path = max(valid, key=lambda item: item[0])
-                relative = path.relative_to(root).as_posix()
-                if relative not in run.result_index:
-                    run.result_index.append(relative)
-                if result.status == "needs_input":
-                    # A clarification Result is a completed stopped attempt,
-                    # not a current scientific output.  After the user has
-                    # supplied the missing input, allow the same Step to be
-                    # prepared again without treating its old directory as
-                    # an unknown in-flight process.
-                    run.step_status.pop(step.id, None)
-                else:
-                    run.step_status[step.id] = result.status
-                if result.status == "succeeded":
-                    run.current_results[step.id] = relative
-                record = next(
-                    (
-                        item
-                        for item in run.attempts
-                        if item.get("step_id") == step.id and item.get("attempt") == attempt
-                    ),
-                    None,
-                )
-                if record is None:
-                    run.attempts.append(
                         {
                             "step_id": step.id,
-                            "attempt": attempt,
-                            "relative_path": str(path.parent.relative_to(root).as_posix()),
-                            "phase": "finished",
-                            "status": result.status,
-                            "artifact_ids": list(result.artifact_ids),
-                            "output_ports": dict(result.output_ports),
-                            "recovered": True,
+                            "attempt": latest_attempt,
+                            "reason": str(error),
                         }
                     )
-                else:
-                    record.update(
-                        {
-                            "phase": "finished",
-                            "status": result.status,
-                            "artifact_ids": list(result.artifact_ids),
-                            "output_ports": dict(result.output_ports),
-                            "recovered": True,
-                        }
-                    )
-                recovered.append({"step_id": step.id, "attempt": attempt, "path": relative})
-                continue
+                    continue
 
-            step_dir = root / step.id
+                relative = resolved_result_path.relative_to(root).as_posix()
+                if relative not in run.result_index:
+                    run.result_index.append(relative)
+                record = latest_record
+                if record is None:
+                    record = {
+                        "step_id": step.id,
+                        "attempt": latest_attempt,
+                        "relative_path": attempt_dir.relative_to(root).as_posix(),
+                    }
+                    run.attempts.append(record)
+                record.update(
+                    {
+                        "phase": "finished",
+                        "status": result.status,
+                        "artifact_ids": list(result.artifact_ids),
+                        "output_ports": dict(result.output_ports),
+                        "input_artifact_ids": list(result.input_artifact_ids),
+                        "step_fingerprint": result.step_fingerprint,
+                        "recovered": True,
+                    }
+                )
+                recovered.append(
+                    {
+                        "step_id": step.id,
+                        "attempt": latest_attempt,
+                        "path": relative,
+                        "status": result.status,
+                    }
+                )
+                if result.status == "succeeded":
+                    run.step_status[step.id] = "succeeded"
+                    run.current_results[step.id] = relative
+                    continue
+
+                run.current_results.pop(step.id, None)
+                run.step_status[step.id] = result.status
+                run.finish_active_interval()
+                if result.status == "needs_input":
+                    run.status = "waiting"
+                    run.waiting_for = "clarification"
+                    run.pending_data = {
+                        **result.diagnostics,
+                        **result.clarification,
+                        "step_id": step.id,
+                        "result_path": relative,
+                        "recovered": True,
+                    }
+                else:
+                    run.status = result.status
+                    run.waiting_for = None
+                    run.pending_data = {
+                        **result.diagnostics,
+                        "category": result.diagnostics.get("category", result.status),
+                        "recovered_attempt": latest_attempt,
+                        "reason": result.diagnostics.get(
+                            "reason", f"latest verified attempt ended with {result.status}"
+                        ),
+                    }
+                execution.persist_run(self.config.data_root_path, run)
+                return True
+
+            if latest_record is not None:
+                record_phase = latest_record.get("phase")
+                record_status = latest_record.get("status")
+                record_fingerprint = latest_record.get("step_fingerprint")
+                if (
+                    record_phase == "finished"
+                    and record_status
+                    in {"succeeded", "failed", "cancelled", "interrupted", "needs_input"}
+                    and record_fingerprint != _step_fingerprint(step)
+                ):
+                    recovered.append(
+                        {
+                            "step_id": step.id,
+                            "attempt": latest_attempt,
+                            "status": "superseded_revision_without_result",
+                        }
+                    )
+                    continue
+                if (
+                    record_phase == "finished"
+                    and record_status in {"failed", "cancelled", "interrupted"}
+                    and record_fingerprint == _step_fingerprint(step)
+                ):
+                    run.current_results.pop(step.id, None)
+                    run.step_status[step.id] = str(record_status)
+                    run.status = str(record_status)  # type: ignore[assignment]
+                    run.waiting_for = None
+                    run.pending_data = {
+                        "category": latest_record.get("failure_category", record_status),
+                        "reason": latest_record.get(
+                            "failure_reason", f"latest attempt ended with {record_status}"
+                        ),
+                        "step_id": step.id,
+                        "recovered_attempt": latest_attempt,
+                        "result_status": "not_published",
+                    }
+                    run.finish_active_interval()
+                    execution.persist_run(self.config.data_root_path, run)
+                    return True
+
             unfinished_records = [
-                item
-                for item in run.attempts
-                if item.get("step_id") == step.id and item.get("phase") in {"prepared", "started"}
+                item for item in latest_records if item.get("phase") in {"prepared", "started"}
             ]
-            unfinished_dirs = (
-                [item.name for item in step_dir.glob("attempt-*") if item.is_dir()]
-                if step_dir.is_dir() and not step_dir.is_symlink()
-                else []
-            )
-            if unfinished_records or unfinished_dirs:
+            if unfinished_records or attempt_dir is not None or latest_record is None:
                 blocked.append(
                     {
                         "step_id": step.id,
-                        "attempts": unfinished_records,
-                        "directories": unfinished_dirs,
+                        "attempt": latest_attempt,
+                        "records": latest_records,
+                        "directory": attempt_dir.name if attempt_dir is not None else None,
                         "reason": (
-                            "attempt has no fully verified Result; automatic recomputation "
-                            "is disabled"
+                            "latest attempt has no verified finished Result; automatic "
+                            "recomputation is disabled"
                         ),
                     }
                 )
@@ -1246,34 +1411,6 @@ class Agent:
                 "reason": str(error.error),
             }
         return True
-
-    @staticmethod
-    def _recovery_result_candidates(
-        root: Path, run: Run, step: Step
-    ) -> list[tuple[int, Result, Path]]:
-        step_dir = root / step.id
-        if not step_dir.is_dir() or step_dir.is_symlink():
-            return []
-        candidates: list[tuple[int, Result, Path]] = []
-        for attempt_dir in step_dir.glob("attempt-*"):
-            if not attempt_dir.is_dir() or attempt_dir.is_symlink():
-                continue
-            try:
-                attempt = int(attempt_dir.name.removeprefix("attempt-"))
-            except ValueError:
-                continue
-            result_path = attempt_dir / "result.json"
-            if not result_path.is_file() or result_path.is_symlink():
-                continue
-            try:
-                result = Result.model_validate(
-                    json.loads(result_path.read_text(encoding="utf-8")), strict=True
-                )
-            except (OSError, json.JSONDecodeError, ValueError):
-                continue
-            if result.run_id == run.id and result.step_id == step.id and result.attempt == attempt:
-                candidates.append((attempt, result, result_path))
-        return candidates
 
     def _expected_input_bindings(self, run: Run, step: Step) -> dict[str, str]:
         expected: dict[str, str] = {}
@@ -1423,9 +1560,7 @@ class Agent:
                 current.accepted_snapshot = {}
                 current.accepted_execution_sha256 = None
                 step_id = current.pending_data.get("step_id")
-                step = next(
-                    (item for item in current.plan.steps if item.id == step_id), None
-                )
+                step = next((item for item in current.plan.steps if item.id == step_id), None)
                 if step is not None:
                     self._prepare_confirmation(current, step)
                 else:
@@ -1433,9 +1568,7 @@ class Agent:
                     current.waiting_for = "confirmation"
                     current.pending_data = {
                         "category": "confirmation_stale",
-                        "reason": (
-                            "confirmation preview no longer matches the authoritative Run"
-                        ),
+                        "reason": ("confirmation preview no longer matches the authoritative Run"),
                     }
                 current.finish_active_interval()
                 execution.persist_run(self.config.data_root_path, current)
@@ -1505,7 +1638,7 @@ class Agent:
         except execution.ExecutionBusy:
             authoritative = load_run(self.config.data_root_path, run_id)
             return AgentResponse(
-                "当前计算正由其他执行者占用，已发出取消信号；未强行改写其状态。",
+                "当前计算正由其他执行者占用；此实例无法确认对方已收到取消请求，请稍后查看状态。",
                 run=authoritative,
             )
         try:
@@ -3181,9 +3314,7 @@ class Agent:
         if unavailable_targets:
             text = f"{text}\n尚未交付：{'；'.join(unavailable_targets)}；未重新计算。"
         if run_failed:
-            text = (
-                f"{text}\n科学 Result 已保留，但 Run 未能成功收口；本次交付不标记为完整成功。"
-            )
+            text = f"{text}\n科学 Result 已保留，但 Run 未能成功收口；本次交付不标记为完整成功。"
         locators: list[dict[str, Any]] = []
         for fact in renderable:
             ref = str(fact["output_ref"])
@@ -5354,15 +5485,7 @@ def _load_bound_result(data_root: str, run: Run, relative: str) -> Result | None
 
 
 def _step_fingerprint(step: Step) -> str:
-    import hashlib
-
-    payload = json.dumps(
-        step.model_dump(mode="json"),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
+    return execution.step_fingerprint(step)
 
 
 def _query_value_is_compatible(value: Any, declared_type: str) -> bool:

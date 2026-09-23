@@ -330,11 +330,7 @@ def prepare_orca_parameters(context: Any, run: Run, step: Step) -> Step | None:
     supplied_parameters = {
         name: checked_parameters[name] for name in original_parameters if name in checked_parameters
     }
-    if (
-        run.accepted_snapshot
-        and "charge" in step.parameters
-        and "multiplicity" in step.parameters
-    ):
+    if run.accepted_snapshot and "charge" in step.parameters and "multiplicity" in step.parameters:
         validated = tool.validate_parameters(step.parameters)
         validate_orca_profile(validated)
         _validate_geometry_electronic_state(verified_geometry, validated)

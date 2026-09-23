@@ -7,6 +7,8 @@ durable source of lifecycle state and Tools remain the execution boundary.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -51,6 +53,9 @@ class AttemptContext:
     relative_path: str
     directory: Path
     record: dict[str, Any] = field(default_factory=dict)
+    owner: RunOwner | None = None
+    budget_reserved: bool = False
+    step_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -116,6 +121,10 @@ class RunOwner:
             self._local_lock.release()
             raise
 
+    @property
+    def is_held(self) -> bool:
+        return self._handle is not None
+
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
         try:
             if self._handle is None:
@@ -167,7 +176,15 @@ def persist_result(data_root: str | Path, run: Run, result: Result) -> Path:
         raise PersistenceFailure("result_persistence", error) from error
 
 
-def begin_attempt(data_root: str | Path, run: Run, step: Step) -> AttemptContext:
+def begin_attempt(
+    data_root: str | Path,
+    run: Run,
+    step: Step,
+    *,
+    owner: RunOwner | None = None,
+    budget_reserved: bool = False,
+    step_fingerprint: str | None = None,
+) -> AttemptContext:
     """Allocate, create, register, and persist one prepared attempt.
 
     This is the only production entry that allocates an attempt directory.  A
@@ -181,6 +198,15 @@ def begin_attempt(data_root: str | Path, run: Run, step: Step) -> AttemptContext
         if key in _active_attempts:
             raise AttemptLifecycleError(f"attempt already active for Step {step.id!r}")
     root = Path(data_root).resolve()
+    if owner is not None and (
+        not owner.is_held
+        or owner.run_id != run.id
+        or owner.data_root != root
+        or not budget_reserved
+    ):
+        raise AttemptLifecycleError(
+            "owner admission requires the matching Run lock and reserved attempt budget"
+        )
     attempt = allocate_attempt(root, run, step.id)
     directory = attempt_directory(root, run.id, step.id, attempt)
     directory.mkdir(parents=True, exist_ok=False)
@@ -194,6 +220,8 @@ def begin_attempt(data_root: str | Path, run: Run, step: Step) -> AttemptContext
         "artifact_ids": [],
         "output_ports": {},
         "input_artifact_ids": [],
+        "plan_revision": run.plan.revision,
+        "step_fingerprint": step_fingerprint,
     }
     run.attempts.append(record)
     run.step_status[step.id] = "running"
@@ -205,6 +233,9 @@ def begin_attempt(data_root: str | Path, run: Run, step: Step) -> AttemptContext
         relative_path=relative,
         directory=directory,
         record=record,
+        owner=owner,
+        budget_reserved=budget_reserved,
+        step_fingerprint=step_fingerprint,
     )
     with _active_attempts_lock:
         _active_attempts[key] = context
@@ -218,17 +249,66 @@ def begin_attempt(data_root: str | Path, run: Run, step: Step) -> AttemptContext
 
 
 def ensure_attempt(data_root: str | Path, run: Run, step: Step) -> tuple[AttemptContext, bool]:
-    """Return the Agent-admitted context or enter the same gateway directly."""
+    """Require the shared Agent gateway's owner- and budget-admitted context."""
 
-    context = active_attempt(run, step.id)
-    if context is not None:
-        return context, False
-    return begin_attempt(data_root, run, step), True
+    return require_admitted_attempt(data_root, run, step), False
 
 
 def active_attempt(run: Run, step_id: str) -> AttemptContext | None:
     with _active_attempts_lock:
         return _active_attempts.get((id(run), step_id))
+
+
+def require_admitted_attempt(data_root: str | Path, run: Run, step: Step) -> AttemptContext:
+    """Reject adapter calls that did not pass the public Run gateway."""
+
+    context = active_attempt(run, step.id)
+    if context is None:
+        raise AttemptLifecycleError(
+            "Tool execution must enter through Agent.advance owner admission"
+        )
+    _assert_context(run, context)
+    owner = context.owner
+    root = Path(data_root).resolve()
+    if (
+        owner is None
+        or not owner.is_held
+        or owner.run_id != run.id
+        or owner.data_root != root
+        or context.data_root != root
+        or not context.budget_reserved
+        or run.status != "running"
+    ):
+        raise AttemptLifecycleError(
+            "Tool execution has no active Run owner or reserved attempt budget"
+        )
+    planned_step = next(
+        (item for item in run.plan.steps if item.id == step.id),
+        None,
+    )
+    fingerprint = step_fingerprint(step)
+    if (
+        context.step_fingerprint is None
+        or context.step_fingerprint != fingerprint
+        or planned_step is None
+        or step_fingerprint(planned_step) != fingerprint
+        or context.record.get("plan_revision") != run.plan.revision
+    ):
+        raise AttemptLifecycleError(
+            "Tool execution Step does not match the owner-admitted Plan revision"
+        )
+    return context
+
+
+def require_tool_admission(run: Run, step: Step) -> AttemptContext:
+    """Validate the owner admission from the Run-scoped Tool interface."""
+
+    context = active_attempt(run, step.id)
+    if context is None:
+        raise AttemptLifecycleError(
+            "Tool execution must enter through Agent.advance owner admission"
+        )
+    return require_admitted_attempt(context.data_root, run, step)
 
 
 def checkpoint_attempt(run: Run, context: AttemptContext) -> None:
@@ -458,6 +538,18 @@ def allocate_attempt(data_root: str | Path, run: Run, step_id: str) -> int:
     return max(attempts, default=0) + 1
 
 
+def step_fingerprint(step: Step) -> str:
+    """Return the canonical content fingerprint used for one Plan Step."""
+
+    payload = json.dumps(
+        step.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 __all__ = [
     "AttemptContext",
     "AttemptLifecycleError",
@@ -475,8 +567,11 @@ __all__ = [
     "finish_attempt",
     "persist_result",
     "persist_run",
+    "require_admitted_attempt",
+    "require_tool_admission",
     "release_attempt",
     "save_result",
     "save_run",
+    "step_fingerprint",
     "validate_result_candidate",
 ]

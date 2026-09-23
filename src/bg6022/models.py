@@ -525,6 +525,9 @@ class Tool(StrictModel):
     def execute(self, step: Step, run: Run, *, cancel: Any) -> Result:
         if self.execute_function is None:
             raise RuntimeError(f"tool {self.name!r} has no executable implementation")
+        from bg6022.execution import require_tool_admission
+
+        require_tool_admission(run, step)
         return self.execute_function(step, run, cancel)
 
     def prepare_parameters(self, context: Any, run: Run, step: Step) -> Step | None:

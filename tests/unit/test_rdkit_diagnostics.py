@@ -10,6 +10,8 @@ from bg6022.diagnostics import configure_rdkit_logging
 from bg6022.models import InputReference, Plan, Request, Run, Step
 from bg6022.session import create_run, register_bytes_artifact, run_directory, utc_now
 from bg6022.tools.molecule import _run_embedding_helper, execute_generate_geometry
+from bg6022.tools.registry import build_registry
+from tests.support.admitted_adapter import execute_adapter_under_test_gateway
 
 
 def _config(tmp_path: Path):
@@ -109,7 +111,13 @@ def test_rdkit_helper_preserves_stderr_and_geometry_tool_writes_raw_diagnostic(
     )
     step.inputs["molecule"] = InputReference(artifact_id=molecule.id)
 
-    result = execute_generate_geometry(config, step=step, run=run, cancel=Event())
+    result = execute_adapter_under_test_gateway(
+        config,
+        run,
+        step,
+        build_registry(config).get(step.tool),
+        lambda: execute_generate_geometry(config, step=step, run=run, cancel=Event()),
+    )
 
     assert result.status == "succeeded"
     raw_path = Path(result.diagnostics["raw_paths"]["rdkit_stderr"])

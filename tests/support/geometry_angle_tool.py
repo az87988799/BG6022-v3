@@ -87,9 +87,7 @@ def make_geometry_angle_tool(config: AppConfig) -> Tool:
 def execute_geometry_angle(config: AppConfig, *, step: Step, run: Run, cancel: Event) -> Result:
     context, owns_context = execution.ensure_attempt(config.data_root_path, run, step)
     try:
-        result = _execute_geometry_angle(
-            config, step=step, run=run, cancel=cancel, context=context
-        )
+        result = _execute_geometry_angle(config, step=step, run=run, cancel=cancel, context=context)
     except Exception as error:
         if owns_context:
             execution.fail_attempt(
