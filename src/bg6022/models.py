@@ -372,11 +372,6 @@ class Run(StrictModel):
 
 ExecuteFunction = Callable[[Step, Run, Any], Result]
 ParameterValidationFunction = Callable[[dict[str, Any], Mapping[str, Any]], None]
-ParameterPreparationFunction = Callable[[Any, Run, Step], Step | None]
-AttemptReservationFunction = Callable[[Run, Step], bool]
-PreflightFunction = Callable[[Any, Step], None]
-RepairOptionsFunction = Callable[[Run, Step, Result], list[Any]]
-RepairAdmissionFunction = Callable[[Run, Step, Result], bool]
 ResultProperty = StrictStr
 
 
@@ -398,19 +393,6 @@ class Tool(StrictModel):
     requires_compute_permission: bool = True
     parameter_preparation: Literal["none", "orca_electronic_state"] = "none"
     execution_budget: Literal["none", "orca"] = "none"
-    parameter_preparation_function: ParameterPreparationFunction | None = Field(
-        default=None, exclude=True, repr=False
-    )
-    attempt_reservation_function: AttemptReservationFunction | None = Field(
-        default=None, exclude=True, repr=False
-    )
-    preflight_function: PreflightFunction | None = Field(default=None, exclude=True, repr=False)
-    repair_options_function: RepairOptionsFunction | None = Field(
-        default=None, exclude=True, repr=False
-    )
-    repair_admission_function: RepairAdmissionFunction | None = Field(
-        default=None, exclude=True, repr=False
-    )
     deferred_parameters: list[str] = Field(default_factory=list)
     request_parameters: list[str] = Field(default_factory=list)
     geometry_output_input_ports: dict[str, str] = Field(default_factory=dict)
@@ -506,14 +488,6 @@ class Tool(StrictModel):
                     "request_parameters are not fields of the parameter model: "
                     f"{unknown_request_parameters}"
                 )
-        if self.parameter_preparation != "none" and self.parameter_preparation_function is None:
-            raise ValueError(
-                f"Tool {self.name!r} declares parameter preparation without an implementation"
-            )
-        if self.execution_budget != "none" and self.attempt_reservation_function is None:
-            raise ValueError(
-                f"Tool {self.name!r} declares an execution budget without an implementation"
-            )
         # Resolve the canonical public directory during registration.  This
         # catches property collisions (including a collision with a check)
         # before a Tool can be exposed to Intake or query handling.
@@ -525,34 +499,7 @@ class Tool(StrictModel):
     def execute(self, step: Step, run: Run, *, cancel: Any) -> Result:
         if self.execute_function is None:
             raise RuntimeError(f"tool {self.name!r} has no executable implementation")
-        from bg6022.execution import require_tool_admission
-
-        require_tool_admission(run, step)
         return self.execute_function(step, run, cancel)
-
-    def prepare_parameters(self, context: Any, run: Run, step: Step) -> Step | None:
-        if self.parameter_preparation_function is None:
-            return step
-        return self.parameter_preparation_function(context, run, step)
-
-    def reserve_attempt(self, run: Run, step: Step) -> bool:
-        if self.attempt_reservation_function is None:
-            return True
-        return self.attempt_reservation_function(run, step)
-
-    def preflight(self, config: Any, step: Step) -> None:
-        if self.preflight_function is not None:
-            self.preflight_function(config, step)
-
-    def repair_options(self, run: Run, step: Step, result: Result) -> list[Any]:
-        if self.repair_options_function is None:
-            return []
-        return list(self.repair_options_function(run, step, result))
-
-    def admit_repair(self, run: Run, step: Step, result: Result) -> bool:
-        if self.repair_admission_function is None:
-            return True
-        return bool(self.repair_admission_function(run, step, result))
 
     def validate_parameters(
         self,
@@ -577,10 +524,7 @@ class Tool(StrictModel):
             if undeclared:
                 raise ValueError(f"missing required parameters: {sorted(undeclared)}")
             if missing:
-                partial = _validate_partial_model(self.parameter_type, parameters)
-                if self.parameter_validation_function is not None:
-                    self.parameter_validation_function(partial, context or {})
-                return partial
+                return _validate_partial_model(self.parameter_type, parameters)
         validated = self.parameter_type.model_validate(parameters, strict=True).model_dump(
             mode="python", exclude_none=True
         )

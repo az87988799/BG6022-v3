@@ -18,7 +18,6 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, StrictInt
 
-from bg6022 import execution
 from bg6022.config import AppConfig
 from bg6022.models import InputReference, Result, Run, Step, Tool
 from bg6022.session import (
@@ -26,6 +25,7 @@ from bg6022.session import (
     find_artifact,
     register_bytes_artifact,
     run_directory,
+    save_run,
 )
 
 SUPPORTED_ELEMENTS = frozenset({"H", "C", "N", "O", "F", "P", "S", "Cl", "Br", "I"})
@@ -150,37 +150,10 @@ def make_generate_geometry_tool(config: AppConfig | None = None) -> Tool:
 
 
 def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel: Event) -> Result:
-    context, owns_context = execution.ensure_attempt(config.data_root_path, run, step)
-    try:
-        result = _execute_generate_geometry(
-            config, step=step, run=run, cancel=cancel, context=context
-        )
-    except Exception as error:
-        if owns_context:
-            execution.fail_attempt(
-                run,
-                context,
-                category="tool_exception",
-                reason=str(error),
-                persist=True,
-            )
-        raise
-    if owns_context:
-        execution.finish_attempt(run, context, result)
-    return result
-
-
-def _execute_generate_geometry(
-    config: AppConfig,
-    *,
-    step: Step,
-    run: Run,
-    cancel: Event,
-    context: execution.AttemptContext,
-) -> Result:
     parameters = GenerateGeometryParameters.model_validate(step.parameters, strict=True)
-    attempt = context.attempt
-    relative = context.relative_path
+    attempt = _next_attempt(run, step.id)
+    relative = f"{step.id}/attempt-{attempt:02d}"
+    (run_directory(config.data_root_path, run.id) / relative).mkdir(parents=True, exist_ok=True)
     try:
         reference = step.inputs.get("molecule")
         if reference is None:
@@ -242,7 +215,8 @@ def _execute_generate_geometry(
             raise ValueError("generated geometry element counts do not match the resolved molecule")
         diagnostics: dict[str, Any] = {}
         if rdkit_stderr:
-            diagnostic_file = context.directory / "rdkit.stderr.log"
+            diagnostic_path = run_directory(config.data_root_path, run.id) / relative
+            diagnostic_file = diagnostic_path / "rdkit.stderr.log"
             diagnostic_file.write_text(rdkit_stderr, encoding="utf-8")
             diagnostics["raw_paths"] = {"rdkit_stderr": str(diagnostic_file)}
         geometry_artifact = register_bytes_artifact(
@@ -265,6 +239,17 @@ def _execute_generate_geometry(
                 "initial_guess_only": True,
             },
         )
+        run.attempts.append(
+            {
+                "step_id": step.id,
+                "attempt": attempt,
+                "phase": "finished",
+                "status": "succeeded",
+                "artifact_ids": [geometry_artifact.id],
+                "output_ports": {"geometry": geometry_artifact.id},
+            }
+        )
+        save_run(config.data_root_path, run)
         return _molecule_result(
             run,
             step,
@@ -514,6 +499,13 @@ def _molecule_result(
         parameter_sources=parameter_sources or {},
         attempt_relative_path=relative,
     )
+
+
+def _next_attempt(run: Run, step_id: str) -> int:
+    attempts = [
+        int(item.get("attempt", 0)) for item in run.attempts if item.get("step_id") == step_id
+    ]
+    return max(attempts, default=0) + 1
 
 
 def _step_fingerprint(step: Step) -> str:

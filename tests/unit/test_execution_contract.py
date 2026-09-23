@@ -5,18 +5,15 @@ from threading import Event
 
 import pytest
 
-from bg6022 import execution
-from bg6022.agent import Agent, _step_fingerprint
+from bg6022.agent import Agent
 from bg6022.config import load_config
 from bg6022.models import InputReference, Plan, Request, Run, Step
 from bg6022.orca.runner import ProcessFacts
 from bg6022.session import (
     clear_execution_guard,
     execution_fingerprint,
-    load_run,
     register_file_artifact,
     run_directory,
-    save_run,
     utc_now,
 )
 from bg6022.tools.orca import OptimizeParameters, SinglePointParameters, execute_orca_step
@@ -76,45 +73,7 @@ def _run_with_geometry(config, *, tool_name: str, permission: bool = True) -> tu
     plan = plan.model_copy(update={"steps": [step]})
     run.plan = plan
     run.accepted_execution_sha256 = execution_fingerprint(plan, run.resources, [artifact])
-    save_run(config.data_root_path, run)
     return run, step
-
-
-def _call_orca_adapter_under_test_admission(config, run, step, callback):
-    run.status = "running"
-    tool = build_registry(config).get(step.tool)
-    owner = execution.RunOwner(config.data_root_path, run.id)
-    with owner:
-        if not tool.reserve_attempt(run, step):
-            raise AssertionError("test ORCA attempt was not admitted by its budget")
-        context = execution.begin_attempt(
-            config.data_root_path,
-            run,
-            step,
-            owner=owner,
-            budget_reserved=True,
-            step_fingerprint=_step_fingerprint(step),
-        )
-        try:
-            result = callback()
-            result.step_fingerprint = _step_fingerprint(step)
-            result.input_bindings = {
-                name: reference.artifact_id
-                for name, reference in step.inputs.items()
-                if reference.artifact_id is not None
-            }
-            result.input_artifact_ids = list(result.input_bindings.values())
-            execution.finish_attempt(run, context, result)
-            return result
-        except Exception as error:
-            execution.fail_attempt(
-                run,
-                context,
-                category="test_adapter_failure",
-                reason=str(error),
-                persist=True,
-            )
-            raise
 
 
 def test_tool_requires_explicit_permission_and_accepted_content(
@@ -149,106 +108,6 @@ def test_tool_requires_explicit_permission_and_accepted_content(
             operation="SP",
             parameter_model=SinglePointParameters,
         )
-
-
-def test_orca_adapter_without_gateway_cannot_bypass_attempt_budget_or_start_runner(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config = _config(tmp_path)
-    run, step = _run_with_geometry(config, tool_name="single_point")
-    run.attempt_counts[step.id] = 1
-    run.budget["max_attempts_per_science_step"] = 1
-    runner_calls: list[str] = []
-
-    def fake_runner(**_kwargs):
-        runner_calls.append("started")
-        raise AssertionError("direct adapter call must not start ORCA")
-
-    monkeypatch.setattr("bg6022.tools.orca.validate_execution_environment", lambda _config: None)
-    monkeypatch.setattr("bg6022.tools.orca.run_orca", fake_runner)
-
-    with pytest.raises(execution.AttemptLifecycleError, match="Agent.advance"):
-        execute_orca_step(
-            config,
-            step=step,
-            run=run,
-            cancel=Event(),
-            operation="SP",
-            parameter_model=SinglePointParameters,
-        )
-
-    assert runner_calls == []
-    assert run.attempts == []
-    assert not (run_directory(config.data_root_path, run.id) / step.id).exists()
-
-
-def test_cancelled_stale_run_cannot_reenter_orca_adapter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config = _config(tmp_path)
-    stale, step = _run_with_geometry(config, tool_name="single_point")
-    current = load_run(config.data_root_path, stale.id)
-    current.status = "cancelled"
-    save_run(config.data_root_path, current)
-    runner_calls: list[str] = []
-
-    def fake_runner(**_kwargs):
-        runner_calls.append("started")
-        raise AssertionError("cancelled stale Run must not start ORCA")
-
-    monkeypatch.setattr("bg6022.tools.orca.validate_execution_environment", lambda _config: None)
-    monkeypatch.setattr("bg6022.tools.orca.run_orca", fake_runner)
-
-    with pytest.raises(execution.AttemptLifecycleError, match="Agent.advance"):
-        execute_orca_step(
-            config,
-            step=step,
-            run=stale,
-            cancel=Event(),
-            operation="SP",
-            parameter_model=SinglePointParameters,
-        )
-
-    assert load_run(config.data_root_path, stale.id).status == "cancelled"
-    assert runner_calls == []
-    assert stale.attempts == []
-
-
-def test_agent_gateway_respects_exhausted_orca_budget_before_attempt_or_runner(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config = _config(tmp_path)
-    run, step = _run_with_geometry(config, tool_name="single_point")
-    run.attempt_counts[step.id] = 1
-    run.budget["max_attempts_per_science_step"] = 1
-    run.execution_permission = True
-    registry = build_registry(config)
-    agent = Agent(config, registry)
-    run.accepted_snapshot = agent._acceptance_snapshot(run)
-    run.accepted_execution_sha256 = execution_fingerprint(
-        run.plan,
-        run.resources,
-        run.artifact_index,
-        snapshot=run.accepted_snapshot,
-    )
-    save_run(config.data_root_path, run)
-    runner_calls: list[str] = []
-
-    def fake_runner(**_kwargs):
-        runner_calls.append("started")
-        raise AssertionError("exhausted budget must stop before ORCA")
-
-    monkeypatch.setattr("bg6022.tools.orca.validate_execution_environment", lambda _config: None)
-    monkeypatch.setattr("bg6022.tools.orca.run_orca", fake_runner)
-
-    agent.advance(run)
-
-    durable = load_run(config.data_root_path, run.id)
-    assert durable.status == "failed", durable.pending_data
-    assert durable.pending_data["budget_exhausted"] == "max_attempts_per_science_step"
-    assert durable.attempts == []
-    assert runner_calls == []
-    assert not (run_directory(config.data_root_path, run.id) / step.id).exists()
 
 
 def test_active_clock_accumulates_one_interval(tmp_path: Path) -> None:
@@ -314,18 +173,13 @@ def test_failed_opt_with_missing_xyz_can_publish_only_restart_candidate(
         return facts
 
     monkeypatch.setattr("bg6022.tools.orca.run_orca", fake_runner)
-    result = _call_orca_adapter_under_test_admission(
+    result = execute_orca_step(
         config,
-        run,
-        step,
-        lambda: execute_orca_step(
-            config,
-            step=step,
-            run=run,
-            cancel=Event(),
-            operation="Opt",
-            parameter_model=OptimizeParameters,
-        ),
+        step=step,
+        run=run,
+        cancel=Event(),
+        operation="Opt",
+        parameter_model=OptimizeParameters,
     )
     assert result.status == "failed"
     assert result.output_ports == {}

@@ -7,14 +7,12 @@ import json
 import re
 from collections import Counter
 from collections.abc import Mapping
-from copy import deepcopy
 from dataclasses import asdict, dataclass, is_dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
-from threading import Event, get_ident
+from threading import Event
 from typing import Any
 
-from . import execution
 from .answer import (
     AnswerOutput,
     AnswerSection,
@@ -28,7 +26,7 @@ from .answer import (
     select_facts_for_question,
     validate_result_answer,
 )
-from .config import AppConfig, validate_execution_environment  # noqa: F401
+from .config import AppConfig, validate_execution_environment
 from .llm import LlmClient, LlmError
 from .models import InputReference, Plan, Request, Result, Run, Step, Tool
 from .molecule_identity import (
@@ -39,6 +37,8 @@ from .molecule_identity import (
     identity_matches_facts,
     normalize_formula_token,
 )
+from .orca.profiles import get_profile, resolve_parameters
+from .orca.repair_rules import applicable_repairs, applicable_scf_repair
 from .output_contracts import is_compatible_value, public_type_info
 from .planner import (
     QuerySelection,
@@ -55,7 +55,6 @@ from .planner import (
 from .repair import apply_repair_proposal, propose_repair
 from .session import (
     MAX_RECENT_RUNS,
-    RunNotFoundError,
     artifact_path,
     create_run,
     execution_fingerprint,
@@ -63,10 +62,10 @@ from .session import (
     load_run,
     load_session,
     new_id,
-    read_execution_guard,
     register_bytes_artifact,
     register_file_artifact,
     run_directory,
+    save_result,
     save_run,
     save_session,
     utc_now,
@@ -74,6 +73,7 @@ from .session import (
 from .tools.molecule import (
     parse_xyz_bytes,
     resolve_artifact_reference,
+    validate_electronic_state,
 )
 from .tools.pubchem import _facts_from_smiles
 from .tools.registry import ToolRegistry, merge_explicit_step_parameters
@@ -169,13 +169,6 @@ class Agent:
         self._query_bindings: dict[tuple[str, str], dict[str, Any]] = {}
         self._request_sequence = 0
         self._active_request: tuple[int, Event] | None = None
-        # Entries exist only while this Agent's current thread holds the
-        # short-lived Run owner.  They are not durable runtime state.
-        self._owned_run_owners: dict[tuple[int, str], execution.RunOwner] = {}
-        # A direct advance has no chat _active_request.  This map lets a
-        # sibling cancel thread signal the owner without taking its durable
-        # mutation path.
-        self._active_execution_events: dict[str, Event] = {}
         try:
             self._session = load_session(config.data_root_path, self.session_id)
         except ValueError:
@@ -213,8 +206,8 @@ class Agent:
         _validate_request_parameter_scope(request, plan, self.registry)
         # The explicit command has always checked the machine before creating a
         # Run. Chat intentionally defers this check until an ORCA Tool starts.
-        for step in plan.steps:
-            self.registry.get(step.tool).preflight(self.config, step)
+        if any(self.registry.get(step.tool).execution_budget == "orca" for step in plan.steps):
+            validate_execution_environment(self.config)
         geometry_path = Path(xyz_path).resolve()
         parse_xyz_bytes(geometry_path.read_bytes())
         run = Run(
@@ -256,14 +249,7 @@ class Agent:
             raise ValueError("explicit CLI execution unexpectedly paused")
         return run, result
 
-    def handle_message(
-        self,
-        message: str,
-        *,
-        confirmation_run_id: str | None = None,
-        confirmation_fingerprint: str | None = None,
-        confirmation_queued: bool = False,
-    ) -> AgentResponse:
+    def handle_message(self, message: str) -> AgentResponse:
         """Process one chat message synchronously; the CLI may call this worker-side."""
 
         text = message
@@ -271,11 +257,7 @@ class Agent:
         if not command:
             return AgentResponse("请输入请求。")
         if command.casefold() in {"/confirm", "confirm", "确认"}:
-            return self.confirm(
-                presented_run_id=confirmation_run_id,
-                presented_fingerprint=confirmation_fingerprint,
-                queued_confirmation=confirmation_queued,
-            )
+            return self.confirm()
         if command.casefold() in {"/cancel", "cancel", "取消"}:
             return self.cancel()
         if command.casefold() in {"/status", "status", "状态"}:
@@ -725,68 +707,24 @@ class Agent:
             self._finish_request(request_token, request_cancel)
 
     def advance(self, run: Run, *, cancel: Event | None = None) -> Result | None:
-        """Continue one Run while holding its single lifecycle owner."""
-        owner_key = (get_ident(), run.id)
-        held_owner = self._owned_run_owners.get(owner_key)
-        if held_owner is not None:
-            return self._advance_with_event(run, cancel=cancel)
-        try:
-            with execution.RunOwner(self.config.data_root_path, run.id) as owner:
-                self._owned_run_owners[owner_key] = owner
-                try:
-                    # The caller's object may have been loaded before another
-                    # worker cancelled, completed, or revised this Run.
-                    authoritative = load_run(self.config.data_root_path, run.id)
-                    result = self._advance_with_event(authoritative, cancel=cancel)
-                    _sync_run_view(run, authoritative)
-                    return result
-                finally:
-                    self._owned_run_owners.pop(owner_key, None)
-        except execution.ExecutionBusy:
-            # A competing worker is authoritative.  Do not mutate the
-            # caller's stale object and do not re-enter the Tool boundary.
-            current = load_run(self.config.data_root_path, run.id)
-            _sync_run_view(run, current)
-            return self._latest_result(current)
+        """Continue the current Run until a result, wait point, or terminal state."""
 
-    def advance_new_run(self, run: Run, *, cancel: Event | None = None) -> Result | None:
-        """Explicit entry for a newly constructed, not-yet-durable Run."""
-
-        create_run(self.config.data_root_path, run)
-        return self.advance(run, cancel=cancel)
-
-    def _advance_with_event(self, run: Run, *, cancel: Event | None = None) -> Result | None:
-        cancel_event = cancel or self._cancel_events.setdefault(run.id, Event())
-        self._active_execution_events[run.id] = cancel_event
-        try:
-            return self._advance_owned(run, cancel=cancel_event)
-        finally:
-            self._active_execution_events.pop(run.id, None)
-
-    def _advance_owned(self, run: Run, *, cancel: Event | None = None) -> Result | None:
-        """Advance a Run whose owner has already been admitted."""
         cancel_event = cancel or self._cancel_events.setdefault(run.id, Event())
         if run.status in {"succeeded", "failed", "cancelled", "interrupted"}:
             return self._latest_result(run)
         if run.waiting_for is not None:
             return self._latest_result(run)
+        run.status = "running"
+        run.start_active_interval()
+        save_run(self.config.data_root_path, run)
         last_result: Result | None = self._latest_result(run)
-        step_id: str | None = None
-        attempt_context: execution.AttemptContext | None = None
-        delivery_failure: dict[str, Any] | None = None
         try:
-            if self._recover_unfinished_run(run):
-                return self._latest_result(run)
-            last_result = self._latest_result(run)
-            run.status = "running"
-            run.start_active_interval()
-            execution.persist_run(self.config.data_root_path, run)
             while True:
                 if cancel_event.is_set():
                     run.status = "cancelled"
                     run.waiting_for = None
                     run.finish_active_interval()
-                    execution.persist_run(self.config.data_root_path, run)
+                    save_run(self.config.data_root_path, run)
                     return last_result
                 if self._remaining_active_seconds(run) <= 0:
                     run.status = "failed"
@@ -795,14 +733,13 @@ class Agent:
                         "reason": "Run active time budget exhausted",
                     }
                     run.finish_active_interval()
-                    execution.persist_run(self.config.data_root_path, run)
+                    save_run(self.config.data_root_path, run)
                     return last_result
                 if _requested_results_satisfied(self.config.data_root_path, run, self.registry):
-                    run.status = "failed" if delivery_failure is not None else "succeeded"
+                    run.status = "succeeded"
                     run.waiting_for = None
-                    run.pending_data = delivery_failure or {}
                     run.finish_active_interval()
-                    execution.persist_run(self.config.data_root_path, run)
+                    save_run(self.config.data_root_path, run)
                     return last_result
                 step = _next_ready_step(run, self.config.data_root_path)
                 if step is None:
@@ -826,9 +763,8 @@ class Agent:
                             ),
                         }
                     run.finish_active_interval()
-                    execution.persist_run(self.config.data_root_path, run)
+                    save_run(self.config.data_root_path, run)
                     return last_result
-                step_id = step.id
                 tool = self.registry.get(step.tool)
                 if tool.requires_compute_permission and not run.execution_permission:
                     try:
@@ -841,50 +777,36 @@ class Agent:
                             "reason": str(error),
                         }
                         run.finish_active_interval()
-                        execution.persist_run(self.config.data_root_path, run)
+                        save_run(self.config.data_root_path, run)
                         return last_result
-                if tool.parameter_preparation_function is not None:
+                if tool.parameter_preparation == "orca_electronic_state":
                     preparing_step_id = step.id
                     try:
                         if tool.requires_compute_permission and not run.execution_permission:
-                            # Resolve every Tool with a preparation hook before
-                            # showing one confirmation for the whole Plan.
+                            # Resolve every ORCA Step before showing one confirmation
+                            # for the whole Plan. Later operations often consume a
+                            # future geometry port, so structure facts are traced
+                            # back through that port to the already prepared input.
                             for planned_step in run.plan.steps:
                                 planned_tool = self.registry.get(planned_step.tool)
-                                if planned_tool.parameter_preparation_function is None:
+                                if planned_tool.parameter_preparation != "orca_electronic_state":
                                     continue
                                 preparing_step_id = planned_step.id
-                                prepared_step = planned_tool.prepare_parameters(
-                                    self._tool_preparation_context(run, planned_step, planned_tool),
-                                    run,
-                                    planned_step,
-                                )
+                                prepared_step = self._prepare_orca_step(run, planned_step)
                                 if prepared_step is None:
                                     run.finish_active_interval()
-                                    execution.persist_run(self.config.data_root_path, run)
+                                    save_run(self.config.data_root_path, run)
                                     return last_result
-                                run.plan = _replace_step(run.plan, prepared_step)
-                                parameter_sources = run.pending_data.get("parameter_sources")
-                                if isinstance(parameter_sources, Mapping):
-                                    run.parameter_sources_by_step[planned_step.id] = dict(
-                                        parameter_sources
-                                    )
                             step = next(item for item in run.plan.steps if item.id == step.id)
                         else:
-                            prepared_step = tool.prepare_parameters(
-                                self._tool_preparation_context(run, step, tool), run, step
-                            )
+                            prepared_step = self._prepare_orca_step(run, step)
                             if prepared_step is None:
                                 run.finish_active_interval()
-                                execution.persist_run(self.config.data_root_path, run)
+                                save_run(self.config.data_root_path, run)
                                 return last_result
                             # Parameter resolution may replace a deferred Step. The
                             # exact replacement must be used for preview, fingerprint,
                             # budget reservation, and execution in this same turn.
-                            run.plan = _replace_step(run.plan, prepared_step)
-                            parameter_sources = run.pending_data.get("parameter_sources")
-                            if isinstance(parameter_sources, Mapping):
-                                run.parameter_sources_by_step[step.id] = dict(parameter_sources)
                             step = prepared_step
                     except (TypeError, ValueError, OSError) as error:
                         run.status = "failed"
@@ -895,14 +817,13 @@ class Agent:
                             "step_id": preparing_step_id,
                         }
                         run.finish_active_interval()
-                        execution.persist_run(self.config.data_root_path, run)
+                        save_run(self.config.data_root_path, run)
                         return last_result
                     tool = self.registry.get(step.tool)
-                    step_id = step.id
                 if tool.requires_compute_permission and not run.execution_permission:
                     self._prepare_confirmation(run, step)
                     run.finish_active_interval()
-                    execution.persist_run(self.config.data_root_path, run)
+                    save_run(self.config.data_root_path, run)
                     return last_result
                 if tool.requires_compute_permission and not run.accepted_snapshot:
                     run.pending_data["permission_source"] = "config.confirm_before_compute=false"
@@ -913,64 +834,26 @@ class Agent:
                         run.artifact_index,
                         snapshot=run.accepted_snapshot,
                     )
-                try:
-                    tool.preflight(self.config, step)
-                except Exception as error:
-                    return self._close_execution_failure(
-                        run,
-                        category="execution_boundary",
-                        error=error,
-                        stage="tool.preflight",
-                        step_id=step.id,
-                        last_result=last_result,
-                    )
-                if not tool.reserve_attempt(run, step):
+                if not self._reserve_attempt(run, step, tool):
                     run.status = "failed"
                     run.finish_active_interval()
-                    execution.persist_run(self.config.data_root_path, run)
+                    save_run(self.config.data_root_path, run)
                     return last_result
-                owner = self._owned_run_owners.get((get_ident(), run.id))
-                if owner is None or not owner.is_held:
-                    raise execution.AttemptLifecycleError(
-                        "Run advancement has no active owner admission"
-                    )
-                attempt_context = execution.begin_attempt(
-                    self.config.data_root_path,
-                    run,
-                    step,
-                    owner=owner,
-                    budget_reserved=True,
-                    step_fingerprint=_step_fingerprint(step),
-                )
+                run.step_status[step.id] = "running"
+                save_run(self.config.data_root_path, run)
                 try:
                     result = tool.execute(step, run, cancel=cancel_event)
-                except execution.PersistenceFailure:
-                    execution.fail_attempt(
-                        run,
-                        attempt_context,
-                        category="tool_persistence",
-                        reason="Tool lifecycle persistence failed",
-                        persist=False,
-                    )
-                    attempt_context = None
+                except (PermissionError, ValueError, OSError) as error:
+                    run.status = "failed"
+                    run.pending_data = {
+                        "category": "execution_boundary",
+                        "reason": str(error),
+                        "step_id": step.id,
+                    }
+                    run.finish_active_interval()
+                    save_run(self.config.data_root_path, run)
                     raise
-                except Exception as error:
-                    execution.fail_attempt(
-                        run,
-                        attempt_context,
-                        category="execution_boundary",
-                        reason=str(error),
-                        persist=False,
-                    )
-                    attempt_context = None
-                    return self._close_execution_failure(
-                        run,
-                        category="execution_boundary",
-                        error=error,
-                        stage="tool.execute",
-                        step_id=step.id,
-                        last_result=last_result,
-                    )
+                last_result = result
                 result.step_fingerprint = _step_fingerprint(step)
                 step_parameter_sources = run.parameter_sources_by_step.get(step.id)
                 if step_parameter_sources:
@@ -983,321 +866,17 @@ class Agent:
                     if (artifact := self._artifact_from_reference(run, reference)) is not None
                 }
                 result.input_artifact_ids = list(result.input_bindings.values())
-                try:
-                    execution.validate_result_candidate(
-                        run,
-                        step,
-                        result,
-                        context=attempt_context,
-                        expected_input_bindings=result.input_bindings,
-                        tool=tool,
-                    )
-                    execution.finish_attempt(
-                        run,
-                        attempt_context,
-                        result,
-                        persist=False,
-                        release=False,
-                    )
-                    execution.commit_attempt_result(
-                        self.config.data_root_path,
-                        run,
-                        step,
-                        result,
-                        expected_input_bindings=result.input_bindings,
-                        tool=tool,
-                        context=attempt_context,
-                    )
-                except execution.PersistenceFailure:
-                    execution.release_attempt(run, attempt_context)
-                    attempt_context = None
-                    raise
-                except Exception as error:
-                    execution.fail_attempt(
-                        run,
-                        attempt_context,
-                        category="result_binding",
-                        reason=str(error),
-                        persist=False,
-                    )
-                    attempt_context = None
-                    return self._close_execution_failure(
-                        run,
-                        category="result_binding",
-                        error=error,
-                        stage="result.commit_validation",
-                        step_id=step.id,
-                        last_result=last_result,
-                    )
-                execution.release_attempt(run, attempt_context)
-                attempt_context = None
-                last_result = result
-                if result.status == "succeeded":
-                    if not self._record_result_summary(run, result) and delivery_failure is None:
-                        delivery_failure = {
-                            "category": "session_persistence",
-                            "stage": "result_summary",
-                            "status": "not_persisted",
-                            "reason": (
-                                "scientific Result was committed but the session summary "
-                                "was not saved"
-                            ),
-                        }
-                    continue
-                if result.status == "needs_input":
-                    run.finish_active_interval()
-                    execution.persist_run(self.config.data_root_path, run)
-                    return result
-                if self._try_repair(run, step, result, cancel_event):
-                    run.start_active_interval()
-                    continue
-                run.status = result.status
-                run.finish_active_interval()
-                execution.persist_run(self.config.data_root_path, run)
-                return result
-        except execution.PersistenceFailure as error:
-            return self._close_execution_failure(
-                run,
-                category=error.stage,
-                error=error.error,
-                stage=error.stage,
-                step_id=step_id,
-                last_result=last_result,
-            )
-        except KeyboardInterrupt:
-            cancel_event.set()
-            run.status = "cancelled"
-            run.waiting_for = None
-            run.finish_active_interval()
-            try:
-                execution.persist_run(self.config.data_root_path, run)
-            except execution.PersistenceFailure:
-                # KeyboardInterrupt is intentionally not converted into an
-                # ordinary failure.  The in-memory state remains conservative.
-                pass
-            raise
-        except Exception as error:
-            return self._close_execution_failure(
-                run,
-                category="execution_boundary",
-                error=error,
-                stage="advance",
-                step_id=step_id,
-                last_result=last_result,
-            )
-
-    def _recover_unfinished_run(self, run: Run) -> bool:
-        """Recover the newest verified attempt for each current Step revision."""
-
-        try:
-            guard = read_execution_guard(self.config.data_root_path)
-        except RuntimeError as error:
-            return self._stop_for_recovery(
-                run,
-                {
-                    "category": "recovery_unknown",
-                    "reason": "execution guard is present but cannot be verified",
-                    "exception_type": type(error).__name__,
-                    "detail": str(error),
-                },
-            )
-        if isinstance(guard, dict) and guard.get("run_id") == run.id:
-            return self._stop_for_recovery(
-                run,
-                {
-                    "category": "recovery_unknown",
-                    "reason": (
-                        "execution guard remains for this Run; process cleanup is unconfirmed"
-                    ),
-                    "guard": {
-                        key: guard.get(key)
-                        for key in ("run_id", "step_id", "attempt", "execution_id", "phase")
-                    },
-                },
-            )
-
-        recovered: list[dict[str, Any]] = []
-        blocked: list[dict[str, Any]] = []
-        root = run_directory(self.config.data_root_path, run.id).resolve()
-        for step in run.plan.steps:
-            step_dir = root / step.id
-            if step_dir.is_symlink() or (step_dir.exists() and not step_dir.is_dir()):
-                blocked.append(
-                    {"step_id": step.id, "reason": "Step attempt path is not a regular directory"}
-                )
-                continue
-            directories: dict[int, Path] = {}
-            malformed_directories: list[str] = []
-            if step_dir.is_dir():
-                for item in step_dir.glob("attempt-*"):
-                    try:
-                        attempt_number = int(item.name.removeprefix("attempt-"))
-                    except ValueError:
-                        if item.is_dir() or item.is_symlink() or item.is_file():
-                            malformed_directories.append(item.name)
-                        continue
-                    if (
-                        attempt_number < 1
-                        or attempt_number in directories
-                        or (not item.is_dir() and not item.is_symlink())
-                    ):
-                        malformed_directories.append(item.name)
-                        continue
-                    directories[attempt_number] = item
-
-            records_by_attempt: dict[int, list[dict[str, Any]]] = {}
-            for record in run.attempts:
-                if record.get("step_id") != step.id:
-                    continue
-                try:
-                    attempt_number = int(record.get("attempt", 0))
-                except (TypeError, ValueError):
-                    blocked.append(
-                        {"step_id": step.id, "reason": "attempt record has an invalid number"}
-                    )
-                    continue
-                if attempt_number < 1:
-                    blocked.append(
-                        {"step_id": step.id, "reason": "attempt record has an invalid number"}
-                    )
-                    continue
-                records_by_attempt.setdefault(attempt_number, []).append(record)
-
-            attempt_numbers = set(directories) | set(records_by_attempt)
-            if not attempt_numbers:
-                if malformed_directories:
-                    blocked.append(
-                        {
-                            "step_id": step.id,
-                            "directories": malformed_directories,
-                            "reason": "attempt directory name cannot be ordered safely",
-                        }
-                    )
-                continue
-            latest_attempt = max(attempt_numbers)
-            if malformed_directories:
-                blocked.append(
-                    {
-                        "step_id": step.id,
-                        "attempt": latest_attempt,
-                        "directories": malformed_directories,
-                        "reason": "attempt directory name cannot be ordered safely",
-                    }
-                )
-                continue
-            attempt_dir = directories.get(latest_attempt)
-            result_path = attempt_dir / "result.json" if attempt_dir is not None else None
-            has_result_path = bool(
-                result_path is not None and (result_path.exists() or result_path.is_symlink())
-            )
-            latest_records = records_by_attempt.get(latest_attempt, [])
-            if len(latest_records) > 1:
-                blocked.append(
-                    {
-                        "step_id": step.id,
-                        "attempt": latest_attempt,
-                        "reason": "multiple lifecycle records claim the latest attempt",
-                    }
-                )
-                continue
-            latest_record = latest_records[-1] if latest_records else None
-
-            if has_result_path:
-                try:
-                    if (
-                        result_path is None
-                        or attempt_dir is None
-                        or attempt_dir.is_symlink()
-                        or result_path.is_symlink()
-                        or not result_path.is_file()
-                    ):
-                        raise ValueError("latest attempt Result path is not a regular file")
-                    resolved_result_path = result_path.resolve()
-                    if root not in resolved_result_path.parents:
-                        raise ValueError("latest attempt Result path escapes the Run directory")
-                    result = Result.model_validate(
-                        json.loads(resolved_result_path.read_text(encoding="utf-8")), strict=True
-                    )
-                    if (
-                        result.run_id != run.id
-                        or result.step_id != step.id
-                        or result.attempt != latest_attempt
-                    ):
-                        raise ValueError("latest attempt Result identity does not match its path")
-                    if result.step_fingerprint != _step_fingerprint(step):
-                        recovered.append(
-                            {
-                                "step_id": step.id,
-                                "attempt": latest_attempt,
-                                "status": "superseded_revision",
-                            }
-                        )
-                        continue
-                    expected = self._expected_input_bindings(run, step)
-                    execution.validate_result_candidate(
-                        run,
-                        step,
-                        result,
-                        expected_input_bindings=expected,
-                        tool=self.registry.get(step.tool),
-                    )
-                    for artifact_id in [*result.artifact_ids, *result.input_artifact_ids]:
-                        artifact = find_artifact(run, artifact_id)
-                        artifact_path(self.config.data_root_path, run, artifact)
-                except (
-                    OSError,
-                    json.JSONDecodeError,
-                    TypeError,
-                    ValueError,
-                    execution.AttemptLifecycleError,
-                ) as error:
-                    blocked.append(
-                        {
-                            "step_id": step.id,
-                            "attempt": latest_attempt,
-                            "reason": str(error),
-                        }
-                    )
-                    continue
-
-                relative = resolved_result_path.relative_to(root).as_posix()
-                if relative not in run.result_index:
-                    run.result_index.append(relative)
-                record = latest_record
-                if record is None:
-                    record = {
-                        "step_id": step.id,
-                        "attempt": latest_attempt,
-                        "relative_path": attempt_dir.relative_to(root).as_posix(),
-                    }
-                    run.attempts.append(record)
-                record.update(
-                    {
-                        "phase": "finished",
-                        "status": result.status,
-                        "artifact_ids": list(result.artifact_ids),
-                        "output_ports": dict(result.output_ports),
-                        "input_artifact_ids": list(result.input_artifact_ids),
-                        "step_fingerprint": result.step_fingerprint,
-                        "recovered": True,
-                    }
-                )
-                recovered.append(
-                    {
-                        "step_id": step.id,
-                        "attempt": latest_attempt,
-                        "path": relative,
-                        "status": result.status,
-                    }
-                )
-                if result.status == "succeeded":
-                    run.step_status[step.id] = "succeeded"
-                    run.current_results[step.id] = relative
-                    continue
-
-                run.current_results.pop(step.id, None)
+                save_result(self.config.data_root_path, run, result)
+                result_path = result.attempt_relative_path + "/result.json"
+                if result_path not in run.result_index:
+                    run.result_index.append(result_path)
                 run.step_status[step.id] = result.status
-                run.finish_active_interval()
+                if result.status == "succeeded":
+                    run.current_results[step.id] = result_path
+                    run.pending_data = {}
+                    self._record_result_summary(run, result)
+                    save_run(self.config.data_root_path, run)
+                    continue
                 if result.status == "needs_input":
                     run.status = "waiting"
                     run.waiting_for = "clarification"
@@ -1305,243 +884,69 @@ class Agent:
                         **result.diagnostics,
                         **result.clarification,
                         "step_id": step.id,
-                        "result_path": relative,
-                        "recovered": True,
-                    }
-                else:
-                    run.status = result.status
-                    run.waiting_for = None
-                    run.pending_data = {
-                        **result.diagnostics,
-                        "category": result.diagnostics.get("category", result.status),
-                        "recovered_attempt": latest_attempt,
-                        "reason": result.diagnostics.get(
-                            "reason", f"latest verified attempt ended with {result.status}"
-                        ),
-                    }
-                execution.persist_run(self.config.data_root_path, run)
-                return True
-
-            if latest_record is not None:
-                record_phase = latest_record.get("phase")
-                record_status = latest_record.get("status")
-                record_fingerprint = latest_record.get("step_fingerprint")
-                if (
-                    record_phase == "finished"
-                    and record_status
-                    in {"succeeded", "failed", "cancelled", "interrupted", "needs_input"}
-                    and record_fingerprint != _step_fingerprint(step)
-                ):
-                    recovered.append(
-                        {
-                            "step_id": step.id,
-                            "attempt": latest_attempt,
-                            "status": "superseded_revision_without_result",
-                        }
-                    )
-                    continue
-                if (
-                    record_phase == "finished"
-                    and record_status in {"failed", "cancelled", "interrupted"}
-                    and record_fingerprint == _step_fingerprint(step)
-                ):
-                    run.current_results.pop(step.id, None)
-                    run.step_status[step.id] = str(record_status)
-                    run.status = str(record_status)  # type: ignore[assignment]
-                    run.waiting_for = None
-                    run.pending_data = {
-                        "category": latest_record.get("failure_category", record_status),
-                        "reason": latest_record.get(
-                            "failure_reason", f"latest attempt ended with {record_status}"
-                        ),
-                        "step_id": step.id,
-                        "recovered_attempt": latest_attempt,
-                        "result_status": "not_published",
+                        "result_path": result.attempt_relative_path + "/result.json",
                     }
                     run.finish_active_interval()
-                    execution.persist_run(self.config.data_root_path, run)
-                    return True
+                    save_run(self.config.data_root_path, run)
+                    return result
+                save_run(self.config.data_root_path, run)
+                if self._try_repair(run, step, result, cancel_event):
+                    run.start_active_interval()
+                    continue
+                run.status = result.status
+                run.finish_active_interval()
+                save_run(self.config.data_root_path, run)
+                return result
+        except KeyboardInterrupt:
+            cancel_event.set()
+            run.status = "cancelled"
+            run.finish_active_interval()
+            save_run(self.config.data_root_path, run)
+            raise
+        finally:
+            if run.status in {"succeeded", "failed", "cancelled", "interrupted"}:
+                run.finish_active_interval()
+                save_run(self.config.data_root_path, run)
 
-            unfinished_records = [
-                item for item in latest_records if item.get("phase") in {"prepared", "started"}
-            ]
-            if unfinished_records or attempt_dir is not None or latest_record is None:
-                blocked.append(
-                    {
-                        "step_id": step.id,
-                        "attempt": latest_attempt,
-                        "records": latest_records,
-                        "directory": attempt_dir.name if attempt_dir is not None else None,
-                        "reason": (
-                            "latest attempt has no verified finished Result; automatic "
-                            "recomputation is disabled"
-                        ),
-                    }
-                )
-
-        if blocked:
-            return self._stop_for_recovery(
-                run,
-                {
-                    "category": "recovery_unknown",
-                    "reason": (
-                        "an unfinished or unverified attempt requires explicit recovery review"
-                    ),
-                    "attempts": blocked,
-                    "recovered": recovered,
-                },
-            )
-        if recovered:
-            run.pending_data = {"category": "recovery_indexed", "attempts": recovered}
-            execution.persist_run(self.config.data_root_path, run)
-        return False
-
-    def _stop_for_recovery(self, run: Run, diagnostic: dict[str, Any]) -> bool:
-        run.status = "interrupted"
-        run.waiting_for = None
-        run.pending_data = diagnostic
-        run.finish_active_interval()
-        try:
-            execution.persist_run(self.config.data_root_path, run)
-        except execution.PersistenceFailure as error:
-            run.pending_data["persistence"] = {
-                "status": "not_persisted",
-                "stage": error.stage,
-                "exception_type": type(error.error).__name__,
-                "reason": str(error.error),
-            }
-        return True
-
-    def _expected_input_bindings(self, run: Run, step: Step) -> dict[str, str]:
-        expected: dict[str, str] = {}
-        for name, reference in step.inputs.items():
-            artifact = self._artifact_from_reference(run, reference)
-            if artifact is not None:
-                expected[name] = artifact.id
-        return expected
-
-    def _close_execution_failure(
-        self,
-        run: Run,
-        *,
-        category: str,
-        error: Exception,
-        stage: str,
-        step_id: str | None,
-        last_result: Result | None,
-    ) -> Result | None:
-        """Close one ordinary failure with one bounded best-effort checkpoint."""
-
-        run.status = "failed"
-        run.waiting_for = None
-        committed_step = bool(
-            step_id is not None
-            and run.step_status.get(step_id) == "succeeded"
-            and run.current_results.get(step_id)
-        )
-        if step_id is not None and not committed_step:
-            run.step_status[step_id] = "failed"
-        diagnostic: dict[str, Any] = {
-            "category": category,
-            "stage": stage,
-            "exception_type": type(error).__name__,
-            "reason": str(error),
-        }
-        if step_id is not None:
-            diagnostic["step_id"] = step_id
-        if committed_step:
-            diagnostic["committed_result_preserved"] = True
-        run.pending_data = diagnostic
-        run.finish_active_interval()
-        try:
-            execution.persist_run(self.config.data_root_path, run)
-        except execution.PersistenceFailure as checkpoint_error:
-            # A continuously unwritable Run is reported as not persisted.  Do
-            # not retry from finally blocks or turn this into an unbounded loop.
-            run.pending_data["persistence"] = {
-                "status": "not_persisted",
-                "stage": checkpoint_error.stage,
-                "exception_type": type(checkpoint_error.error).__name__,
-                "reason": str(checkpoint_error.error),
-            }
-        return last_result
-
-    def confirm(
-        self,
-        run: Run | str | None = None,
-        *,
-        presented_run_id: str | None = None,
-        presented_fingerprint: str | None = None,
-        queued_confirmation: bool = False,
-    ) -> AgentResponse:
-        """Consume a confirmation only from the owner-reloaded Run.
-
-        The CLI passes the Run id and preview fingerprint captured when the
-        command entered its input queue.  If that token is stale, confirmation
-        is rejected without changing the current Run.
-        """
-
-        if queued_confirmation and (
-            not isinstance(presented_run_id, str)
-            or not presented_run_id
-            or not isinstance(presented_fingerprint, str)
-            or not presented_fingerprint
-        ):
-            return AgentResponse("确认项无法唯一对应当前预览，请重新查看并确认。")
-        candidate = self._coerce_run(run) if run is not None else None
-        run_id = presented_run_id or (candidate.id if candidate is not None else None)
-        if run_id is None:
-            candidate = self._coerce_run(None)
-            run_id = candidate.id if candidate is not None else None
-        if run_id is None:
-            return AgentResponse("当前没有等待确认的计算。")
-        if candidate is not None and candidate.id != run_id:
-            return AgentResponse("确认项已过期，请重新查看当前任务后确认。", run=candidate)
-
-        # Admission happens before _begin_request.  A competing confirmation
-        # therefore cannot cancel or replace the first request's Event.
-        try:
-            owner = execution.RunOwner(self.config.data_root_path, run_id)
-            owner.__enter__()
-        except execution.ExecutionBusy:
-            # A corrupt or missing authoritative record is not replaced with a
-            # stale caller object on the busy path.
-            authoritative = load_run(self.config.data_root_path, run_id)
-            return AgentResponse(
-                "该计算正在被其他确认或执行占用，未重复执行；请稍后查看当前状态。",
-                run=authoritative,
-                result=self._latest_result(authoritative),
-            )
-
-        owner_key = (get_ident(), run_id)
-        self._owned_run_owners[owner_key] = owner
-        request_token: int | None = None
-        request_cancel: Event | None = None
+    def confirm(self, run: Run | str | None = None) -> AgentResponse:
+        request_token, request_cancel = self._begin_request()
         origin_session = self.session_id
-        current: Run | None = None
         try:
-            # The object supplied by the caller may be stale.  Reload after
-            # admission so authorization is consumed only from the owner state.
-            current = load_run(self.config.data_root_path, run_id)
-            stored_fingerprint = current.pending_data.get("confirmation_fingerprint")
-            if queued_confirmation and (
-                current.waiting_for != "confirmation"
-                or stored_fingerprint != presented_fingerprint
-                or current.id != presented_run_id
-            ):
-                return AgentResponse(
-                    "确认项已过期，当前任务未被确认；请重新查看预览后再次确认。",
-                    run=current,
-                    result=self._latest_result(current),
+            current = self._coerce_run(run)
+            if current is None:
+                response = AgentResponse("当前没有等待确认的计算。")
+                self._record_response(
+                    response,
+                    cancel=request_cancel,
+                    request_token=request_token,
+                    session_id=origin_session,
                 )
+                return response
             if current.status in {"succeeded", "failed", "cancelled", "interrupted"}:
                 result = self._latest_result(current)
-                return self._response_for_run(current, result)
+                response = self._response_for_run(
+                    current,
+                    result,
+                    cancel=request_cancel,
+                )
+                self._record_response(
+                    response,
+                    cancel=request_cancel,
+                    request_token=request_token,
+                    session_id=origin_session,
+                )
+                return response
             if current.waiting_for != "confirmation":
-                return AgentResponse(self._waiting_text(current), run=current)
-
-            request_token, request_cancel = self._begin_request()
-            preview_fingerprint = current.pending_data.get("confirmation_fingerprint")
+                response = AgentResponse(self._waiting_text(current), run=current)
+                self._record_response(
+                    response,
+                    cancel=request_cancel,
+                    request_token=request_token,
+                    session_id=origin_session,
+                )
+                return response
+            current.execution_permission = True
+            current.waiting_for = None
             current.accepted_snapshot = self._acceptance_snapshot(current)
             current.accepted_execution_sha256 = execution_fingerprint(
                 current.plan,
@@ -1549,36 +954,15 @@ class Agent:
                 current.artifact_index,
                 snapshot=current.accepted_snapshot,
             )
-            if (
-                isinstance(preview_fingerprint, str)
-                and preview_fingerprint != current.accepted_execution_sha256
-            ):
-                # The durable preview changed even though this confirmation
-                # admitted the Run.  Require a fresh preview; never execute an
-                # unreviewed plan and do not convert a normal plan revision
-                # into a scientific failure.
-                current.accepted_snapshot = {}
-                current.accepted_execution_sha256 = None
-                step_id = current.pending_data.get("step_id")
-                step = next((item for item in current.plan.steps if item.id == step_id), None)
-                if step is not None:
-                    self._prepare_confirmation(current, step)
-                else:
-                    current.status = "waiting"
-                    current.waiting_for = "confirmation"
-                    current.pending_data = {
-                        "category": "confirmation_stale",
-                        "reason": ("confirmation preview no longer matches the authoritative Run"),
-                    }
-                current.finish_active_interval()
-                execution.persist_run(self.config.data_root_path, current)
-                return AgentResponse("确认预览已变化，请重新查看并确认。", run=current)
-
-            current.execution_permission = True
-            current.waiting_for = None
-            execution.persist_run(self.config.data_root_path, current)
+            save_run(self.config.data_root_path, current)
             self._cancel_events[current.id] = request_cancel
-            result = self.advance(current, cancel=request_cancel)
+            try:
+                result = self.advance(current, cancel=request_cancel)
+            except (PermissionError, ValueError, OSError) as error:
+                current.status = "failed"
+                current.pending_data = {"category": "execution_boundary", "reason": str(error)}
+                save_run(self.config.data_root_path, current)
+                result = self._latest_result(current)
             response = self._response_for_run(current, result, cancel=request_cancel)
             self._record_response(
                 response,
@@ -1587,88 +971,32 @@ class Agent:
                 session_id=origin_session,
             )
             return response
-        except execution.PersistenceFailure as error:
-            if current is None:
-                raise
-            result = self._close_execution_failure(
-                current,
-                category=error.stage,
-                error=error.error,
-                stage=error.stage,
-                step_id=None,
-                last_result=self._latest_result(current),
-            )
-            return self._response_for_run(current, result, cancel=request_cancel)
         finally:
-            if request_token is not None and request_cancel is not None:
-                self._finish_request(request_token, request_cancel)
-            self._owned_run_owners.pop(owner_key, None)
-            owner.__exit__(None, None, None)
+            self._finish_request(request_token, request_cancel)
 
     def cancel(self, run: Run | str | None = None) -> AgentResponse:
-        """Signal an owned execution before attempting durable cancellation."""
-
         active_request = self._active_request
         if active_request is not None:
             active_request[1].set()
         current = self._coerce_run(run)
-        run_id = current.id if current is not None else None
-        if run_id is None and run is None and len(self._active_execution_events) == 1:
-            run_id = next(iter(self._active_execution_events))
-        if run_id is None:
+        if current is None:
             if active_request is not None:
                 return AgentResponse("已请求取消当前请求。")
             return AgentResponse("当前没有活动中的计算。")
-
-        # This is the only cancellation action taken while another thread owns
-        # the Run.  It changes an Event, never the owner's Run object or its
-        # durable checkpoint.
-        event = self._cancel_events.setdefault(run_id, Event())
+        event = self._cancel_events.setdefault(current.id, Event())
         event.set()
-        owned_event = self._active_execution_events.get(run_id)
-        if owned_event is not None:
-            owned_event.set()
-            return AgentResponse("已请求取消当前计算。", run=current)
+        if current.status == "waiting" and current.status not in {
+            "succeeded",
+            "failed",
+            "cancelled",
+            "interrupted",
+        }:
+            current.status = "cancelled"
+            current.waiting_for = None
+            save_run(self.config.data_root_path, current)
         if active_request is not None:
             return AgentResponse("已请求取消当前请求。", run=current)
-
-        try:
-            owner = execution.RunOwner(self.config.data_root_path, run_id)
-            owner.__enter__()
-        except execution.ExecutionBusy:
-            authoritative = load_run(self.config.data_root_path, run_id)
-            return AgentResponse(
-                "当前计算正由其他执行者占用；此实例无法确认对方已收到取消请求，请稍后查看状态。",
-                run=authoritative,
-            )
-        try:
-            authoritative = load_run(self.config.data_root_path, run_id)
-            if authoritative.status in {
-                "succeeded",
-                "failed",
-                "cancelled",
-                "interrupted",
-            }:
-                return AgentResponse("当前计算已经结束。", run=authoritative)
-            authoritative.status = "cancelled"
-            authoritative.waiting_for = None
-            authoritative.pending_data = {
-                "category": "cancelled",
-                "reason": "user requested cancellation",
-            }
-            authoritative.finish_active_interval()
-            try:
-                execution.persist_run(self.config.data_root_path, authoritative)
-            except execution.PersistenceFailure as error:
-                authoritative.pending_data["persistence"] = {
-                    "status": "not_persisted",
-                    "stage": error.stage,
-                    "exception_type": type(error.error).__name__,
-                    "reason": str(error.error),
-                }
-            return AgentResponse("已请求取消当前计算。", run=authoritative)
-        finally:
-            owner.__exit__(None, None, None)
+        return AgentResponse("已请求取消当前计算。", run=current)
 
     def request_cancel(self) -> AgentResponse:
         """Signal cancellation without mutating a Run owned by the worker.
@@ -1707,17 +1035,6 @@ class Agent:
             result=result,
         )
 
-    def confirmation_token(self, run: Run | str | None = None) -> tuple[str, str] | None:
-        """Return the durable confirmation token captured by the CLI queue."""
-
-        current = self._coerce_run(run)
-        if current is None or current.waiting_for != "confirmation":
-            return None
-        fingerprint = current.pending_data.get("confirmation_fingerprint")
-        if not isinstance(fingerprint, str) or not fingerprint:
-            return None
-        return current.id, fingerprint
-
     def new_session(self) -> AgentResponse:
         current = self._coerce_run(None)
         if current is not None and current.status in {"running", "waiting"}:
@@ -1736,18 +1053,8 @@ class Agent:
             "active_run_id": None,
             "pending_prompt": None,
         }
-        if self._save_session():
-            return AgentResponse("已开始新会话。")
-        return AgentResponse(
-            "已开始新会话，但会话摘要未能持久化；科学 Run/Result 记录不受影响。",
-            delivery={
-                "status": "not_persisted",
-                "session_persistence": {
-                    "status": "not_persisted",
-                    "reason": "session record could not be saved",
-                },
-            },
-        )
+        self._save_session()
+        return AgentResponse("已开始新会话。")
 
     def _create_chat_run(
         self,
@@ -1869,45 +1176,66 @@ class Agent:
         )
         return artifact
 
-    def _prepare_tool_step(self, run: Run, step: Step) -> Step | None:
+    def _prepare_orca_step(self, run: Run, step: Step) -> Step | None:
         tool = self.registry.get(step.tool)
-        if tool.parameter_preparation_function is None:
-            return step
-        prepared = tool.prepare_parameters(
-            self._tool_preparation_context(run, step, tool), run, step
-        )
-        if prepared is not None:
-            run.plan = _replace_step(run.plan, prepared)
-            parameter_sources = run.pending_data.get("parameter_sources")
-            if isinstance(parameter_sources, Mapping):
-                run.parameter_sources_by_step[step.id] = dict(parameter_sources)
-        return prepared
-
-    def _tool_preparation_context(self, run: Run, step: Step, tool: Tool) -> dict[str, Any]:
-        """Build the restricted, already-verified view supplied to Tool policy."""
-
-        return {
-            "config": self.config,
-            "defaults": dict(self.config.defaults),
-            "structure_facts": self._known_structure_facts(run, step),
-            "geometry": self._verified_geometry_for_step(run, step),
-            "parameter_fields": _tool_parameter_fields(tool),
-            "tool": tool,
+        original_parameters = dict(step.parameters)
+        checked_parameters = tool.validate_parameters(original_parameters, allow_deferred=True)
+        supplied_parameters = {
+            name: checked_parameters[name]
+            for name in original_parameters
+            if name in checked_parameters
         }
-
-    def _verified_geometry_for_step(self, run: Run, step: Step) -> Any | None:
-        reference = step.inputs.get("geometry")
-        if reference is None:
+        parameter_fields = _tool_parameter_fields(tool)
+        if (
+            run.accepted_snapshot
+            and "charge" in step.parameters
+            and "multiplicity" in step.parameters
+        ):
+            validated = tool.validate_parameters(step.parameters)
+            _validate_orca_profile(validated)
+            return step.model_copy(update={"parameters": validated})
+        if (
+            run.pending_data.get("step_id") == step.id
+            and run.pending_data.get("parameters") == step.parameters
+            and run.pending_data.get("parameter_sources")
+        ):
+            validated = self.registry.get(step.tool).validate_parameters(step.parameters)
+            _validate_orca_profile(validated)
+            return step.model_copy(update={"parameters": validated})
+        facts = self._known_structure_facts(run, step)
+        resolution = resolve_parameters(
+            run.request.explicit_parameters,
+            facts,
+            supplied_parameters,
+            self.config.defaults,
+            user_modifications=run.request.user_modifications,
+            parameter_fields=parameter_fields,
+        )
+        if resolution.missing_fields:
+            run.status = "waiting"
+            run.waiting_for = "clarification"
+            run.pending_data = {
+                "question": "Please provide the missing electronic state parameters.",
+                "step_id": step.id,
+                "missing_fields": list(resolution.missing_fields),
+                "parameter_sources": resolution.parameter_sources,
+                "parameters": dict(step.parameters),
+            }
             return None
-        try:
-            artifact = self._artifact_from_reference(run, reference)
-            if artifact is None:
-                return None
-            return parse_xyz_bytes(
-                artifact_path(self.config.data_root_path, run, artifact).read_bytes()
-            )
-        except (OSError, TypeError, ValueError):
-            return None
+        validated = tool.validate_parameters(resolution.effective_parameters)
+        _validate_orca_profile(validated)
+        replacement = Step.model_validate(
+            {**step.model_dump(mode="python"), "parameters": validated}, strict=True
+        )
+        run.plan = _replace_step(run.plan, replacement)
+        run.pending_data = {
+            "step_id": step.id,
+            "parameters": dict(validated),
+            "parameter_sources": resolution.parameter_sources,
+            "effective_parameters": validated,
+        }
+        run.parameter_sources_by_step[step.id] = dict(resolution.parameter_sources)
+        return replacement
 
     def _apply_parameter_update(
         self, run: Run, parameters: dict[str, Any], *, cancel: Event | None = None
@@ -1938,15 +1266,13 @@ class Agent:
             _validate_request_parameter_scope(candidate_request, run.plan, self.registry)
             candidate_steps: list[Step] = []
             candidate_sources: dict[str, dict[str, str]] = {}
-            working_run = run.model_copy(deep=True)
-            working_run.request = candidate_request
             for step in run.plan.steps:
                 tool = self.registry.get(step.tool)
                 if not tool.request_parameters:
                     candidate_steps.append(step)
                     continue
 
-                if tool.parameter_preparation_function is None:
+                if tool.parameter_preparation != "orca_electronic_state":
                     replacement = merge_explicit_step_parameters(tool, step, candidate_request)
                     candidate_steps.append(replacement)
                     candidate_sources[step.id] = {
@@ -1962,7 +1288,6 @@ class Agent:
                             or name in candidate_request.explicit_parameters
                         )
                     }
-                    working_run.plan = _replace_step(working_run.plan, replacement)
                     continue
 
                 parameter_fields = _tool_parameter_fields(tool)
@@ -1972,20 +1297,37 @@ class Agent:
                 merged = dict(step.parameters)
                 merged.update(step_patch)
                 checked = tool.validate_parameters(merged, allow_deferred=True)
-                candidate_step = Step.model_validate(
-                    {**step.model_dump(mode="python"), "parameters": checked}, strict=True
+                supplied = {name: checked[name] for name in merged if name in checked}
+                resolution = resolve_parameters(
+                    candidate_request.explicit_parameters,
+                    self._known_structure_facts(run, step),
+                    supplied,
+                    self.config.defaults,
+                    user_modifications=candidate_request.user_modifications,
+                    parameter_fields=parameter_fields,
                 )
-                working_run.plan = _replace_step(working_run.plan, candidate_step)
-                prepared = tool.prepare_parameters(
-                    self._tool_preparation_context(working_run, candidate_step, tool),
-                    working_run,
-                    candidate_step,
+                effective = tool.validate_parameters(
+                    resolution.effective_parameters,
+                    allow_deferred=bool(resolution.missing_fields),
                 )
-                replacement = prepared or candidate_step
+                if tool.execution_budget == "orca":
+                    _validate_orca_profile(effective)
+                    reference = step.inputs.get("geometry")
+                    if (
+                        "charge" in effective
+                        and "multiplicity" in effective
+                        and reference is not None
+                        and self._artifact_from_reference(run, reference) is not None
+                    ):
+                        # Validate against a geometry already available at this
+                        # boundary. A downstream Step may reference an Opt port
+                        # that is intentionally not produced until after confirmation.
+                        self._validate_candidate_electronic_state(run, step, effective)
+                replacement = Step.model_validate(
+                    {**step.model_dump(mode="python"), "parameters": effective}, strict=True
+                )
                 candidate_steps.append(replacement)
-                candidate_sources[step.id] = dict(
-                    working_run.pending_data.get("parameter_sources", {})
-                )
+                candidate_sources[step.id] = dict(resolution.parameter_sources)
 
             candidate_plan = Plan.model_validate(
                 {
@@ -2212,8 +1554,7 @@ class Agent:
     def _try_repair(self, run: Run, step: Step, result: Result, cancel: Event) -> bool:
         if not self.config.repair.enabled:
             return False
-        tool = self.registry.get(step.tool)
-        options = tool.repair_options(run, step, result)
+        options = applicable_repairs(run, step, result) + applicable_scf_repair(run, step, result)
         if not options or self.llm is None:
             return False
         if run.plan_revisions >= int(run.budget.get("max_plan_revisions", 2)):
@@ -2230,7 +1571,13 @@ class Agent:
             }
             save_run(self.config.data_root_path, run)
             return False
-        if not tool.admit_repair(run, step, result):
+        max_extra = int(
+            run.budget.get(
+                "max_extra_orca_executions",
+                self.config.repair.max_extra_orca_executions,
+            )
+        )
+        if run.extra_orca_executions >= max_extra:
             return False
         try:
             proposal = propose_repair(
@@ -2273,22 +1620,37 @@ class Agent:
         return True
 
     def _reserve_attempt(self, run: Run, step: Step, tool: Tool) -> bool:
-        """Compatibility wrapper for the Tool-owned attempt policy."""
-
-        return tool.reserve_attempt(run, step)
+        if tool.execution_budget != "orca":
+            return True
+        origin = run.origin_step_map.get(step.id, step.origin_step_id or step.id)
+        known_origin = step.id in run.origin_step_map or origin in run.origin_step_map.values()
+        new_science_step = bool(run.accepted_snapshot) and not known_origin
+        if step.id not in run.origin_step_map:
+            run.origin_step_map[step.id] = origin
+        count = int(run.attempt_counts.get(origin, 0))
+        if count >= int(run.budget.get("max_attempts_per_science_step", 3)):
+            run.pending_data = {
+                "budget_exhausted": "max_attempts_per_science_step",
+                "step_id": step.id,
+            }
+            return False
+        if (count > 0 or new_science_step) and run.extra_orca_executions >= int(
+            run.budget.get("max_extra_orca_executions", 3)
+        ):
+            run.pending_data = {
+                "budget_exhausted": "max_extra_orca_executions",
+                "step_id": step.id,
+            }
+            return False
+        run.attempt_counts[origin] = count + 1
+        if count > 0 or new_science_step:
+            run.extra_orca_executions += 1
+        return True
 
     def _prepare_confirmation(self, run: Run, step: Step) -> None:
         run.status = "waiting"
         run.waiting_for = "confirmation"
-        preview = self._preview(run, step)
-        preview_snapshot = self._acceptance_snapshot(run)
-        preview["confirmation_fingerprint"] = execution_fingerprint(
-            run.plan,
-            run.resources,
-            run.artifact_index,
-            snapshot=preview_snapshot,
-        )
-        run.pending_data = preview
+        run.pending_data = self._preview(run, step)
 
     def _validate_known_plan_parameters(self, run: Run, plan: Plan | None = None) -> None:
         """Validate parameters against any trusted geometry already available."""
@@ -2296,10 +1658,7 @@ class Agent:
         candidate_plan = plan or run.plan
         for step in candidate_plan.steps:
             tool = self.registry.get(step.tool)
-            if (
-                tool.parameter_validation_function is None
-                or tool.parameter_preparation_function is not None
-            ):
+            if tool.parameter_validation_function is None:
                 continue
             context = self._parameter_validation_context(run, candidate_plan, step)
             try:
@@ -2598,6 +1957,27 @@ class Agent:
             return enriched
         return {}
 
+    def _validate_candidate_electronic_state(
+        self, run: Run, step: Step, parameters: dict[str, Any]
+    ) -> None:
+        reference = step.inputs.get("geometry")
+        if reference is None:
+            return
+        geometry_artifact = self._artifact_from_reference(run, reference)
+        if geometry_artifact is None:
+            raise ValueError("candidate geometry is not a current successful artifact")
+        try:
+            geometry = parse_xyz_bytes(
+                artifact_path(self.config.data_root_path, run, geometry_artifact).read_bytes()
+            )
+        except (OSError, ValueError) as error:
+            raise ValueError("candidate geometry cannot be validated") from error
+        validate_electronic_state(
+            geometry,
+            charge=parameters["charge"],
+            multiplicity=parameters["multiplicity"],
+        )
+
     def _molecule_artifact_for_geometry(
         self, run: Run, artifact: Any, *, seen: set[str]
     ) -> Any | None:
@@ -2770,7 +2150,7 @@ class Agent:
             return None
         try:
             return load_run(self.config.data_root_path, str(run_id))
-        except RunNotFoundError:
+        except ValueError:
             return None
 
     def _default_budget(self) -> dict[str, Any]:
@@ -2808,13 +2188,7 @@ class Agent:
                 **self._failure_render_context(run),
             )
             delivery: dict[str, Any] = {}
-            status_override = (
-                "cancelled"
-                if run.status == "cancelled"
-                else "run_failed"
-                if run.status != "succeeded"
-                else None
-            )
+            status_override = "cancelled" if run.status == "cancelled" else None
             if facts or unavailable or status_override is not None:
                 rendered_facts, delivery = self._render_verified_delivery(
                     run,
@@ -3207,7 +2581,6 @@ class Agent:
             preferences if preferences is not None else run.request.output_preferences
         )
         cancelled = status_override == "cancelled" or (cancel is not None and cancel.is_set())
-        run_failed = status_override == "run_failed"
         required = [str(fact["output_ref"]) for fact in renderable]
         if not required:
             if cancelled:
@@ -3313,8 +2686,6 @@ class Agent:
             )
         if unavailable_targets:
             text = f"{text}\n尚未交付：{'；'.join(unavailable_targets)}；未重新计算。"
-        if run_failed:
-            text = f"{text}\n科学 Result 已保留，但 Run 未能成功收口；本次交付不标记为完整成功。"
         locators: list[dict[str, Any]] = []
         for fact in renderable:
             ref = str(fact["output_ref"])
@@ -3350,8 +2721,6 @@ class Agent:
             locators.append(locator)
         if cancelled:
             status = "cancelled"
-        elif run_failed:
-            status = "failed"
         elif unavailable_targets:
             status = "partial"
         else:
@@ -3476,19 +2845,9 @@ class Agent:
             ]
             if delivery.get("status") == "complete":
                 self._session["last_delivery"] = outputs[-8:]
-        if not self._save_session():
-            response.delivery.setdefault(
-                "session_persistence",
-                {
-                    "status": "not_persisted",
-                    "reason": (
-                        "the scientific Run/Result is retained but the chat session summary "
-                        "was not saved"
-                    ),
-                },
-            )
+        self._save_session()
 
-    def _record_result_summary(self, run: Run, result: Result) -> bool:
+    def _record_result_summary(self, run: Run, result: Result) -> None:
         summaries = self._session.get("recent_results", [])
         recent_by_run: list[dict[str, Any]] = []
         if isinstance(summaries, list):
@@ -3512,14 +2871,13 @@ class Agent:
         )
         self._session["recent_results"] = recent_by_run[-MAX_RECENT_RUNS:]
         self._session["active_run_id"] = run.id
-        return self._save_session()
+        self._save_session()
 
-    def _save_session(self) -> bool:
+    def _save_session(self) -> None:
         try:
             save_session(self.config.data_root_path, self.session_id, self._session)
-        except Exception:
-            return False
-        return True
+        except OSError:
+            pass
 
     def _persist_llm_diagnostics(
         self,
@@ -4565,14 +3923,6 @@ def _bind_input_geometry(plan: Plan, artifact_id: str) -> Plan:
     return plan.model_copy(update={"steps": steps})
 
 
-def _sync_run_view(target: Run, source: Run) -> None:
-    """Refresh a caller's stale Run view without making it authoritative."""
-
-    for field_name in Run.model_fields:
-        setattr(target, field_name, deepcopy(getattr(source, field_name)))
-    target._active_interval_started_at = source._active_interval_started_at
-
-
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
@@ -4669,11 +4019,12 @@ def _normalize_explicit_plan(
                 for name in original_parameters
                 if name in checked_parameters
             }
-            if defaults is not None and tool.parameter_preparation_function is not None:
-                for name in ("method_profile", "environment"):
-                    if name in tool.request_parameters:
-                        supplied_parameters.setdefault(name, getattr(defaults, name))
+            if defaults is not None and tool.parameter_preparation == "orca_electronic_state":
+                supplied_parameters.setdefault("method_profile", defaults.method_profile)
+                supplied_parameters.setdefault("environment", defaults.environment)
             parameters = tool.validate_parameters(supplied_parameters)
+            if tool.execution_budget == "orca":
+                _validate_orca_profile(parameters)
             step = step.model_copy(update={"parameters": parameters})
         steps.append(step)
     return plan.model_copy(update={"steps": steps})
@@ -5485,7 +4836,15 @@ def _load_bound_result(data_root: str, run: Run, relative: str) -> Result | None
 
 
 def _step_fingerprint(step: Step) -> str:
-    return execution.step_fingerprint(step)
+    import hashlib
+
+    payload = json.dumps(
+        step.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _query_value_is_compatible(value: Any, declared_type: str) -> bool:
@@ -5518,6 +4877,14 @@ def _query_system_label(structure: Mapping[str, Any]) -> str:
     if isinstance(query, str) and query:
         return query
     return "该体系"
+
+
+def _validate_orca_profile(parameters: dict[str, Any]) -> None:
+    profile = get_profile(parameters["method_profile"])
+    if parameters["environment"] not in profile.supported_environments:
+        raise ValueError(
+            f"environment {parameters['environment']!r} is not implemented for {profile.name!r}"
+        )
 
 
 def _plan_fingerprint(plan: Plan) -> str:

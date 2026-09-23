@@ -26,10 +26,7 @@
 
 ## Master plan and phase workflow
 
-- The repository-local v3 implementation master plan is `docs/reconstruction/master_plan.md`. It is the checked-in copy of the user-designated `E:\chrome\MASTER_PLAN (1).md`; read it at the start of every phase task and use it to check the phase goals, dependencies, engineering principles, and acceptance evidence.
-- The current detailed phase plan is `docs/reconstruction/stages/R1.md`. R1 is limited to the unified Tool execution boundary, confirmation admission, ordinary exception closure, Result/Run checkpointing, conservative cancellation/recovery, and the minimum live ORCA boundary evidence described there. R0 remains historical baseline evidence and is not marked accepted by starting R1.
-- R1 was explicitly authorized by the user's current implementation request. Preserve R0 history and evidence; do not silently treat R0 as accepted or expand R1 into R2 task/result/dialogue work.
-- `docs/reconstruction/preflight.md` is the single current preparation record; update it with observed facts rather than treating the plans or templates as already-verified evidence.
+- The v3 implementation master plan is `E:\chrome\总方案BG6022_v3_Migration_Rebuild_Plan (1).md`. Read it at the start of every phase task and use it to check the phase goals, dependencies, engineering principles, and acceptance evidence.
 - The master plan is project guidance, not authorization to implement every phase or every aspirational item it describes. The detailed phase plan supplied by the user defines the current task's scope. Do not mark a phase complete until the user accepts the implementation.
 - If the master plan conflicts with this file or the user's current instructions, follow this file and the current user instructions. In particular, the active compute budget is 4 cores, 1024 MB total, `%maxcore 192`, and one concurrent job; the master plan's older 2048 MB / `%maxcore 384` values do not apply unless the user explicitly changes this constraint.
 - After completing and validating each user-provided phase plan, commit the corresponding changes and push them to `https://github.com/az87988799/BG6022-v3.git`. The user's current push instruction supersedes the master plan's older instruction to push only on explicit request.

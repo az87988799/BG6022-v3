@@ -8,7 +8,6 @@ import platform
 import queue
 import sys
 import threading
-from dataclasses import dataclass
 from pathlib import Path
 
 from .agent import INPUT_GEOMETRY_PLACEHOLDER, Agent, AgentResponse
@@ -122,13 +121,11 @@ def _show_run(args: argparse.Namespace) -> int:
     run = load_run(config.data_root_path, args.run_id)
     payload = run.model_dump(mode="json")
     results: list[dict[str, object]] = []
-    had_errors = False
     root = run_directory(config.data_root_path, run.id).resolve()
     for relative in run.result_index:
         candidate = (root / relative).resolve()
         if root not in candidate.parents or candidate.name != "result.json":
             results.append({"path": relative, "error": "result path escapes the Run directory"})
-            had_errors = True
             continue
         try:
             result = Result.model_validate(
@@ -137,10 +134,9 @@ def _show_run(args: argparse.Namespace) -> int:
             results.append({"path": relative, "result": result.model_dump(mode="json")})
         except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError) as error:
             results.append({"path": relative, "error": str(error)})
-            had_errors = True
     payload["results"] = results
     print(json.dumps(payload, ensure_ascii=True, indent=2))
-    return 1 if had_errors else 0
+    return 0
 
 
 def _run_tool(args: argparse.Namespace) -> int:
@@ -222,26 +218,9 @@ def _run_tool(args: argparse.Namespace) -> int:
         xyz_path=args.xyz,
         execute=True,
     )
-    in_memory_status = run.status
-    checkpoint: dict[str, object] = {"status": "verified"}
-    try:
-        authoritative = load_run(config.data_root_path, run.id)
-        if authoritative.status != in_memory_status:
-            checkpoint = {
-                "status": "mismatch",
-                "authoritative_status": authoritative.status,
-                "in_memory_status": in_memory_status,
-            }
-    except (OSError, ValueError) as error:
-        checkpoint = {
-            "status": "not_readable",
-            "exception_type": type(error).__name__,
-            "reason": str(error),
-        }
     payload = {
         "run_id": run.id,
-        "status": in_memory_status,
-        "result_status": result.status,
+        "status": result.status,
         "values": result.values,
         "checks": result.checks,
         "diagnostics": {
@@ -258,21 +237,18 @@ def _run_tool(args: argparse.Namespace) -> int:
         ),
         "run_path": str(Path(config.data_root_path) / "runs" / run.id / "run.json"),
         "artifact_ids": result.artifact_ids,
-        "run_checkpoint": checkpoint,
     }
     print(json.dumps(payload, ensure_ascii=True, indent=2))
-    return _result_exit_code(result, run_status=in_memory_status)
+    return _result_exit_code(result)
 
 
-def _result_exit_code(result: Result, *, run_status: str | None = None) -> int:
+def _result_exit_code(result: Result) -> int:
     category = result.diagnostics.get("category")
     if result.status == "cancelled" or category == "cancelled":
         return 130
     if category == "timeout":
         return 124
-    if run_status in {"failed", "interrupted", "cancelled"}:
-        return 130 if run_status == "cancelled" else 1
-    return 0 if result.status == "succeeded" and run_status in {None, "succeeded"} else 1
+    return 0 if result.status == "succeeded" else 1
 
 
 def _result_targets(tool) -> list[ResultTarget]:
@@ -296,43 +272,12 @@ def _chat(args: argparse.Namespace) -> int:
         return 2
 
 
-@dataclass(frozen=True)
-class _QueuedMessage:
-    text: str
-    confirmation_run_id: str | None = None
-    confirmation_fingerprint: str | None = None
-    confirmation_queued: bool = False
-
-
-class _DisplayedConfirmation:
-    """Snapshot only the confirmation preview that the display loop showed."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._token: tuple[str, str] | None = None
-
-    def observe(self, agent: Agent, response: AgentResponse) -> None:
-        run = response.run
-        token = (
-            agent.confirmation_token(run)
-            if run is not None and run.waiting_for == "confirmation"
-            else None
-        )
-        with self._lock:
-            self._token = token
-
-    def snapshot(self) -> tuple[str, str] | None:
-        with self._lock:
-            return self._token
-
-
 def _chat_loop(agent: Agent) -> int:
     """Keep input, display, and the one Agent worker separate."""
 
-    incoming: queue.Queue[_QueuedMessage | None] = queue.Queue()
+    incoming: queue.Queue[str | None] = queue.Queue()
     outgoing: queue.Queue[AgentResponse] = queue.Queue()
     stop_input = threading.Event()
-    displayed_confirmation = _DisplayedConfirmation()
 
     def read_input() -> None:
         while not stop_input.is_set():
@@ -354,34 +299,22 @@ def _chat_loop(agent: Agent) -> int:
                     "新任务",
                 }:
                     agent.request_cancel()
-                if normalized in {"/confirm", "confirm", "确认"}:
-                    token = displayed_confirmation.snapshot()
-                    incoming.put(
-                        _QueuedMessage(
-                            message,
-                            confirmation_run_id=token[0] if token else None,
-                            confirmation_fingerprint=token[1] if token else None,
-                            confirmation_queued=True,
-                        )
-                    )
-                else:
-                    incoming.put(_QueuedMessage(message))
+                incoming.put(message)
             except EOFError:
                 agent.request_cancel()
                 incoming.put(None)
                 return
             except KeyboardInterrupt:
                 agent.request_cancel()
-                incoming.put(_QueuedMessage("/exit"))
+                incoming.put("/exit")
                 return
 
     def work() -> None:
         while True:
-            item = incoming.get()
-            if item is None:
+            message = incoming.get()
+            if message is None:
                 agent.request_cancel()
                 return
-            message = item.text
             try:
                 if message.casefold() in {"/exit", "exit", "退出"}:
                     agent.request_cancel()
@@ -390,14 +323,7 @@ def _chat_loop(agent: Agent) -> int:
                 if message.casefold() in {"/cancel", "cancel", "取消"}:
                     outgoing.put(agent.cancel())
                     continue
-                outgoing.put(
-                    agent.handle_message(
-                        message,
-                        confirmation_run_id=item.confirmation_run_id,
-                        confirmation_fingerprint=item.confirmation_fingerprint,
-                        confirmation_queued=item.confirmation_queued,
-                    )
-                )
+                outgoing.put(agent.handle_message(message))
             except Exception as error:  # noqa: BLE001 - keep the chat worker alive per request
                 outgoing.put(AgentResponse(f"This request failed safely: {error}"))
 
@@ -414,7 +340,6 @@ def _chat_loop(agent: Agent) -> int:
             except queue.Empty:
                 continue
             print(response.text)
-            displayed_confirmation.observe(agent, response)
             if response.text.startswith("Exiting after"):
                 exiting = True
                 stop_input.set()

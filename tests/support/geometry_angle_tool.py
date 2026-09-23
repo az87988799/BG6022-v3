@@ -10,12 +10,13 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
-from bg6022 import execution
 from bg6022.config import AppConfig
 from bg6022.models import Result, Run, Step, Tool
 from bg6022.session import (
     artifact_path,
     register_bytes_artifact,
+    run_directory,
+    save_run,
 )
 from bg6022.tools.molecule import parse_xyz_bytes, resolve_artifact_reference
 
@@ -85,35 +86,10 @@ def make_geometry_angle_tool(config: AppConfig) -> Tool:
 
 
 def execute_geometry_angle(config: AppConfig, *, step: Step, run: Run, cancel: Event) -> Result:
-    context, owns_context = execution.ensure_attempt(config.data_root_path, run, step)
-    try:
-        result = _execute_geometry_angle(config, step=step, run=run, cancel=cancel, context=context)
-    except Exception as error:
-        if owns_context:
-            execution.fail_attempt(
-                run,
-                context,
-                category="angle_measurement",
-                reason=str(error),
-                persist=True,
-            )
-        raise
-    if owns_context:
-        execution.finish_attempt(run, context, result)
-    return result
-
-
-def _execute_geometry_angle(
-    config: AppConfig,
-    *,
-    step: Step,
-    run: Run,
-    cancel: Event,
-    context: execution.AttemptContext,
-) -> Result:
     parameters = GeometryAngleParameters.model_validate(step.parameters, strict=True)
-    attempt = context.attempt
-    relative = context.relative_path
+    attempt = _next_attempt(run, step.id)
+    relative = f"{step.id}/attempt-{attempt:02d}"
+    (run_directory(config.data_root_path, run.id) / relative).mkdir(parents=True, exist_ok=True)
     status = "failed"
     values: dict[str, Any] = {}
     diagnostics: dict[str, Any] = {}
@@ -207,6 +183,18 @@ def _execute_geometry_angle(
             "geometry_artifact_id": input_artifact_id,
         }
 
+    run.attempts.append(
+        {
+            "step_id": step.id,
+            "attempt": attempt,
+            "phase": "finished",
+            "status": status,
+            "artifact_ids": artifact_ids,
+            "output_ports": output_ports,
+            "input_artifact_ids": [input_artifact_id] if input_artifact_id else [],
+        }
+    )
+    save_run(config.data_root_path, run)
     return Result(
         run_id=run.id,
         step_id=step.id,
@@ -256,6 +244,13 @@ def _vector(
     point: tuple[float, float, float], vertex: tuple[float, float, float]
 ) -> tuple[float, float, float]:
     return tuple(float(left - right) for left, right in zip(point, vertex, strict=True))
+
+
+def _next_attempt(run: Run, step_id: str) -> int:
+    attempts = [
+        int(item.get("attempt", 0)) for item in run.attempts if item.get("step_id") == step_id
+    ]
+    return max(attempts, default=0) + 1
 
 
 __all__ = [

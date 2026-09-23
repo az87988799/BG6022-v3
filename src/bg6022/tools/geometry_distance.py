@@ -9,10 +9,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
-from bg6022 import execution
 from bg6022.config import AppConfig
 from bg6022.models import Result, Run, Step, Tool
-from bg6022.session import artifact_path
+from bg6022.session import artifact_path, run_directory, save_run
 from bg6022.tools.molecule import parse_xyz_bytes, resolve_artifact_reference
 
 
@@ -100,39 +99,12 @@ def make_geometry_distance_tool(config: AppConfig | None = None) -> Tool:
 
 
 def execute_geometry_distance(config: AppConfig, *, step: Step, run: Run, cancel: Event) -> Result:
-    context, owns_context = execution.ensure_attempt(config.data_root_path, run, step)
-    try:
-        result = _execute_geometry_distance(
-            config, step=step, run=run, cancel=cancel, context=context
-        )
-    except Exception as error:
-        if owns_context:
-            execution.fail_attempt(
-                run,
-                context,
-                category="tool_exception",
-                reason=str(error),
-                persist=True,
-            )
-        raise
-    if owns_context:
-        execution.finish_attempt(run, context, result)
-    return result
-
-
-def _execute_geometry_distance(
-    config: AppConfig,
-    *,
-    step: Step,
-    run: Run,
-    cancel: Event,
-    context: execution.AttemptContext,
-) -> Result:
     """Read, verify, and measure one geometry without changing its bytes."""
 
     parameters = GeometryDistanceParameters.model_validate(step.parameters, strict=True)
-    attempt = context.attempt
-    relative = context.relative_path
+    attempt = _next_attempt(run, step.id)
+    relative = f"{step.id}/attempt-{attempt:02d}"
+    (run_directory(config.data_root_path, run.id) / relative).mkdir(parents=True, exist_ok=True)
 
     status = "failed"
     values: dict[str, Any] = {}
@@ -194,6 +166,18 @@ def _execute_geometry_distance(
             "geometry_artifact_id": input_artifact_id,
         }
 
+    run.attempts.append(
+        {
+            "step_id": step.id,
+            "attempt": attempt,
+            "phase": "finished",
+            "status": status,
+            "artifact_ids": [],
+            "output_ports": {},
+            "input_artifact_ids": [input_artifact_id] if input_artifact_id else [],
+        }
+    )
+    save_run(config.data_root_path, run)
     return Result(
         run_id=run.id,
         step_id=step.id,
@@ -204,6 +188,13 @@ def _execute_geometry_distance(
         input_artifact_ids=[input_artifact_id] if input_artifact_id else [],
         attempt_relative_path=relative,
     )
+
+
+def _next_attempt(run: Run, step_id: str) -> int:
+    attempts = [
+        int(item.get("attempt", 0)) for item in run.attempts if item.get("step_id") == step_id
+    ]
+    return max(attempts, default=0) + 1
 
 
 __all__ = [
