@@ -1,0 +1,31 @@
+{
+  "intake": {
+    "intent": "chemistry_compute",
+    "subjects": {
+      "water": {
+        "key": "water"
+      }
+    },
+    "requirements": [
+      {
+        "key": "task",
+        "subject_key": "water",
+        "capability": "optimize_geometry",
+        "parameters": {
+          "method_request": "r2scan3c",
+          "charge": 0,
+          "multiplicity": 1
+        },
+        "outputs": [
+          "opt_final_electronic_energy"
+        ],
+        "input_bindings": {}
+      }
+    ],
+    "missing_fields": [
+      "请明确分子身份或提供 XYZ 结构。"
+    ]
+  },
+  "status": "blocked",
+  "error_category": "ambiguous_identity"
+}

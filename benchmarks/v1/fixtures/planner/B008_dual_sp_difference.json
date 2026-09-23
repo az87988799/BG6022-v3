@@ -1,0 +1,125 @@
+{
+  "intake": {
+    "intent": "chemistry_compute",
+    "subjects": {
+      "water": {
+        "key": "water",
+        "inline_xyz": "3\nwater geometry fixture; coordinates in angstrom\nO  0.000000  0.000000  0.000000\nH  0.758602  0.000000  0.504284\nH -0.758602  0.000000  0.504284\n"
+      }
+    },
+    "requirements": [
+      {
+        "key": "sp_r2",
+        "subject_key": "water",
+        "capability": "single_point",
+        "parameters": {
+          "method_request": "r2scan3c",
+          "charge": 0,
+          "multiplicity": 1
+        },
+        "outputs": [],
+        "input_bindings": {}
+      },
+      {
+        "key": "sp_pbe0",
+        "subject_key": "water",
+        "capability": "single_point",
+        "parameters": {
+          "method_request": "PBE0-D3(BJ)/def2-SVP",
+          "charge": 0,
+          "multiplicity": 1
+        },
+        "outputs": [],
+        "input_bindings": {}
+      },
+      {
+        "key": "difference",
+        "subject_key": "water",
+        "capability": "same_geometry_method_energy_difference",
+        "parameters": {},
+        "outputs": [
+          "method_energy_difference"
+        ],
+        "input_bindings": {
+          "energy_a": {
+            "requirement_key": "sp_r2",
+            "port": "energy_data"
+          },
+          "energy_b": {
+            "requirement_key": "sp_pbe0",
+            "port": "energy_data"
+          }
+        }
+      }
+    ],
+    "answer_goals": [
+      {
+        "kind": "compare",
+        "requirement_keys": [
+          "sp_r2",
+          "sp_pbe0"
+        ],
+        "output": "sp_electronic_energy",
+        "mode": "numeric_difference"
+      }
+    ]
+  },
+  "plan_proposal": {
+    "steps": [
+      {
+        "key": "sp_r2",
+        "tool": "single_point",
+        "parameters": {
+          "method_profile": "r2scan3c",
+          "environment": "gas",
+          "charge": 0,
+          "multiplicity": 1
+        },
+        "inputs": {
+          "geometry": {
+            "artifact_alias": "initial_geometry"
+          }
+        },
+        "requirement_key": "sp_r2"
+      },
+      {
+        "key": "sp_pbe0",
+        "tool": "single_point",
+        "parameters": {
+          "method_profile": "pbe0_d3bj_def2svp",
+          "environment": "gas",
+          "charge": 0,
+          "multiplicity": 1
+        },
+        "inputs": {
+          "geometry": {
+            "artifact_alias": "initial_geometry"
+          }
+        },
+        "requirement_key": "sp_pbe0"
+      },
+      {
+        "key": "difference",
+        "tool": "same_geometry_method_energy_difference",
+        "parameters": {},
+        "inputs": {
+          "energy_a": {
+            "step_key": "sp_r2",
+            "port": "energy_data"
+          },
+          "energy_b": {
+            "step_key": "sp_pbe0",
+            "port": "energy_data"
+          }
+        },
+        "requirement_key": "difference"
+      }
+    ],
+    "requested_results": [
+      {
+        "step_key": "difference",
+        "field": "method_energy_difference"
+      }
+    ]
+  }
+}

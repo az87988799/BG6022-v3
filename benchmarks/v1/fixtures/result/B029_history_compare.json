@@ -1,0 +1,10 @@
+{
+  "observation": {
+    "status": "completed",
+    "stage": "query",
+    "orca_attempts": 0,
+    "results": [],
+    "artifacts": [],
+    "response_text": "replay query fixture; no scientific values included"
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "intake": {
+    "intent": "chemistry_compute",
+    "subjects": {
+      "water": {
+        "key": "water",
+        "inline_xyz": "3\nwater geometry fixture; coordinates in angstrom\nO  0.000000  0.000000  0.000000\nH  0.758602  0.000000  0.504284\nH -0.758602  0.000000  0.504284\n"
+      }
+    },
+    "requirements": [
+      {
+        "key": "opt_r2",
+        "subject_key": "water",
+        "capability": "optimize_geometry",
+        "parameters": {
+          "method_request": "r2scan3c",
+          "charge": 0,
+          "multiplicity": 1
+        },
+        "outputs": [
+          "opt_final_electronic_energy"
+        ],
+        "input_bindings": {}
+      },
+      {
+        "key": "opt_pbe0",
+        "subject_key": "water",
+        "capability": "optimize_geometry",
+        "parameters": {
+          "method_request": "PBE0",
+          "charge": 0,
+          "multiplicity": 1
+        },
+        "outputs": [
+          "opt_final_electronic_energy"
+        ],
+        "input_bindings": {}
+      }
+    ],
+    "answer_goals": [
+      {
+        "kind": "compare",
+        "requirement_keys": [
+          "opt_r2",
+          "opt_pbe0"
+        ],
+        "output": "opt_final_electronic_energy",
+        "mode": "side_by_side"
+      }
+    ]
+  },
+  "plan_proposal": {
+    "steps": [
+      {
+        "key": "opt_r2",
+        "tool": "optimize_geometry",
+        "parameters": {
+          "method_profile": "r2scan3c",
+          "environment": "gas",
+          "charge": 0,
+          "multiplicity": 1
+        },
+        "inputs": {
+          "geometry": {
+            "artifact_alias": "initial_geometry"
+          }
+        },
+        "requirement_key": "opt_r2"
+      },
+      {
+        "key": "opt_pbe0",
+        "tool": "optimize_geometry",
+        "parameters": {
+          "method_profile": "pbe0_d3bj_def2svp",
+          "environment": "gas",
+          "charge": 0,
+          "multiplicity": 1
+        },
+        "inputs": {
+          "geometry": {
+            "artifact_alias": "initial_geometry"
+          }
+        },
+        "requirement_key": "opt_pbe0"
+      }
+    ],
+    "requested_results": [
+      {
+        "step_key": "opt_r2",
+        "field": "opt_final_electronic_energy"
+      },
+      {
+        "step_key": "opt_pbe0",
+        "field": "opt_final_electronic_energy"
+      }
+    ]
+  },
+  "geometry": "fixtures/geometries/water.xyz"
+}

@@ -1,0 +1,88 @@
+{
+  "intake": {
+    "intent": "chemistry_compute",
+    "subjects": {
+      "water": {
+        "key": "water",
+        "inline_xyz": "3\nwater geometry fixture; coordinates in angstrom\nO  0.000000  0.000000  0.000000\nH  0.758602  0.000000  0.504284\nH -0.758602  0.000000  0.504284\n"
+      }
+    },
+    "requirements": [
+      {
+        "key": "opt",
+        "subject_key": "water",
+        "capability": "optimize_geometry",
+        "parameters": {
+          "method_request": "r2scan3c",
+          "charge": 0,
+          "multiplicity": 1
+        },
+        "outputs": [],
+        "input_bindings": {}
+      },
+      {
+        "key": "freq",
+        "subject_key": "water",
+        "capability": "frequency",
+        "parameters": {
+          "method_request": "r2scan3c",
+          "charge": 0,
+          "multiplicity": 1
+        },
+        "outputs": [
+          "vibrational_frequencies"
+        ],
+        "input_bindings": {
+          "geometry": {
+            "requirement_key": "opt",
+            "port": "optimized_geometry"
+          }
+        }
+      }
+    ],
+    "answer_goals": []
+  },
+  "plan_proposal": {
+    "steps": [
+      {
+        "key": "opt",
+        "tool": "optimize_geometry",
+        "parameters": {
+          "method_profile": "r2scan3c",
+          "environment": "gas",
+          "charge": 0,
+          "multiplicity": 1
+        },
+        "inputs": {
+          "geometry": {
+            "artifact_alias": "initial_geometry"
+          }
+        },
+        "requirement_key": "opt"
+      },
+      {
+        "key": "freq",
+        "tool": "frequency",
+        "parameters": {
+          "method_profile": "r2scan3c",
+          "environment": "gas",
+          "charge": 0,
+          "multiplicity": 1
+        },
+        "inputs": {
+          "geometry": {
+            "step_key": "opt",
+            "port": "optimized_geometry"
+          }
+        },
+        "requirement_key": "freq"
+      }
+    ],
+    "requested_results": [
+      {
+        "step_key": "freq",
+        "field": "vibrational_frequencies"
+      }
+    ]
+  }
+}

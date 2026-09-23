@@ -1,0 +1,16 @@
+{
+  "observation": {
+    "status": "completed",
+    "stage": "query",
+    "orca_attempts": 0,
+    "results": [],
+    "artifacts": [
+      {
+        "id": "fixture_geometry",
+        "artifact_type": "molecular_geometry",
+        "role": "optimized_geometry"
+      }
+    ],
+    "response_text": "replay artifact locator fixture; file contents are not represented as a live result"
+  }
+}

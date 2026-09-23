@@ -1,0 +1,64 @@
+{
+  "intake": {
+    "intent": "chemistry_compute",
+    "subjects": {
+      "water": {
+        "key": "water",
+        "history_geometry_alias": "geometry_1"
+      }
+    },
+    "requirements": [
+      {
+        "key": "task",
+        "subject_key": "water",
+        "capability": "frequency",
+        "parameters": {
+          "method_request": "r2scan3c",
+          "charge": 0,
+          "multiplicity": 1
+        },
+        "outputs": [
+          "vibrational_frequencies"
+        ],
+        "input_bindings": {}
+      }
+    ],
+    "answer_goals": []
+  },
+  "plan_proposal": {
+    "steps": [
+      {
+        "key": "task",
+        "tool": "frequency",
+        "parameters": {
+          "method_profile": "r2scan3c",
+          "environment": "gas",
+          "charge": 0,
+          "multiplicity": 1
+        },
+        "inputs": {
+          "geometry": {
+            "artifact_alias": "history_geometry"
+          }
+        },
+        "requirement_key": "task"
+      }
+    ],
+    "requested_results": [
+      {
+        "step_key": "task",
+        "field": "vibrational_frequencies"
+      }
+    ]
+  },
+  "artifact_aliases": {
+    "history_geometry": "artifact_history_geometry_1"
+  },
+  "replay_artifact": {
+    "alias": "history_geometry",
+    "path": "fixtures/geometries/water.xyz",
+    "artifact_type": "molecular_geometry",
+    "role": "optimized_geometry",
+    "source": "previous successful geometry replay fixture"
+  }
+}
