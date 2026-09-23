@@ -63,7 +63,6 @@ def test_generic_compute_tool_does_not_inherit_orca_preparation_or_budget(
         name="external_compute",
         description="A compute Tool unrelated to ORCA electronic-state preparation.",
         requires_compute_permission=True,
-        parameter_preparation="none",
         execution_budget="none",
     )
     registry = ToolRegistry([tool])

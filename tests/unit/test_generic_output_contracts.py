@@ -135,7 +135,7 @@ def test_query_schema_rejects_subject_property_cross_binding() -> None:
         )
 
 
-def test_result_answer_rejects_free_prose_and_renders_verified_file_content() -> None:
+def test_result_answer_bounds_explanations_and_renders_verified_file_content() -> None:
     outputs = {
         "out_1": {
             "kind": "port",
@@ -166,12 +166,18 @@ def test_result_answer_rejects_free_prose_and_renders_verified_file_content() ->
             )
         ],
     )
-    with pytest.raises(ValueError, match="free model prose"):
+    with pytest.raises(ValueError, match="numbers or paths"):
         validate_result_answer(injected, outputs, ["out_1"])
 
     safe = AnswerOutput(
         action="respond",
-        sections=[AnswerSection(format="auto", output_refs=["out_1"], text=None)],
+        sections=[
+            AnswerSection(
+                format="auto",
+                output_refs=["out_1"],
+                text="该文件保留了所选结构的逐原子坐标记录。",
+            )
+        ],
     )
     rendered = render_answer_output(
         safe,
@@ -180,6 +186,7 @@ def test_result_answer_rejects_free_prose_and_renders_verified_file_content() ->
         preferences={"file_content": "show", "detail": "normal"},
     )
     assert "atom_index,element" in rendered
+    assert "所选结构" in rendered
     assert "-999" not in rendered
 
 

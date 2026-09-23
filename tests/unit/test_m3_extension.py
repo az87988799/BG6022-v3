@@ -13,9 +13,9 @@ from bg6022.agent import (
 )
 from bg6022.answer import render_selected_facts
 from bg6022.config import load_config
-from bg6022.models import InputReference, Plan, Request, ResultTarget, Run, Step
+from bg6022.models import InputReference, Plan, Request, Requirement, ResultTarget, Run, Step
 from bg6022.orca.input import OrcaInputSpec, render_input
-from bg6022.orca.profiles import B3LYP_D3BJ_DEF2SVP, get_profile
+from bg6022.orca.profiles import B3LYP_D3BJ_DEF2SVP, PBE0_D3BJ_DEF2SVP, get_profile
 from bg6022.planner import (
     InputBindingProposal,
     IntakeOutput,
@@ -161,27 +161,67 @@ def test_operation_free_chat_intake_and_plan_are_supported() -> None:
     assert plan.steps[0].parameters == {"atom_i": 1, "atom_j": 2}
 
 
-def test_one_chat_request_cannot_contain_two_distance_steps() -> None:
+def test_one_chat_request_can_contain_two_scoped_distance_requirements() -> None:
     registry = build_registry()
+    subject_id = "subject_distance"
+    requirements = [
+        Requirement(
+            id="distance_a",
+            subject_id=subject_id,
+            capability="geometry_distance",
+            parameters={"atom_i": 1, "atom_j": 2},
+            outputs=["interatomic_distance"],
+        ),
+        Requirement(
+            id="distance_b",
+            subject_id=subject_id,
+            capability="geometry_distance",
+            parameters={"atom_i": 2, "atom_j": 3},
+            outputs=["interatomic_distance"],
+        ),
+    ]
+    targets = [
+        ResultTarget(requirement_id=item.id, field="interatomic_distance")
+        for item in requirements
+    ]
     request = Request(
         id="request_distance_twice",
-        description="measure one pair",
+        description="measure two separate atom pairs",
         source="chat",
-        requested_results=[ResultTarget(field="interatomic_distance")],
-        explicit_parameters={"atom_i": 1, "atom_j": 2},
+        requirements=requirements,
+        subjects={subject_id: {"key": "water", "structure_input": {}}},
+        requested_results=targets,
     )
     inputs = {"geometry": InputReference(artifact_id="geometry")}
     plan = Plan(
         id="plan_distance_twice",
         request_id=request.id,
         steps=[
-            Step(id="distance_a", tool="geometry_distance", inputs=inputs),
-            Step(id="distance_b", tool="geometry_distance", inputs=inputs),
+            Step(
+                id="distance_a",
+                tool="geometry_distance",
+                parameters=requirements[0].parameters,
+                inputs=inputs,
+                requirement_id=requirements[0].id,
+                subject_id=subject_id,
+            ),
+            Step(
+                id="distance_b",
+                tool="geometry_distance",
+                parameters=requirements[1].parameters,
+                inputs=inputs,
+                requirement_id=requirements[1].id,
+                subject_id=subject_id,
+            ),
         ],
-        requested_results=[ResultTarget(step_id="distance_a", field="interatomic_distance")],
+        requested_results=targets,
     )
-    with pytest.raises(ValueError, match="only one distance"):
-        validate_request_plan(request, plan, registry)
+
+    validated = validate_request_plan(request, plan, registry)
+
+    assert len(validated.steps) == 2
+    assert validated.steps[0].parameters == {"atom_i": 1, "atom_j": 2}
+    assert validated.steps[1].parameters == {"atom_i": 2, "atom_j": 3}
 
 
 def test_distance_execution_consumes_exact_artifact_without_orca(tmp_path: Path) -> None:
@@ -321,6 +361,32 @@ def test_b3lyp_profile_is_complete_and_repair_scope_is_empty() -> None:
         assert tool.applicable_repair_capabilities({"method_profile": profile.name}) == []
 
 
+def test_pbe0_profile_is_complete_across_existing_orca_operations() -> None:
+    profile = get_profile("PBE0-D3(BJ)/def2-SVP")
+    assert profile == PBE0_D3BJ_DEF2SVP
+    assert profile.supported_operations == frozenset({"SP", "Opt", "Freq"})
+    for operation in ("SP", "Opt", "Freq"):
+        rendered = render_input(
+            OrcaInputSpec(
+                operation=operation,
+                method_profile=profile.name,
+                environment="gas",
+                charge=0,
+                multiplicity=1,
+                cores=4,
+                maxcore_mb=192,
+            )
+        ).decode("ascii")
+        assert (
+            f"! PBE0 D3BJ def2-SVP def2/J RIJCOSX TightSCF {operation}" in rendered
+        )
+        assert "%maxcore 192" in rendered
+    assert any(
+        item["name"] == profile.name
+        for item in build_registry().method_capability_catalog()
+    )
+
+
 def test_b3lyp_default_is_selected_when_step_omits_method(tmp_path: Path) -> None:
     config = _config(tmp_path, default_method="b3lyp_d3bj_def2svp")
     registry = build_registry(config)
@@ -345,7 +411,7 @@ def test_b3lyp_default_is_selected_when_step_omits_method(tmp_path: Path) -> Non
         created_at=utc_now(),
         updated_at=utc_now(),
     )
-    prepared = Agent(config, registry)._prepare_orca_step(run, step)
+    prepared = Agent(config, registry)._prepare_tool_step(run, step, registry.get(step.tool))
     assert prepared is not None
     assert prepared.parameters["method_profile"] == "b3lyp_d3bj_def2svp"
     assert run.parameter_sources_by_step[step.id]["method_profile"] == "default_policy"

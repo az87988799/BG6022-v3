@@ -69,8 +69,20 @@ def _install_agent_entry_stubs(
     *,
     initial_parameters: dict[str, Any],
     continuation_parameters: dict[str, Any] | None = None,
+    continuation_requirement_index: int | None = None,
 ) -> None:
-    def intake(_client: Any, message: str, **_kwargs: Any) -> IntakeOutput:
+    def intake(_client: Any, message: str, **kwargs: Any) -> IntakeOutput:
+        pending_context = kwargs.get("pending_context", {})
+        pending_requirements = (
+            pending_context.get("requirements", []) if isinstance(pending_context, dict) else []
+        )
+        selected_requirement_id = None
+        if continuation_requirement_index is not None and continuation_requirement_index < len(
+            pending_requirements
+        ):
+            selected_requirement_id = pending_requirements[continuation_requirement_index].get(
+                "requirement_id"
+            )
         if message == UPDATE_MESSAGE:
             values = continuation_parameters or {}
             evidence = [
@@ -84,12 +96,14 @@ def _install_agent_entry_stubs(
                 operations=operations,
                 explicit_parameters=values,
                 electronic_state_candidates=evidence,
+                parameter_target_requirement_id=selected_requirement_id,
             )
         if message == INVALID_UPDATE_MESSAGE:
             return IntakeOutput(
                 intent="chemistry_compute",
                 operations=operations,
                 explicit_parameters={"method_profile": "b3lyp"},
+                parameter_target_requirement_id=selected_requirement_id,
             )
         return IntakeOutput(
             intent="chemistry_compute",
@@ -208,6 +222,7 @@ def test_confirmation_update_recomputes_each_applicable_step_atomically(
             "geom_maxiter": 2,
             "scf_maxiter": 24,
         },
+        continuation_requirement_index=0,
     )
     agent = Agent(config, build_registry(config), llm=None, session_id="scoped-update")
     initial = agent.handle_message(INITIAL_MESSAGE)
@@ -222,16 +237,25 @@ def test_confirmation_update_recomputes_each_applicable_step_atomically(
     assert run.accepted_snapshot == {}
     assert run.accepted_execution_sha256 is None
     assert run.attempt_counts == {}
-    assert run.request.explicit_parameters["charge"] == 1
-    assert run.request.explicit_parameters["multiplicity"] == 2
+    optimized_requirement = next(
+        item for item in run.request.requirements if item.capability == "optimize_geometry"
+    )
+    scoped_update = run.request.user_modifications_by_requirement[optimized_requirement.id]
+    assert scoped_update["charge"] == 1
+    assert scoped_update["multiplicity"] == 2
     steps = {step.tool: step for step in run.plan.steps}
     for tool_name in ("optimize_geometry", "frequency", "single_point"):
         parameters = steps[tool_name].parameters
-        assert parameters["charge"] == 1
-        assert parameters["multiplicity"] == 2
-        assert parameters["method_profile"] == "r2scan3c"
-        assert parameters["environment"] == "gas"
-        assert parameters["scf_maxiter"] == 24
+        if tool_name == "optimize_geometry":
+            assert parameters["charge"] == 1
+            assert parameters["multiplicity"] == 2
+            assert parameters["method_profile"] == "r2scan3c"
+            assert parameters["environment"] == "gas"
+            assert parameters["scf_maxiter"] == 24
+        else:
+            assert parameters["charge"] == 0
+            assert parameters["multiplicity"] == 1
+            assert parameters["scf_maxiter"] == 16
     assert steps["optimize_geometry"].parameters["geom_maxiter"] == 2
     assert "geom_maxiter" not in steps["frequency"].parameters
     assert "geom_maxiter" not in steps["single_point"].parameters

@@ -16,13 +16,14 @@ SP, or Freq unless requested.
 
 Use the supplied mode and verified output catalog. In knowledge mode, write
 short plain-language sections or request one bounded routing review. In
-result/query mode, organize only supplied output references: choose their
-order, heading, detail, and a supported view (`auto`, `plain`, `table`,
-`json`, `code`, or `link`). Set `text` to null in result/query sections.
-Do not write free-form scientific claims, numerical values, coordinates,
-paths, completion statements, or internal identifiers in result/query text.
-The program inserts actual facts, units, methods, source labels, caveats,
-checks, file contents, and file paths. Cover every required output exactly
+result/query mode, every section must cite one or more supplied output
+references. The program renders exact values, units, methods, checks, files,
+and paths. You may add a short qualitative explanation in `text`, grounded
+only in the cited outputs. Do not include numbers, formulas, coordinates,
+paths, completion claims, or internal identifiers in that explanation. Do
+not contradict an unmet or unverified check. The cited outputs include the
+verified values and task context for interpretation; do not treat a static
+caveat as the status of the whole Run. Cover every required output exactly
 once; never replace a requested output with another one. For a small text
 file, use a result section for its output reference; the program decides
 whether to show the verified content according to the user's presentation

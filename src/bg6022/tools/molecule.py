@@ -123,6 +123,7 @@ def make_generate_geometry_tool(config: AppConfig | None = None) -> Tool:
 
     return Tool(
         name="generate_geometry",
+        display_name="生成初始结构",
         description="Generate a bounded RDKit ETKDGv3 initial geometry from a molecule artifact.",
         parameter_model=GenerateGeometryParameters.__name__,
         parameter_schema=GenerateGeometryParameters.model_json_schema(),
@@ -153,6 +154,7 @@ def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel
     parameters = GenerateGeometryParameters.model_validate(step.parameters, strict=True)
     attempt = _next_attempt(run, step.id)
     relative = f"{step.id}/attempt-{attempt:02d}"
+    input_bindings: dict[str, str] = {}
     (run_directory(config.data_root_path, run.id) / relative).mkdir(parents=True, exist_ok=True)
     try:
         reference = step.inputs.get("molecule")
@@ -161,6 +163,7 @@ def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel
         molecule_artifact = resolve_artifact_reference(
             config, run, reference, expected_type="molecule"
         )
+        input_bindings["molecule"] = molecule_artifact.id
         molecule_path = artifact_path(config.data_root_path, run, molecule_artifact)
         payload = json.loads(molecule_path.read_text(encoding="utf-8"))
         facts = payload.get("facts", {})
@@ -259,6 +262,7 @@ def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel
             diagnostics=diagnostics,
             artifact_ids=[geometry_artifact.id],
             output_ports={"geometry": geometry_artifact.id},
+            input_bindings=input_bindings,
             parameter_sources={"geometry": f"rdkit:ETKDGv3:{used_seed}"},
             relative=relative,
         )
@@ -269,6 +273,7 @@ def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel
             attempt,
             "cancelled" if error.category == "cancelled" else "failed",
             diagnostics={"category": error.category, "reason": str(error)},
+            input_bindings=input_bindings,
             relative=relative,
         )
     except (OSError, ValueError, json.JSONDecodeError) as error:
@@ -278,6 +283,7 @@ def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel
             attempt,
             "failed",
             diagnostics={"category": "geometry_generation_failed", "reason": str(error)},
+            input_bindings=input_bindings,
             relative=relative,
         )
 
@@ -484,6 +490,7 @@ def _molecule_result(
     diagnostics: dict[str, Any] | None = None,
     artifact_ids: list[str] | None = None,
     output_ports: dict[str, str] | None = None,
+    input_bindings: dict[str, str] | None = None,
     parameter_sources: dict[str, str] | None = None,
     relative: str,
 ) -> Result:
@@ -496,6 +503,8 @@ def _molecule_result(
         diagnostics=diagnostics or {},
         artifact_ids=artifact_ids or [],
         output_ports=output_ports or {},
+        input_bindings=input_bindings or {},
+        input_artifact_ids=list((input_bindings or {}).values()),
         parameter_sources=parameter_sources or {},
         attempt_relative_path=relative,
     )

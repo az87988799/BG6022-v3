@@ -27,6 +27,7 @@ from bg6022.models import (
     Plan,
     Request,
     RequiredGeometryBinding,
+    Requirement,
     ResultProperty,
     ResultTarget,
     Step,
@@ -111,6 +112,51 @@ class QuerySelection(BaseModel):
         return self
 
 
+class IntakeSubjectProposal(BaseModel):
+    """Untrusted identity/geometry details for one user-named subject."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    molecule_query: StrictStr | None = None
+    molecule_input_kind: MoleculeInputKind | None = None
+    molecule_name_evidence: StrictStr | None = None
+    structure_input: dict[str, Any] = Field(default_factory=dict)
+
+
+class RequirementProposal(BaseModel):
+    """Model-only key for one repeatable capability instance."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    key: StrictStr
+    subject_key: StrictStr = "subject_1"
+    capability: StrictStr
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    outputs: list[StrictStr] = Field(default_factory=list)
+    constraints: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("key", "subject_key", "capability")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("requirement key, subject_key, and capability must not be blank")
+        return value
+
+    @field_validator("key", "subject_key")
+    @classmethod
+    def _safe_local_key(cls, value: str) -> str:
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", value) is None:
+            raise ValueError("requirement and subject keys must be simple identifiers")
+        return value
+
+    @field_validator("outputs")
+    @classmethod
+    def _unique_outputs(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("requirement outputs must be unique")
+        return value
+
+
 @dataclass(frozen=True)
 class ElectronicStateInput:
     status: ElectronicStateStatus
@@ -138,6 +184,9 @@ class IntakeOutput(BaseModel):
     intent: Intent
     answer: StrictStr | None = None
     operations: list[Operation] = Field(default_factory=list)
+    requirements: list[RequirementProposal] = Field(default_factory=list)
+    subjects: dict[StrictStr, IntakeSubjectProposal] = Field(default_factory=dict)
+    parameter_target_requirement_id: StrictStr | None = None
     molecule_query: StrictStr | None = None
     molecule_input_kind: MoleculeInputKind | None = None
     molecule_name_evidence: StrictStr | None = None
@@ -172,6 +221,9 @@ class IntakeOutput(BaseModel):
             self.explicit_parameters
             or self.electronic_state_candidates
             or self.history_geometry_alias
+            or self.requirements
+            or self.subjects
+            or self.parameter_target_requirement_id
         ):
             raise ValueError("context_query cannot contain a parameter patch")
         if self.intent == "context_query" and self.query_selection is None:
@@ -180,12 +232,19 @@ class IntakeOutput(BaseModel):
             raise ValueError("query_selection is only valid for context_query")
         return self
 
-    @field_validator("operations")
-    @classmethod
-    def _unique_operations(cls, value: list[Operation]) -> list[Operation]:
-        if len(set(value)) != len(value):
-            raise ValueError("requested operations must be unique")
-        return value
+    @model_validator(mode="after")
+    def _requirement_keys_unique(self) -> IntakeOutput:
+        keys = [item.key for item in self.requirements]
+        if len(keys) != len(set(keys)):
+            raise ValueError("requirement keys must be unique")
+        unknown_subject_keys = (
+            sorted({item.subject_key for item in self.requirements} - set(self.subjects))
+            if self.subjects
+            else sorted({item.subject_key for item in self.requirements} - {"subject_1"})
+        )
+        if unknown_subject_keys:
+            raise ValueError(f"requirements refer to unknown subject keys: {unknown_subject_keys}")
+        return self
 
     @field_validator("output_preferences", mode="before")
     @classmethod
@@ -240,6 +299,8 @@ class PlanStepProposal(BaseModel):
 
     key: StrictStr
     tool: StrictStr
+    requirement_id: StrictStr | None = None
+    subject_id: StrictStr | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
     inputs: dict[str, InputBindingProposal] = Field(default_factory=dict)
     goal_checks: list[GoalCheckProposal] = Field(default_factory=list)
@@ -506,6 +567,40 @@ def proposal_to_plan(
     if len(set(keys)) != len(keys):
         raise ValueError("planner returned duplicate step keys")
     step_ids = {key: _step_id(index, key) for index, key in enumerate(keys, start=1)}
+    requirements_by_id = {item.id: item for item in request.requirements}
+    assigned_requirements: set[str] = set()
+    requirement_for_key: dict[str, Requirement] = {}
+    for item in proposal.steps:
+        selected: Requirement | None = None
+        if item.requirement_id is not None:
+            selected = requirements_by_id.get(item.requirement_id)
+            if selected is None:
+                raise ValueError(
+                    f"planner step {item.key!r} references unknown requirement "
+                    f"{item.requirement_id!r}"
+                )
+            if selected.id in assigned_requirements:
+                raise ValueError(f"requirement {selected.id!r} is mapped to more than one Step")
+            if selected.capability != item.tool:
+                raise ValueError(
+                    f"requirement {selected.id!r} needs capability {selected.capability!r}, "
+                    f"not {item.tool!r}"
+                )
+        else:
+            selected = next(
+                (
+                    candidate
+                    for candidate in request.requirements
+                    if candidate.capability == item.tool
+                    and candidate.id not in assigned_requirements
+                ),
+                None,
+            )
+        if selected is not None:
+            if item.subject_id is not None and item.subject_id != selected.subject_id:
+                raise ValueError(f"Step {item.key!r} changes requirement {selected.id!r}'s subject")
+            requirement_for_key[item.key] = selected
+            assigned_requirements.add(selected.id)
     allowed_artifact_aliases = dict(artifact_aliases or {})
     steps: list[Step] = []
     for item in proposal.steps:
@@ -541,6 +636,14 @@ def proposal_to_plan(
                 tool=item.tool,
                 parameters=dict(item.parameters),
                 inputs=inputs,
+                requirement_id=(
+                    requirement_for_key[item.key].id if item.key in requirement_for_key else None
+                ),
+                subject_id=(
+                    requirement_for_key[item.key].subject_id
+                    if item.key in requirement_for_key
+                    else item.subject_id
+                ),
                 goal_checks=[
                     GoalCheckRequirement(
                         source_step_id=step_ids[goal.source_step_key],
@@ -552,8 +655,22 @@ def proposal_to_plan(
             )
         )
     targets = [
-        _proposal_target_to_result_target(target, step_ids) for target in proposal.requested_results
+        _proposal_target_to_result_target(
+            target,
+            step_ids,
+            requirement_id=(
+                requirement_for_key[target.step_key].id
+                if target.step_key in requirement_for_key
+                and any(
+                    item.requirement_id == requirement_for_key[target.step_key].id
+                    for item in request.requested_results
+                )
+                else None
+            ),
+        )
+        for target in proposal.requested_results
     ]
+    steps = _inherit_requirement_subjects(steps)
     plan = Plan(
         id=plan_id,
         request_id=request.id,
@@ -583,23 +700,23 @@ def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) 
         strict=True,
     )
     plan = registry.validate_plan(plan)
+    known_subject_ids = set(request.subjects)
+    if known_subject_ids:
+        unknown_subjects = sorted(
+            {step.subject_id for step in plan.steps if step.subject_id is not None}
+            - known_subject_ids
+        )
+        if unknown_subjects:
+            raise ValueError(f"Plan uses unknown subject ids: {unknown_subjects}")
     _validate_molecule_identity_contract(request, plan, registry)
     _validate_required_geometry_bindings(request, plan, registry)
-    operation_free_distance_steps = [
-        step
-        for step in plan.steps
-        if not registry.get(step.tool).operations
-        and "distance" in set(registry.get(step.tool).result_properties.values())
-    ]
-    if len(operation_free_distance_steps) > 1:
-        raise ValueError("one Request may contain only one distance-measurement Step")
     proposed_operations = [
         operation for step in plan.steps for operation in registry.get(step.tool).operations
     ]
     # Chat requests always receive this full coverage check. An empty list is
-    # meaningful for operation-free Tools such as geometry_distance: an ORCA
-    # Tool cannot be smuggled into that request because it would add an item.
-    if request.source == "chat" or request.operations:
+    # meaningful for operation-free Tools: an operation-based Tool cannot be
+    # added without changing the requested operation list.
+    if not request.requirements and (request.source == "chat" or request.operations):
         if proposed_operations != request.operations:
             missing = [item for item in request.operations if item not in proposed_operations]
             extra = [item for item in proposed_operations if item not in request.operations]
@@ -613,6 +730,84 @@ def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) 
             if extra:
                 raise ValueError(f"Plan adds unrequested operation(s): {', '.join(extra)}")
             raise ValueError("Plan operation order does not match the user's requested order")
+
+    if request.requirements:
+        requirements_by_id = {item.id: item for item in request.requirements}
+        steps_by_requirement: dict[str, list[Step]] = {}
+        for step in plan.steps:
+            if step.requirement_id is not None:
+                steps_by_requirement.setdefault(step.requirement_id, []).append(step)
+        for requirement in request.requirements:
+            matches = steps_by_requirement.get(requirement.id, [])
+            if len(matches) != 1:
+                raise ValueError(
+                    f"Plan must map requirement {requirement.id!r} to exactly one Step"
+                )
+            step = matches[0]
+            if step.tool != requirement.capability:
+                raise ValueError(
+                    f"Plan changes requirement {requirement.id!r} capability from "
+                    f"{requirement.capability!r} to {step.tool!r}"
+                )
+            if step.subject_id != requirement.subject_id:
+                raise ValueError(f"Plan changes requirement {requirement.id!r} subject")
+            expected_parameters = {
+                **request.explicit_parameters,
+                **requirement.parameters,
+                **request.user_modifications,
+                **request.user_modifications_by_requirement.get(requirement.id, {}),
+            }
+            for name, value in expected_parameters.items():
+                if (
+                    name in registry.get(requirement.capability).request_parameters
+                    and step.parameters.get(name) != value
+                ):
+                    raise ValueError(
+                        f"Plan changes parameter {name!r} for requirement {requirement.id!r}"
+                    )
+            for output in requirement.outputs:
+                scoped = [
+                    target
+                    for target in plan.requested_results
+                    if target.requirement_id in {None, requirement.id}
+                    and (target.port or target.field or target.check) == output
+                ]
+                if len(scoped) > 1:
+                    scoped = [
+                        target for target in scoped if target.requirement_id == requirement.id
+                    ]
+                if (
+                    len(scoped) != 1
+                    or scoped[0].step_id not in {None, step.id}
+                    or (
+                        scoped[0].requirement_id is None
+                        and sum(
+                            item.capability == requirement.capability
+                            for item in request.requirements
+                        )
+                        > 1
+                    )
+                ):
+                    raise ValueError(
+                        f"Plan does not return required output {output!r} "
+                        f"for requirement {requirement.id!r}"
+                    )
+        unknown = sorted(set(steps_by_requirement) - set(requirements_by_id))
+        if unknown:
+            raise ValueError(f"Plan maps unknown requirement ids: {unknown}")
+        for requirement in request.requirements:
+            capability = registry.get(requirement.capability)
+            if not capability.available:
+                raise ValueError(f"requested capability is unavailable: {requirement.capability}")
+            unknown_parameters = sorted(
+                set(requirement.parameters) - set(capability.request_parameters)
+            )
+            if unknown_parameters:
+                raise ValueError(
+                    f"requirement {requirement.id!r} contains parameters not accepted by "
+                    f"{capability.name}: {unknown_parameters}"
+                )
+            capability.validate_parameter_patch(requirement.parameters)
 
     plan_targets = plan.requested_results
     for request_target in request.requested_results:
@@ -630,32 +825,200 @@ def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) 
             )
             raise ValueError(f"Requested result is ambiguous in the Plan: {name}")
 
-    # A requested local-minimum goal paired with SP is a prerequisite, not
-    # merely a report target. Enforce the edge here so a model cannot omit the
-    # runtime gate and still launch the downstream calculation.
-    if "SP" in request.operations and any(
-        target.check == "local_minimum_supported" for target in request.requested_results
-    ):
-        check_targets = [
-            target for target in plan_targets if target.check == "local_minimum_supported"
-        ]
-        if len(check_targets) != 1 or check_targets[0].step_id is None:
-            raise ValueError("the local-minimum check must have one explicit producer before SP")
-        check_step_id = check_targets[0].step_id
-        for step in plan.steps:
-            if "SP" not in registry.get(step.tool).operations:
+    _validate_requested_check_prerequisites(request, plan, registry)
+    return plan
+
+
+def _validate_requested_check_prerequisites(
+    request: Request, plan: Plan, registry: ToolRegistry
+) -> None:
+    """Enforce Tool-declared check gates when a Request also asks for that check."""
+
+    requested_checks = {
+        target.check for target in request.requested_results if target.check is not None
+    }
+    if not requested_checks:
+        return
+    plan_check_targets = [
+        target for target in plan.requested_results if target.check in requested_checks
+    ]
+    steps_by_id = {step.id: step for step in plan.steps}
+    requirements_by_id = {item.id: item for item in request.requirements}
+
+    for consumer in plan.steps:
+        tool = registry.get(consumer.tool)
+        if consumer.requirement_id in requirements_by_id:
+            requested_outputs = set(requirements_by_id[consumer.requirement_id].outputs)
+        else:
+            requested_outputs = set()
+        for target in plan.requested_results:
+            if target.check is not None:
                 continue
+            if target.step_id is not None and target.step_id != consumer.id:
+                continue
+            if (
+                target.requirement_id is not None
+                and target.requirement_id != consumer.requirement_id
+            ):
+                continue
+            output_name = target.port or target.field
+            if output_name in tool.results or output_name in tool.output_ports:
+                requested_outputs.add(str(output_name))
+
+        required_checks = {
+            check
+            for output in requested_outputs
+            for check in tool.result_check_prerequisites.get(output, ())
+            if check in requested_checks
+        }
+        for check_name in required_checks:
+            matching_targets = [
+                target
+                for target in plan_check_targets
+                if target.check == check_name
+                and (target.step_id is None or target.step_id in steps_by_id)
+                and (
+                    target.requirement_id is None
+                    or target.requirement_id in requirements_by_id
+                )
+            ]
+            sources: list[Step] = []
+            for target in matching_targets:
+                for source in plan.steps:
+                    if target.step_id is not None and target.step_id != source.id:
+                        continue
+                    if (
+                        target.requirement_id is not None
+                        and target.requirement_id != source.requirement_id
+                    ):
+                        continue
+                    source_tool = registry.get(source.tool)
+                    if check_name not in source_tool.scientific_checks:
+                        continue
+                    input_name = source_tool.scientific_check_input_ports.get(check_name)
+                    source_reference = (
+                        source.inputs.get(input_name) if input_name is not None else None
+                    )
+                    input_type = (
+                        source_tool.input_ports.get(input_name) if input_name is not None else None
+                    )
+                    if input_name is not None and not any(
+                        consumer_tool_type == input_type
+                        and consumer.inputs.get(consumer_input) == source_reference
+                        for consumer_input, consumer_tool_type in tool.input_ports.items()
+                    ):
+                        continue
+                    if source not in sources:
+                        sources.append(source)
+            if len(sources) != 1:
+                raise ValueError(
+                    f"requested check {check_name!r} needs one producer bound to "
+                    f"Tool {tool.name!r}'s requested input"
+                )
             prerequisite = GoalCheckRequirement(
-                source_step_id=check_step_id,
-                check="local_minimum_supported",
+                source_step_id=sources[0].id,
+                check=check_name,
                 required_status="passed",
             )
-            if prerequisite not in step.goal_checks:
+            if prerequisite not in consumer.goal_checks:
                 raise ValueError(
-                    f"SP step {step.id!r} must require local_minimum_supported "
-                    "to be passed before execution"
+                    f"Step {consumer.id!r} must require {check_name} to be passed "
+                    "before publishing its requested result"
                 )
-    return plan
+
+
+def _inherit_requirement_subjects(steps: list[Step]) -> list[Step]:
+    """Propagate a calculation requirement's subject through its input ancestry."""
+
+    by_id = {step.id: step for step in steps}
+    inferred: dict[str, str] = {
+        step.id: step.subject_id for step in steps if step.subject_id is not None
+    }
+    pending = [
+        step.id for step in steps if step.requirement_id is not None and step.subject_id is not None
+    ]
+    while pending:
+        dependent_id = pending.pop()
+        subject_id = inferred[dependent_id]
+        dependent = by_id[dependent_id]
+        for reference in dependent.inputs.values():
+            source_id = reference.step_id
+            if source_id is None or source_id not in by_id:
+                continue
+            existing = inferred.get(source_id)
+            if existing is not None and existing != subject_id:
+                raise ValueError(
+                    f"Step {source_id!r} would mix subjects {existing!r} and {subject_id!r}"
+                )
+            if existing is None:
+                inferred[source_id] = subject_id
+                pending.append(source_id)
+    return [
+        step
+        if step.subject_id is not None
+        else step.model_copy(update={"subject_id": inferred.get(step.id)})
+        for step in steps
+    ]
+
+
+def apply_plan_change(
+    run: Any,
+    candidate_plan: Plan,
+    registry: ToolRegistry,
+    *,
+    candidate_request: Request | None = None,
+    changed_step_ids: set[str] | None = None,
+) -> set[str]:
+    """Validate and install one bounded Plan revision, invalidating its dependents."""
+
+    request = candidate_request or run.request
+    candidate = Plan.model_validate(
+        {
+            **candidate_plan.model_dump(mode="python"),
+            "revision": run.plan.revision + 1,
+        },
+        strict=True,
+    )
+    candidate = validate_request_plan(request, candidate, registry)
+    old_by_id = {step.id: step for step in run.plan.steps}
+    new_by_id = {step.id: step for step in candidate.steps}
+    roots = set(changed_step_ids or ())
+    roots.update(
+        step_id
+        for step_id in set(old_by_id) | set(new_by_id)
+        if old_by_id.get(step_id) != new_by_id.get(step_id)
+    )
+
+    graph: dict[str, set[str]] = {step_id: set() for step_id in set(old_by_id) | set(new_by_id)}
+    for steps in (run.plan.steps, candidate.steps):
+        for step in steps:
+            graph.setdefault(step.id, set())
+            for reference in step.inputs.values():
+                if reference.step_id is not None:
+                    graph.setdefault(reference.step_id, set()).add(step.id)
+            for requirement in step.goal_checks:
+                graph.setdefault(requirement.source_step_id, set()).add(step.id)
+    invalidated = set(roots)
+    pending = list(roots)
+    while pending:
+        for dependent in graph.get(pending.pop(), ()):
+            if dependent not in invalidated:
+                invalidated.add(dependent)
+                pending.append(dependent)
+
+    run.request = request
+    run.plan = candidate
+    for step in candidate.steps:
+        if step.id not in run.origin_step_map:
+            run.origin_step_map[step.id] = step.origin_step_id or step.id
+    for step_id in invalidated:
+        run.current_results.pop(step_id, None)
+        run.parameter_sources_by_step.pop(step_id, None)
+        if step_id in new_by_id:
+            run.step_status[step_id] = "planned"
+        else:
+            run.step_status.pop(step_id, None)
+    return invalidated
 
 
 def _validate_molecule_identity_contract(
@@ -663,39 +1026,49 @@ def _validate_molecule_identity_contract(
 ) -> None:
     """Prevent a Planner from changing or bypassing a user molecule constraint."""
 
+    subject_constraints: list[tuple[str | None, Mapping[str, Any], Mapping[str, Any]]] = []
+    for subject_id, subject in request.subjects.items():
+        if not isinstance(subject, Mapping):
+            continue
+        subject_input = subject.get("structure_input", {})
+        if not isinstance(subject_input, Mapping):
+            continue
+        identity = subject_input.get("molecule_identity")
+        if isinstance(identity, Mapping):
+            subject_constraints.append((subject_id, identity, subject_input))
     identity = request.structure_input.get("molecule_identity")
-    if not isinstance(identity, Mapping):
-        return
-    expected_kind = identity.get("input_kind")
-    selected_cid = identity.get("selected_cid")
-    selected_smiles = identity.get("selected_smiles")
-    resolve_steps = [step for step in plan.steps if step.tool == "resolve_molecule"]
-    if expected_kind == "formula" and selected_cid is None and selected_smiles is None:
+    if isinstance(identity, Mapping) and not subject_constraints:
+        subject_constraints.append((None, identity, request.structure_input))
+    for subject_id, identity, subject_input in subject_constraints:
+        expected_kind = identity.get("input_kind")
+        selected_cid = identity.get("selected_cid")
+        selected_smiles = identity.get("selected_smiles")
+        resolve_steps = [
+            step
+            for step in plan.steps
+            if step.tool == "resolve_molecule"
+            and (subject_id is None or step.subject_id == subject_id)
+        ]
         has_inline_xyz = (
-            request.structure_input.get("xyz_text") is not None
-            or request.structure_input.get("xyz") is not None
+            subject_input.get("xyz_text") is not None or subject_input.get("xyz") is not None
         )
-        if has_inline_xyz:
-            if resolve_steps:
-                raise ValueError(
-                    "an inline XYZ formula request cannot also resolve another structure"
-                )
-            return
-        if len(resolve_steps) != 1:
-            raise ValueError("a formula request must have exactly one formula-resolve Step")
-    if selected_cid is not None:
-        if len(resolve_steps) != 1:
-            raise ValueError("a selected molecule identity must have one resolve Step")
-    if selected_smiles is not None:
-        if len(resolve_steps) != 1:
-            raise ValueError("a selected SMILES identity must have one resolve Step")
-    if resolve_steps:
-        if len(resolve_steps) != 1:
-            raise ValueError("a molecule identity must have at most one resolve Step")
-        try:
-            validate_resolve_binding(identity, resolve_steps[0].parameters)
-        except ValueError as error:
-            raise ValueError(str(error)) from error
+        if expected_kind == "formula" and selected_cid is None and selected_smiles is None:
+            if has_inline_xyz:
+                if resolve_steps:
+                    raise ValueError(
+                        "an inline XYZ formula request cannot also resolve another structure"
+                    )
+                continue
+            if len(resolve_steps) != 1:
+                raise ValueError("each formula subject must have exactly one formula-resolve Step")
+        if selected_cid is not None or selected_smiles is not None:
+            if len(resolve_steps) != 1:
+                raise ValueError("each selected molecule identity must have one resolve Step")
+        for step in resolve_steps:
+            try:
+                validate_resolve_binding(identity, step.parameters)
+            except ValueError as error:
+                raise ValueError(str(error)) from error
 
 
 def request_from_intake(
@@ -713,7 +1086,7 @@ def request_from_intake(
             + "；".join(blocking)
             + "。请明确这些要求，或重新指定只计算已支持的部分。"
         )
-    if intake.intent == "chemistry_compute" and not intake.operations:
+    if intake.intent == "chemistry_compute" and not intake.operations and not intake.requirements:
         if not intake.requested_results:
             raise ValueError(
                 "an operation-free request must name a registered operation-free result"
@@ -727,12 +1100,13 @@ def request_from_intake(
         raise ValueError("model intake cannot authorize a local file path")
     if "molecule_identity" in intake.structure_input:
         raise ValueError("model intake cannot provide program-owned molecule identity facts")
+    all_operations = _intake_operations(intake, registry)
     normalized = normalized_parameters or normalize_user_explicit_parameters(
         message,
         intake.explicit_parameters,
         intake.electronic_state_candidates,
         parameter_names=tuple(
-            registry.request_index_parameter_fields(intake.operations, intake.requested_results)
+            registry.request_index_parameter_fields(all_operations, intake.requested_results)
         ),
     )
     if normalized.clarification_fields:
@@ -740,36 +1114,154 @@ def request_from_intake(
             "electronic-state parameters need clarification: "
             + ", ".join(normalized.clarification_fields)
         )
+    from hashlib import sha256
+
+    subject_proposals = dict(intake.subjects)
+    if not subject_proposals:
+        subject_proposals = {
+            "subject_1": IntakeSubjectProposal(
+                molecule_query=intake.molecule_query,
+                molecule_input_kind=intake.molecule_input_kind,
+                molecule_name_evidence=intake.molecule_name_evidence,
+                structure_input=dict(intake.structure_input),
+            )
+        }
+    subject_ids = {
+        key: "sub_" + sha256(f"{request_id}|{key}".encode()).hexdigest()[:16]
+        for key in subject_proposals
+    }
+    request_subjects: dict[str, dict[str, Any]] = {}
+    for key, subject_proposal in subject_proposals.items():
+        subject_input = dict(subject_proposal.structure_input)
+        if any(name in subject_input for name in {"path", "local_path", "file"}):
+            raise ValueError("model intake cannot authorize a subject-local file path")
+        if "molecule_identity" in subject_input:
+            raise ValueError("model intake cannot provide program-owned subject identity facts")
+        identity = build_identity_constraint(
+            message=message,
+            query=subject_proposal.molecule_query,
+            input_kind=subject_proposal.molecule_input_kind,
+            name_evidence=subject_proposal.molecule_name_evidence,
+        )
+        if identity is not None:
+            subject_input["molecule_identity"] = normalize_identity_for_storage(identity)
+        request_subjects[subject_ids[key]] = {
+            "key": key,
+            "structure_input": subject_input,
+        }
+
+    # Retain the original single-subject structure contract for existing tools;
+    # multi-subject identity and constraints stay under Request.subjects.
     structure_input = dict(intake.structure_input)
-    identity = build_identity_constraint(
-        message=message,
-        query=intake.molecule_query,
-        input_kind=intake.molecule_input_kind,
-        name_evidence=intake.molecule_name_evidence,
-    )
-    if identity is not None:
-        structure_input["molecule_identity"] = normalize_identity_for_storage(identity)
+    if len(subject_proposals) == 1:
+        structure_input = dict(next(iter(request_subjects.values()))["structure_input"])
     raw_bindings = structure_input.get("required_bindings")
+    requirement_specs = _intake_requirement_specs(
+        intake,
+        registry,
+        request_id=request_id,
+        subject_ids=subject_ids,
+        global_parameters=dict(normalized.explicit_parameters),
+    )
+    requirement_ids_by_key = {key: item.id for key, item in requirement_specs}
     if raw_bindings is not None:
         normalized_bindings = []
-        for item in raw_bindings:
-            binding = RequiredGeometryBinding.model_validate(item, strict=True)
-            normalized_binding = binding.model_dump(mode="json")
-            if binding.consumer_operation is None:
-                normalized_binding.pop("consumer_operation", None)
-            else:
-                normalized_binding.pop("consumer_tool", None)
+        for raw_binding in raw_bindings:
+            binding = RequiredGeometryBinding.model_validate(raw_binding, strict=True)
+            normalized_binding = {
+                "input_port": binding.input_port,
+                "source_operation": binding.source_operation,
+                "source_port": binding.source_port,
+            }
+            for selector in ("consumer_operation", "consumer_tool"):
+                value = getattr(binding, selector)
+                if value is not None:
+                    normalized_binding[selector] = value
+            for key_name, id_name in (
+                ("consumer_requirement_key", "consumer_requirement_id"),
+                ("source_requirement_key", "source_requirement_id"),
+            ):
+                key = getattr(binding, key_name)
+                if key is not None:
+                    if key not in requirement_ids_by_key:
+                        raise ValueError(
+                            f"geometry binding refers to unknown requirement key {key!r}"
+                        )
+                    normalized_binding[id_name] = requirement_ids_by_key[key]
+            if binding.source_requirement_id is not None:
+                normalized_binding["source_requirement_id"] = binding.source_requirement_id
             normalized_bindings.append(normalized_binding)
         structure_input["required_bindings"] = normalized_bindings
+    scoped_targets: list[ResultTarget] = []
+    requested_names = list(intake.requested_results)
+    # A capability output requested globally applies to every matching instance.
+    # This is how two requested SP methods can both return their own energy.
+    for value in requested_names:
+        resolved = registry.resolve_result_target(value, all_operations, canonical_only=True)
+        kind, name = _target_identity(resolved)
+        capabilities = [
+            item
+            for item in registry.result_capabilities()
+            if item["kind"] == kind and item["name"] == name
+        ]
+        if len(capabilities) != 1:
+            raise ValueError(f"requested output {value!r} has no unique registered producer")
+        producer = str(capabilities[0]["tool"])
+        matches = [item for _key, item in requirement_specs if item.capability == producer]
+        if not matches:
+            raise ValueError(f"requested output {value!r} has no matching requirement")
+        for requirement in matches:
+            if name not in requirement.outputs:
+                requirement = requirement.model_copy(
+                    update={"outputs": [*requirement.outputs, name]}
+                )
+                requirement_specs = [
+                    (key, requirement if item.id == requirement.id else item)
+                    for key, item in requirement_specs
+                ]
+            scoped_targets.append(
+                ResultTarget(
+                    **{kind: name},
+                    requirement_id=(
+                        requirement.id if intake.requirements or len(matches) > 1 else None
+                    ),
+                )
+            )
+    for requirement in (item for _key, item in requirement_specs):
+        for output in requirement.outputs:
+            kind = _requirement_output_kind(registry.get(requirement.capability), output)
+            same_producer_count = sum(
+                item.capability == requirement.capability for _key, item in requirement_specs
+            )
+            target = ResultTarget(
+                **{kind: output},
+                requirement_id=(
+                    requirement.id if intake.requirements or same_producer_count > 1 else None
+                ),
+            )
+            if target not in scoped_targets:
+                scoped_targets.append(target)
+    if (
+        intake.parameter_target_requirement_id is not None
+        and intake.parameter_target_requirement_id
+        not in {item.id for _key, item in requirement_specs}
+    ):
+        raise ValueError("parameter update references an unknown requirement id")
+    operations = [
+        operation
+        for _key, requirement in requirement_specs
+        for operation in registry.get(requirement.capability).operations
+    ]
     request = Request(
         id=request_id,
         description=message,
         original_text=message,
-        requested_results=[
-            registry.resolve_result_target(value, intake.operations, canonical_only=True)
-            for value in intake.requested_results
-        ],
-        explicit_parameters=dict(normalized.explicit_parameters),
+        requested_results=scoped_targets,
+        explicit_parameters=(
+            dict(normalized.explicit_parameters)
+            if not intake.requirements or len(requirement_specs) == 1
+            else {}
+        ),
         structure_input={
             **structure_input,
             **(
@@ -779,13 +1271,169 @@ def request_from_intake(
             ),
         },
         source="chat",
-        operations=list(intake.operations),
+        operations=operations,
+        requirements=[item for _key, item in requirement_specs],
+        subjects=request_subjects,
         missing_fields=list(intake.missing_fields),
         output_preferences=_request_output_preferences(message, intake.output_preferences),
     )
     _validate_required_geometry_contract(request, registry)
     _require_composite_geometry_sources(request, registry)
     return request
+
+
+def _intake_operations(intake: IntakeOutput, registry: ToolRegistry) -> list[str]:
+    if not intake.requirements:
+        return list(intake.operations)
+    operations = [
+        operation
+        for item in intake.requirements
+        for operation in registry.get(item.capability).operations
+    ]
+    if intake.operations and sorted(intake.operations) != sorted(operations):
+        raise ValueError("intake operations do not match its capability requirements")
+    return operations
+
+
+def _intake_requirement_specs(
+    intake: IntakeOutput,
+    registry: ToolRegistry,
+    *,
+    request_id: str,
+    subject_ids: Mapping[str, str],
+    global_parameters: Mapping[str, Any],
+) -> list[tuple[str, Requirement]]:
+    from hashlib import sha256
+
+    if intake.requirements:
+        raw = [
+            (
+                item.key,
+                item.capability,
+                item.subject_key,
+                item.parameters,
+                item.outputs,
+                item.constraints,
+            )
+            for item in intake.requirements
+        ]
+    elif intake.operations:
+        raw = []
+        for index, operation in enumerate(intake.operations, start=1):
+            tool = _tool_for_operation(registry, operation)
+            raw.append((f"requirement_{index}", tool.name, "subject_1", {}, [], {}))
+    else:
+        producer_names: list[str] = []
+        for value in intake.requested_results:
+            target = registry.resolve_result_target(value, [], canonical_only=True)
+            kind, name = _target_identity(target)
+            producer = next(
+                item["tool"]
+                for item in registry.result_capabilities()
+                if item["kind"] == kind and item["name"] == name
+            )
+            if producer not in producer_names:
+                producer_names.append(producer)
+        raw = [
+            (f"requirement_{index}", name, "subject_1", {}, [], {})
+            for index, name in enumerate(producer_names, start=1)
+        ]
+
+    requested_producers: list[tuple[str, str]] = []
+    for value in intake.requested_results:
+        target = registry.resolve_result_target(
+            value, _intake_operations(intake, registry), canonical_only=True
+        )
+        kind, name = _target_identity(target)
+        producer = next(
+            item["tool"]
+            for item in registry.result_capabilities()
+            if item["kind"] == kind and item["name"] == name
+        )
+        requested_producers.append((producer, name))
+    existing_capabilities = {str(item[1]) for item in raw}
+    for producer, output in requested_producers:
+        if producer in existing_capabilities:
+            continue
+        subject_keys = list(subject_ids) or ["subject_1"]
+        for subject_key in subject_keys:
+            key = f"requested_{producer}_{subject_key}"
+            suffix = 2
+            base_key = key
+            while key in {str(item[0]) for item in raw}:
+                key = f"{base_key}_{suffix}"
+                suffix += 1
+            raw.append((key, producer, subject_key, {}, [output], {}))
+        existing_capabilities.add(producer)
+
+    specs: list[tuple[str, Requirement]] = []
+    for key, capability, subject_key, raw_parameters, outputs, constraints in raw:
+        try:
+            tool = registry.get(str(capability))
+        except ValueError as error:
+            raise ValueError(f"requirement capability is not registered: {capability!r}") from error
+        if not tool.available:
+            raise ValueError(f"requirement capability is unavailable: {capability!r}")
+        if subject_key not in subject_ids:
+            raise ValueError(f"requirement {key!r} refers to unknown subject {subject_key!r}")
+        parameters = dict(raw_parameters)
+        unknown = sorted(set(parameters) - set(tool.request_parameters))
+        if unknown:
+            raise ValueError(
+                f"requirement {key!r} has parameters unsupported by {tool.name}: {unknown}"
+            )
+        # New requirement instances are scoped explicitly. Legacy operation
+        # requests retain the previous request-wide explicit-parameter meaning.
+        for name, value in global_parameters.items():
+            candidates = [
+                (other_key, other_capability)
+                for other_key, other_capability, _subject, *_rest in raw
+                if name in registry.get(str(other_capability)).request_parameters
+            ]
+            if len(candidates) > 1 and intake.requirements:
+                raise ValueError(
+                    f"parameter {name!r} applies to multiple requirements; "
+                    "assign it to each requirement scope explicitly"
+                )
+            if (
+                name in tool.request_parameters
+                and candidates
+                and (len(candidates) == 1 or not intake.requirements)
+            ):
+                parameters.setdefault(name, value)
+        tool.validate_parameter_patch(parameters)
+        available_outputs = {str(item["name"]) for item in tool.public_outputs()}
+        invalid_outputs = sorted(set(outputs) - available_outputs)
+        if invalid_outputs:
+            raise ValueError(
+                f"requirement {key!r} requests undeclared output(s) from {tool.name}: "
+                f"{invalid_outputs}"
+            )
+        requirement_id = "req_" + sha256(f"{request_id}|{key}".encode()).hexdigest()[:16]
+        specs.append(
+            (
+                key,
+                Requirement(
+                    id=requirement_id,
+                    subject_id=subject_ids[subject_key],
+                    capability=tool.name,
+                    parameters=parameters,
+                    outputs=list(outputs),
+                    constraints=dict(constraints),
+                ),
+            )
+        )
+    return specs
+
+
+def _requirement_output_kind(tool: Any, output: str) -> str:
+    if output in tool.output_ports:
+        return "port"
+    if output in tool.scientific_checks:
+        return "check"
+    if output in tool.results:
+        return "field"
+    raise ValueError(f"Tool {tool.name!r} does not declare output {output!r}")
 
 
 def _request_output_preferences(message: str, value: Mapping[str, Any] | None) -> dict[str, str]:
@@ -842,20 +1490,37 @@ def intake_blocking_requirements(intake: IntakeOutput, registry: ToolRegistry) -
     if intake.intent != "chemistry_compute":
         return ()
 
-    requested_operations = set(intake.operations)
+    requested_operations = set(_intake_operations(intake, registry))
     deferred: set[str] = set()
-    involved = registry.tools_for_request(requested_operations, intake.requested_results)
+    involved = (
+        [registry.get(item.capability) for item in intake.requirements]
+        if intake.requirements
+        else registry.tools_for_request(requested_operations, intake.requested_results)
+    )
     required_request_parameters: set[str] = set()
     supplied = set(intake.explicit_parameters)
     for tool in involved:
         deferred.update(tool.deferred_parameters)
-        if tool.parameter_type is not None:
+        if tool.parameter_type is not None and not intake.requirements:
             required_request_parameters.update(
                 name
                 for name in tool.request_parameters
                 if tool.parameter_type.model_fields[name].is_required()
                 and name not in tool.deferred_parameters
             )
+    for requirement in intake.requirements:
+        tool = registry.get(requirement.capability)
+        if tool.parameter_type is None:
+            continue
+        scoped_supplied = set(requirement.parameters)
+        required_request_parameters.update(
+            f"{requirement.key}.{name}"
+            for name in tool.request_parameters
+            if tool.parameter_type.model_fields[name].is_required()
+            and name not in tool.deferred_parameters
+            and name not in scoped_supplied
+            and name not in supplied
+        )
 
     unclassified = [item for item in intake.missing_fields if item not in deferred]
     missing_declared = sorted(required_request_parameters - supplied)
@@ -997,6 +1662,9 @@ def _request_target_matches(
 ) -> bool:
     if request_target.step_id is not None and request_target.step_id != plan_target.step_id:
         return False
+    if request_target.requirement_id is not None:
+        if plan_target.requirement_id != request_target.requirement_id:
+            return False
 
     if request_target.check is not None:
         request_kind, request_name = "check", request_target.check
@@ -1017,7 +1685,10 @@ def _request_target_matches(
 
 
 def _proposal_target_to_result_target(
-    target: PlanTargetProposal, step_ids: Mapping[str, str]
+    target: PlanTargetProposal,
+    step_ids: Mapping[str, str],
+    *,
+    requirement_id: str | None = None,
 ) -> ResultTarget:
     try:
         step_id = step_ids[target.step_key]
@@ -1027,6 +1698,7 @@ def _proposal_target_to_result_target(
         ) from error
     return ResultTarget(
         step_id=step_id,
+        requirement_id=requirement_id,
         field=target.field,
         port=target.port,
         check=target.check,
@@ -1064,7 +1736,20 @@ def _tool_for_operation(registry: ToolRegistry, operation: str):
 
 def _validate_required_geometry_contract(request: Request, registry: ToolRegistry) -> None:
     for binding in _required_geometry_bindings(request):
-        if binding.consumer_operation is not None:
+        consumer_requirement = None
+        if binding.consumer_requirement_id is not None:
+            consumer_requirement = next(
+                (
+                    item
+                    for item in request.requirements
+                    if item.id == binding.consumer_requirement_id
+                ),
+                None,
+            )
+            if consumer_requirement is None:
+                raise ValueError("geometry binding consumer requirement is not requested")
+            consumer = registry.get(consumer_requirement.capability)
+        elif binding.consumer_operation is not None:
             if binding.consumer_operation not in request.operations:
                 raise ValueError(
                     f"geometry binding consumer {binding.consumer_operation!r} "
@@ -1095,6 +1780,25 @@ def _validate_required_geometry_contract(request: Request, registry: ToolRegistr
             raise ValueError(f"Tool {consumer.name!r} has no input port {binding.input_port!r}")
         if input_type != "molecular_geometry":
             raise ValueError("required geometry bindings must target a molecular-geometry input")
+        if binding.source_requirement_id is not None:
+            source_requirement = next(
+                (item for item in request.requirements if item.id == binding.source_requirement_id),
+                None,
+            )
+            if source_requirement is None:
+                raise ValueError("geometry binding source requirement is not requested")
+            producer = registry.get(source_requirement.capability)
+            output_type = producer.output_ports.get(binding.source_port)
+            if output_type is None:
+                raise ValueError(
+                    f"Tool {producer.name!r} has no output port {binding.source_port!r}"
+                )
+            if output_type != input_type:
+                raise ValueError(
+                    f"geometry binding type mismatch: {producer.name}.{binding.source_port} "
+                    f"cannot feed {consumer.name}.{binding.input_port}"
+                )
+            continue
         if binding.source_operation is None:
             if binding.source_port != "initial_geometry":
                 raise ValueError(
@@ -1117,6 +1821,53 @@ def _validate_required_geometry_contract(request: Request, registry: ToolRegistr
 
 
 def _require_composite_geometry_sources(request: Request, registry: ToolRegistry) -> None:
+    if request.requirements:
+        optimizers = [
+            item
+            for item in request.requirements
+            if "Opt" in registry.get(item.capability).operations
+        ]
+        if not optimizers:
+            return
+        bindings = _required_geometry_bindings(request)
+        explicitly_bound: set[str] = set()
+        for binding in bindings:
+            if binding.consumer_requirement_id is not None:
+                explicitly_bound.add(binding.consumer_requirement_id)
+                continue
+            candidates = [
+                item
+                for item in request.requirements
+                if (
+                    binding.consumer_tool is not None
+                    and item.capability == binding.consumer_tool
+                )
+                or (
+                    binding.consumer_operation is not None
+                    and binding.consumer_operation in registry.get(item.capability).operations
+                )
+            ]
+            if len(candidates) == 1:
+                explicitly_bound.add(candidates[0].id)
+        missing = [
+            item
+            for item in request.requirements
+            if item.subject_id in {optimizer.subject_id for optimizer in optimizers}
+            and item.id not in {optimizer.id for optimizer in optimizers}
+            and "geometry" in registry.get(item.capability).input_ports
+            and item.id not in explicitly_bound
+        ]
+        if missing:
+            labels = "、".join(
+                registry.get(item.capability).operations[0]
+                if registry.get(item.capability).operations
+                else item.capability
+                for item in missing
+            )
+            raise ValueError(
+                f"请明确 {labels} 使用优化后的结构还是初始结构；我没有让 Planner 自行选择几何来源。"
+            )
+        return
     operations = set(request.operations)
     if "Opt" not in operations:
         return
@@ -1157,9 +1908,12 @@ def _validate_required_geometry_bindings(
     bindings = _required_geometry_bindings(request)
     if not bindings:
         return
+    steps_by_requirement: dict[str, list[Step]] = {}
     steps_by_operation: dict[str, list[Step]] = {}
     steps_by_tool: dict[str, list[Step]] = {}
     for step in plan.steps:
+        if step.requirement_id is not None:
+            steps_by_requirement.setdefault(step.requirement_id, []).append(step)
         tool = registry.get(step.tool)
         steps_by_tool.setdefault(tool.name, []).append(step)
         for operation in tool.operations:
@@ -1169,6 +1923,8 @@ def _validate_required_geometry_bindings(
             steps_by_operation.get(binding.consumer_operation, [])
             if binding.consumer_operation is not None
             else steps_by_tool.get(binding.consumer_tool or "", [])
+            if binding.consumer_tool is not None
+            else steps_by_requirement.get(binding.consumer_requirement_id or "", [])
         )
         if len(consumers) != 1:
             selector = binding.consumer_operation or binding.consumer_tool
@@ -1177,6 +1933,17 @@ def _validate_required_geometry_bindings(
         actual = consumer.inputs.get(binding.input_port)
         if actual is None:
             raise ValueError(f"Step {consumer.id!r} omits required input {binding.input_port!r}")
+        if binding.source_requirement_id is not None:
+            producers = steps_by_requirement.get(binding.source_requirement_id, [])
+            if len(producers) != 1:
+                raise ValueError("geometry binding cannot identify one source requirement Step")
+            expected = InputReference(step_id=producers[0].id, port=binding.source_port)
+            if actual != expected:
+                raise ValueError(
+                    f"Step {consumer.id!r}.{binding.input_port} must reference "
+                    f"{producers[0].id}.{binding.source_port} as requested"
+                )
+            continue
         if binding.source_operation is not None:
             producers = steps_by_operation.get(binding.source_operation, [])
             if len(producers) != 1:
@@ -1197,7 +1964,11 @@ def _validate_required_geometry_bindings(
 
         if binding.source_port != "initial_geometry":
             raise ValueError("unsupported initial geometry source contract")
-        optimizers = steps_by_operation.get("Opt", [])
+        optimizers = [
+            step
+            for step in steps_by_operation.get("Opt", [])
+            if consumer.subject_id is None or step.subject_id in {None, consumer.subject_id}
+        ]
         if optimizers:
             if len(optimizers) != 1:
                 raise ValueError("initial geometry binding cannot identify one Opt Step")
@@ -1560,17 +2331,41 @@ def _structure_payload(value: Any) -> dict[str, Any]:
 def _validate_lookup_name(value: Any, *, message: str) -> Any:
     """Keep a name's source evidence separate from its bounded lookup spelling."""
 
-    if (
-        value.intent != "chemistry_compute"
-        or value.molecule_input_kind != "name"
-        or value.molecule_query is None
-    ):
+    if value.intent != "chemistry_compute":
         return value
-    query = value.molecule_query
+    if value.molecule_query is not None:
+        _validate_single_lookup_name(
+            value.molecule_query,
+            value.molecule_input_kind,
+            value.molecule_name_evidence,
+            message=message,
+        )
+    for key, subject in value.subjects.items():
+        if subject.molecule_query is not None:
+            try:
+                _validate_single_lookup_name(
+                    subject.molecule_query,
+                    subject.molecule_input_kind,
+                    subject.molecule_name_evidence,
+                    message=message,
+                )
+            except ValueError as error:
+                raise ValueError(f"subject {key!r}: {error}") from error
+    return value
+
+
+def _validate_single_lookup_name(
+    query: str,
+    input_kind: MoleculeInputKind | None,
+    evidence: str | None,
+    *,
+    message: str,
+) -> None:
+    if input_kind != "name":
+        return
     if not query.strip() or len(query) > 128 or "\n" in query or "\r" in query:
         raise ValueError("name lookup must be a bounded single-line name")
 
-    evidence = value.molecule_name_evidence
     if evidence is None and query in message:
         evidence = query
     if not evidence or not evidence.strip() or evidence not in message:
@@ -1595,7 +2390,7 @@ def _validate_lookup_name(value: Any, *, message: str) -> Any:
             "and molecule_input_kind null and explicitly report the missing "
             "identity in missing_fields; preserve all requested operations."
         )
-    return value
+    return None
 
 
 def _validate_pending_action(
@@ -1623,12 +2418,15 @@ def _validate_pending_action(
 
     if (
         value.operations
+        or value.requirements
+        or value.subjects
         or value.requested_results
         or value.unresolved_results
         or value.missing_fields
         or value.explicit_parameters
         or value.electronic_state_candidates
         or value.history_geometry_alias
+        or value.parameter_target_requirement_id
         or _structure_payload(value.structure_input)
     ):
         raise ValueError(
@@ -1695,6 +2493,13 @@ def _intake_schema(
         if value and intent != "chemistry_compute":
             raise ValueError("only chemistry_compute may request calculation results")
         operations = set(info.data.get("operations", []))
+        for requirement in info.data.get("requirements", []):
+            capability = next(
+                (item for item in capabilities if item.get("tool") == requirement.capability),
+                None,
+            )
+            if capability is not None:
+                operations.update(capability.get("operations", []))
         for target in value:
             candidates = [item for item in capabilities if item["name"] == target]
             if not any(
@@ -1709,13 +2514,61 @@ def _intake_schema(
     def _request_contract(value: IntakeOutput) -> IntakeOutput:
         if value.intent != "chemistry_compute":
             return value
+        if value.parameter_target_requirement_id is not None:
+            pending_requirements = {
+                str(item.get("requirement_id"))
+                for item in (pending_context or {}).get("requirements", [])
+                if isinstance(item, Mapping)
+            }
+            if (pending_context or {}).get("waiting_for") not in {
+                "clarification",
+                "confirmation",
+            } or value.parameter_target_requirement_id not in pending_requirements:
+                raise ValueError(
+                    "parameter_target_requirement_id must select a requirement "
+                    "in the current waiting task"
+                )
         if registry is None:
             if value.explicit_parameters or not value.operations:
                 raise ValueError("parameter capability catalog is required")
             return value
-        involved = registry.tools_for_request(value.operations, value.requested_results)
+        if value.requirements:
+            declared_operations = [
+                operation
+                for requirement in value.requirements
+                for operation in registry.get(requirement.capability).operations
+            ]
+            if value.operations and sorted(value.operations) != sorted(declared_operations):
+                raise ValueError("operations must agree with the listed capability requirements")
+            for requirement in value.requirements:
+                tool = registry.get(requirement.capability)
+                if not tool.available:
+                    raise ValueError(f"requirement capability is unavailable: {tool.name}")
+                unknown_parameters = sorted(
+                    set(requirement.parameters) - set(tool.request_parameters)
+                )
+                if unknown_parameters:
+                    raise ValueError(
+                        f"requirement {requirement.key!r} has unsupported parameters: "
+                        f"{unknown_parameters}"
+                    )
+                tool.validate_parameter_patch(requirement.parameters)
+                declared_outputs = {str(item["name"]) for item in tool.public_outputs()}
+                unknown_outputs = sorted(set(requirement.outputs) - declared_outputs)
+                if unknown_outputs:
+                    raise ValueError(
+                        f"requirement {requirement.key!r} has undeclared outputs: {unknown_outputs}"
+                    )
+            operations = declared_operations
+            involved = [
+                registry.get(name)
+                for name in sorted({item.capability for item in value.requirements})
+            ]
+        else:
+            operations = value.operations
+            involved = registry.tools_for_request(operations, value.requested_results)
         allowed = {name for tool in involved for name in tool.request_parameters}
-        if not value.operations and not value.requested_results:
+        if not operations and not value.requested_results and not value.requirements:
             # A parameter-only continuation is intentionally parsed before the
             # Agent decides whether a waiting Run can consume it.  It is not a
             # standalone operation-free Request; request_from_intake rejects
@@ -1731,16 +2584,16 @@ def _intake_schema(
                 "explicit parameter names are outside the Tool catalog: "
                 f"{unknown}; allowed names: {sorted(allowed)}"
             )
-        if not value.operations and not value.requested_results:
+        if not operations and not value.requested_results and not value.requirements:
             return value
-        if not value.operations:
+        if not operations:
             if not value.requested_results or not involved:
                 raise ValueError(
                     "an operation-free chemistry request must target an available result Tool"
                 )
             if any(tool.operations for tool in involved):
                 raise ValueError(
-                    "an operation-free chemistry request cannot target an ORCA operation"
+                    "an operation-free chemistry request cannot target an operation-based Tool"
                 )
         return value
 
@@ -1752,20 +2605,16 @@ def _intake_schema(
             structure_value = structure_input.model_dump(mode="python", exclude_unset=True)
         else:
             structure_value = structure_input
-        request = Request(
-            id="intake_geometry_validation",
-            description="validate intake geometry bindings",
-            operations=list(value.operations),
-            requested_results=[
-                registry.resolve_result_target(target, value.operations, canonical_only=True)
-                if registry is not None
-                else ResultTarget(field=target)
-                for target in value.requested_results
-            ],
-            structure_input=structure_value,
+        bindings = [
+            RequiredGeometryBinding.model_validate(item, strict=True)
+            for item in structure_value.get("required_bindings", [])
+        ]
+        operations = (
+            set(_intake_operations(value, registry))
+            if registry is not None
+            else set(value.operations)
         )
-        bindings = _required_geometry_bindings(request)
-        operations = set(request.operations)
+        requirements_by_key = {item.key: item for item in value.requirements}
         for binding in bindings:
             if (
                 binding.consumer_operation is not None
@@ -1775,13 +2624,49 @@ def _intake_schema(
                     f"geometry binding consumer {binding.consumer_operation!r} "
                     "is not a requested operation"
                 )
+            if (
+                binding.consumer_requirement_key is not None
+                and binding.consumer_requirement_key not in requirements_by_key
+            ):
+                raise ValueError("geometry binding consumer requirement key is unknown")
+            if (
+                binding.source_requirement_key is not None
+                and binding.source_requirement_key not in requirements_by_key
+            ):
+                raise ValueError("geometry binding source requirement key is unknown")
             if binding.source_operation is not None and binding.source_operation not in operations:
                 raise ValueError(
                     f"geometry binding source {binding.source_operation!r} "
                     "is not a requested operation"
                 )
         if registry is not None:
-            _validate_required_geometry_contract(request, registry)
+            for binding in bindings:
+                consumer_tool = None
+                if binding.consumer_requirement_key is not None:
+                    consumer_tool = registry.get(
+                        requirements_by_key[binding.consumer_requirement_key].capability
+                    )
+                elif binding.consumer_tool is not None:
+                    consumer_tool = registry.get(binding.consumer_tool)
+                elif binding.consumer_operation is not None:
+                    consumer_tool = _tool_for_operation(registry, binding.consumer_operation)
+                if consumer_tool is None:
+                    raise ValueError("geometry binding has no valid consumer Tool")
+                if consumer_tool.input_ports.get(binding.input_port) != "molecular_geometry":
+                    raise ValueError("geometry binding consumer input is not molecular geometry")
+                if binding.source_requirement_key is not None:
+                    source_tool = registry.get(
+                        requirements_by_key[binding.source_requirement_key].capability
+                    )
+                    source_type = source_tool.output_ports.get(binding.source_port)
+                    if source_type != "molecular_geometry":
+                        raise ValueError("geometry binding source is not a molecular geometry port")
+                elif binding.source_operation is not None:
+                    source_type = _tool_for_operation(
+                        registry, binding.source_operation
+                    ).output_ports.get(binding.source_port)
+                    if source_type != "molecular_geometry":
+                        raise ValueError("geometry binding source is not a molecular geometry port")
         return value
 
     query_selection_type: Any = QuerySelection | None

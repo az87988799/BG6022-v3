@@ -56,7 +56,18 @@ B3LYP_D3BJ_DEF2SVP = MethodProfile(
     repair_options_by_operation={"SP": (), "Opt": (), "Freq": ()},
 )
 
-PROFILES = {profile.name: profile for profile in (R2SCAN3C, B3LYP_D3BJ_DEF2SVP)}
+PBE0_D3BJ_DEF2SVP = MethodProfile(
+    name="pbe0_d3bj_def2svp",
+    orca_keyword="PBE0 D3BJ def2-SVP def2/J RIJCOSX",
+    supported_environments=frozenset({"gas"}),
+    supported_elements=frozenset({"H", "C", "N", "O"}),
+    supported_operations=frozenset({"SP", "Opt", "Freq"}),
+    display_name="PBE0-D3(BJ)/def2-SVP（RIJCOSX, def2/J）",
+    aliases=frozenset({"pbe0-d3(bj)/def2-svp", "pbe0-d3bj/def2-svp"}),
+    repair_options_by_operation={"SP": (), "Opt": (), "Freq": ()},
+)
+
+PROFILES = {profile.name: profile for profile in (R2SCAN3C, B3LYP_D3BJ_DEF2SVP, PBE0_D3BJ_DEF2SVP)}
 
 
 def get_profile(name: str) -> MethodProfile:
@@ -140,6 +151,13 @@ def resolve_parameters(
 
     values: dict[str, Any] = {}
     sources: dict[str, str] = {}
+    known_fields = set(supported_fields or ())
+    known_fields.update(request_parameters)
+    known_fields.update(user_modifications)
+    known_fields.update(tool_parameters)
+    known_fields.update(defaults_map)
+    if supported_fields is None:
+        known_fields.update({"method_profile", "environment", "charge", "multiplicity"})
 
     def choose(name: str, candidates: list[tuple[str, Mapping[str, Any]]]) -> None:
         if supported_fields is not None and name not in supported_fields:
@@ -153,24 +171,17 @@ def resolve_parameters(
                 sources[name] = source
                 return
 
-    choose(
-        "method_profile",
-        [
-            ("user_modification", user_modifications),
-            ("request_explicit", request_parameters),
-            ("tool_request", tool_parameters),
-            ("default_policy", defaults_map),
-        ],
-    )
-    choose(
-        "environment",
-        [
-            ("user_modification", user_modifications),
-            ("request_explicit", request_parameters),
-            ("tool_request", tool_parameters),
-            ("default_policy", defaults_map),
-        ],
-    )
+    for name in sorted(known_fields - {"charge", "multiplicity"}):
+        choose(
+            name,
+            [
+                ("user_modification", user_modifications),
+                ("request_explicit", request_parameters),
+                ("tool_request", tool_parameters),
+                ("default_policy", defaults_map),
+            ],
+        )
+
     choose(
         "charge",
         [
@@ -187,15 +198,6 @@ def resolve_parameters(
             ("structure_facts", _multiplicity_facts(structure_facts)),
         ],
     )
-    for name in ("scf_maxiter", "geom_maxiter"):
-        choose(
-            name,
-            [
-                ("user_modification", user_modifications),
-                ("request_explicit", request_parameters),
-                ("tool_request", tool_parameters),
-            ],
-        )
 
     missing = tuple(
         name

@@ -3,34 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any
 
-from bg6022.models import Artifact, Result, Run, Step
+from bg6022.models import Artifact, RepairOption, Result, Run, Step
 from bg6022.orca.profiles import get_profile
 
 MAX_ITERATION = 1000
 DEFAULT_RESTART_GEOM_MAXITER = 100
-
-
-@dataclass(frozen=True)
-class RepairOption:
-    action: str
-    failed_step_id: str
-    candidate_artifact_id: str | None
-    parameter_patch: dict[str, int]
-    evidence_refs: tuple[str, ...]
-    reason: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "action": self.action,
-            "failed_step_id": self.failed_step_id,
-            "candidate_artifact_id": self.candidate_artifact_id,
-            "parameter_patch": dict(self.parameter_patch),
-            "evidence_refs": list(self.evidence_refs),
-            "reason": self.reason,
-        }
 
 
 def applicable_repairs(run: Run, step: Step, result: Result) -> list[RepairOption]:

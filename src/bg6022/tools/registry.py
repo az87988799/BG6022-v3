@@ -9,6 +9,8 @@ from typing import Any
 from bg6022.config import AppConfig
 from bg6022.models import Plan, Request, ResultTarget, Step, Tool
 from bg6022.orca.profiles import method_capability_catalog
+from bg6022.tools.energy_difference import make_energy_difference_tool
+from bg6022.tools.geometry_angle import make_geometry_angle_tool
 from bg6022.tools.geometry_distance import make_geometry_distance_tool
 from bg6022.tools.molecule import make_generate_geometry_tool
 from bg6022.tools.orca import make_frequency_tool, make_optimize_tool, make_single_point_tool
@@ -23,6 +25,19 @@ class ToolRegistry:
         self._tools = {tool.name: tool for tool in tool_list}
         if len(self._tools) != len(tool_list):
             raise ValueError("tool names must be unique")
+        declared_checks = {name for tool in tool_list for name in tool.scientific_checks}
+        unknown_prerequisites = {
+            name
+            for tool in tool_list
+            for checks in tool.result_check_prerequisites.values()
+            for name in checks
+            if name not in declared_checks
+        }
+        if unknown_prerequisites:
+            raise ValueError(
+                "result check prerequisites are not declared by a registered Tool: "
+                f"{sorted(unknown_prerequisites)}"
+            )
         property_contracts: dict[str, tuple[Any, ...]] = {}
         property_sources: dict[str, str] = {}
         for tool in tool_list:
@@ -188,6 +203,15 @@ class ToolRegistry:
         """
 
         return self._index_parameter_fields([self.get(step.tool) for step in plan.steps])
+
+    def request_index_parameter_fields_for_requirements(
+        self, requirements: Iterable[Any]
+    ) -> set[str]:
+        """Return index fields declared by the capabilities in one Intake proposal."""
+
+        return self._index_parameter_fields(
+            [self.get(str(item.capability)) for item in requirements]
+        )
 
     @staticmethod
     def _index_parameter_fields(tools: Iterable[Tool]) -> set[str]:
@@ -378,18 +402,22 @@ class ToolRegistry:
                         f"step {step.id} references undeclared scientific check "
                         f"{requirement.source_step_id}.{requirement.check}"
                     )
-                if requirement.check == "local_minimum_supported":
-                    source_geometry = source.inputs.get("geometry")
-                    dependent_geometry = step.inputs.get("geometry")
-                    if (
-                        source_tool.name != "frequency"
-                        or source_geometry is None
-                        or dependent_geometry is None
-                        or source_geometry != dependent_geometry
+                checked_input_name = source_tool.scientific_check_input_ports.get(requirement.check)
+                if checked_input_name is not None:
+                    source_reference = source.inputs.get(checked_input_name)
+                    input_type = source_tool.input_ports[checked_input_name]
+                    matching_consumer_inputs = [
+                        name
+                        for name, declared_type in tool.input_ports.items()
+                        if declared_type == input_type
+                    ]
+                    if source_reference is None or not any(
+                        step.inputs.get(name) == source_reference
+                        for name in matching_consumer_inputs
                     ):
                         raise ValueError(
-                            f"step {step.id} must use the same geometry checked by "
-                            f"{source.id}.local_minimum_supported"
+                            f"step {step.id} must consume the input source checked by "
+                            f"{source.id}.{requirement.check}"
                         )
                 dependencies[step.id].add(requirement.source_step_id)
 
@@ -410,6 +438,8 @@ def build_registry(config: AppConfig | None = None) -> ToolRegistry:
             make_optimize_tool(config),
             make_frequency_tool(config),
             make_geometry_distance_tool(config),
+            make_geometry_angle_tool(config),
+            make_energy_difference_tool(config),
         ]
     )
 
@@ -430,7 +460,17 @@ def merge_explicit_step_parameters(tool: Tool, step: Step, request: Request) -> 
 
     allowed = set(tool.request_parameters)
     merged = dict(step.parameters)
-    for source in (request.explicit_parameters, request.user_modifications):
+    requirement = next(
+        (item for item in request.requirements if item.id == step.requirement_id), None
+    )
+    sources = [request.explicit_parameters]
+    if requirement is not None:
+        # Resolve scope first, then apply that requirement's explicit values.
+        sources.append(requirement.parameters)
+    sources.append(request.user_modifications)
+    if requirement is not None:
+        sources.append(request.user_modifications_by_requirement.get(requirement.id, {}))
+    for source in sources:
         merged.update(
             {key: value for key, value in source.items() if key in allowed and value is not None}
         )
@@ -506,6 +546,11 @@ def _validate_requested_results(
             if target.step_id not in {step.id for step in steps}:
                 raise ValueError(f"requested result references unknown step {target.step_id}")
             matches = [step_id for step_id in matches if step_id == target.step_id]
+        if target.requirement_id is not None:
+            requirement_steps = {
+                step.id for step in steps if step.requirement_id == target.requirement_id
+            }
+            matches = [step_id for step_id in matches if step_id in requirement_steps]
         if not matches:
             raise ValueError(
                 f"requested result has no producer: {target.step_id or '*'}:{kind}:{name}"

@@ -81,6 +81,7 @@ def make_resolve_molecule_tool(config: AppConfig | None = None) -> Tool:
 
     return Tool(
         name="resolve_molecule",
+        display_name="解析分子",
         description=(
             "Resolve a name, CAS, CID, formula, or explicit SMILES into a verified "
             "molecule artifact."

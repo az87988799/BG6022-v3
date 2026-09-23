@@ -28,6 +28,7 @@ _KNOWN_TYPES = frozenset(
         "boolean",
         "molecule",
         "molecular_geometry",
+        "energy_data",
         "orca_hessian",
         "file",
         "text_file",
@@ -79,6 +80,8 @@ def public_type_info(expected_type: str, *, kind: str) -> dict[str, Any]:
         mime_type = "chemical/x-xyz"
     elif expected_type == "molecule":
         mime_type = "application/json"
+    elif expected_type == "energy_data":
+        mime_type = "application/json"
     elif expected_type == "text_file":
         mime_type = "text/plain"
     elif kind == "port" or expected_type in {"file", "orca_hessian"}:
@@ -91,7 +94,7 @@ def public_type_info(expected_type: str, *, kind: str) -> dict[str, Any]:
         shape = "record_list"
     elif expected_type == "json":
         shape = "json"
-    elif expected_type in {"molecular_geometry", "molecule", "text_file"}:
+    elif expected_type in {"molecular_geometry", "molecule", "text_file", "energy_data"}:
         shape = "text_file"
     elif expected_type in {"orca_hessian", "file"}:
         shape = "file"
@@ -201,6 +204,7 @@ def is_compatible_value(value: Any, declared_type: str) -> bool:
     if declared_type in {
         "molecule",
         "molecular_geometry",
+        "energy_data",
         "orca_hessian",
         "file",
         "text_file",

@@ -15,6 +15,8 @@ def test_registered_tools_are_public() -> None:
         "optimize_geometry",
         "frequency",
         "geometry_distance",
+        "geometry_angle",
+        "energy_difference",
     }
 
 
@@ -22,11 +24,13 @@ def test_orca_result_properties_are_declared_as_machine_readable_contracts() -> 
     registry = build_registry()
 
     assert registry.get("single_point").result_properties == {
-        "sp_electronic_energy": "electronic_energy"
+        "sp_electronic_energy": "electronic_energy",
+        "energy_data": "energy_data",
     }
     assert registry.get("optimize_geometry").result_properties == {
         "opt_final_electronic_energy": "electronic_energy",
         "optimized_geometry": "molecular_geometry",
+        "energy_data": "energy_data",
     }
 
 
@@ -129,5 +133,5 @@ def test_local_minimum_gate_requires_same_geometry_reference_as_frequency_check(
         ],
     )
 
-    with pytest.raises(ValueError, match="same geometry checked"):
+    with pytest.raises(ValueError, match="input source checked"):
         build_registry().validate_plan(plan)

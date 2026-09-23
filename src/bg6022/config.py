@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator
 
 
 class StrictConfig(BaseModel):
@@ -52,7 +52,27 @@ class RepairSettings(StrictConfig):
     enabled: StrictBool = True
     max_attempts_per_science_step: StrictInt = Field(default=3, ge=1, le=3)
     max_extra_orca_executions: StrictInt = Field(default=3, ge=0, le=3)
+    max_extra_executions_by_category: dict[StrictStr, StrictInt] = Field(default_factory=dict)
     max_plan_revisions: StrictInt = Field(default=2, ge=0, le=2)
+
+    @field_validator("max_extra_executions_by_category")
+    @classmethod
+    def _bounded_category_budgets(cls, value: dict[str, int]) -> dict[str, int]:
+        if any(not name.strip() or amount < 0 for name, amount in value.items()):
+            raise ValueError("execution category budgets need a name and a nonnegative limit")
+        return value
+
+    @property
+    def execution_budgets_by_category(self) -> dict[str, int]:
+        """Return generic Tool-category limits, adapting the former ORCA key."""
+
+        budgets = dict(self.max_extra_executions_by_category)
+        legacy = budgets.pop("orca", None)
+        budgets.setdefault(
+            "electronic_structure",
+            self.max_extra_orca_executions if legacy is None else legacy,
+        )
+        return budgets
 
 
 class MoleculeSettings(StrictConfig):

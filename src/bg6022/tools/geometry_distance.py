@@ -66,6 +66,7 @@ def make_geometry_distance_tool(config: AppConfig | None = None) -> Tool:
 
     return Tool(
         name="geometry_distance",
+        display_name="原子间距离测量",
         description=(
             "Measure the straight-line distance between two explicitly selected atoms "
             "in a verified molecular geometry."
@@ -91,7 +92,6 @@ def make_geometry_distance_tool(config: AppConfig | None = None) -> Tool:
         ],
         repair_capabilities=[],
         requires_compute_permission=False,
-        parameter_preparation="none",
         execution_budget="none",
         execute_function=execute if config is not None else None,
         parameter_validation_function=validate_distance_parameters,
@@ -185,6 +185,7 @@ def execute_geometry_distance(config: AppConfig, *, step: Step, run: Run, cancel
         status=status,  # type: ignore[arg-type]
         values=values,
         diagnostics=diagnostics,
+        input_bindings={"geometry": input_artifact_id} if input_artifact_id else {},
         input_artifact_ids=[input_artifact_id] if input_artifact_id else [],
         attempt_relative_path=relative,
     )

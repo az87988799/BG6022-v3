@@ -8,7 +8,6 @@ import pytest
 
 from bg6022.agent import (
     Agent,
-    _invalidate_current_results,
     _next_ready_step,
     _step_fingerprint,
     _unmet_goal_checks,
@@ -26,7 +25,13 @@ from bg6022.models import (
     Step,
 )
 from bg6022.orca.frequency_parser import parse_vibrational_frequencies
-from bg6022.planner import IntakeOutput, PlanProposal, PlanStepProposal, PlanTargetProposal
+from bg6022.planner import (
+    IntakeOutput,
+    PlanProposal,
+    PlanStepProposal,
+    PlanTargetProposal,
+    apply_plan_change,
+)
 from bg6022.repair import RepairProposal
 from bg6022.repair import _context as repair_context
 from bg6022.session import (
@@ -543,7 +548,7 @@ def test_passed_check_unblocks_sp_and_upstream_invalidation_cascades(tmp_path: P
         id="plan_ready",
         request_id=source_run.request.id,
         steps=[source_run.plan.steps[0], freq, sp],
-        requested_results=[],
+        requested_results=source_run.request.requested_results,
     )
     source_run.request = source_run.request.model_copy(update={"operations": ["Opt", "Freq", "SP"]})
     source_run.plan = source_run.plan.model_copy(update={"request_id": source_run.request.id})
@@ -563,7 +568,8 @@ def test_passed_check_unblocks_sp_and_upstream_invalidation_cascades(tmp_path: P
         step_fingerprint=_step_fingerprint(freq),
     )
     _save_result(Path(config.data_root_path), source_run, freq_result)
-    assert _next_ready_step(source_run, config.data_root_path) is sp
+    registry = build_registry(config)
+    assert _next_ready_step(source_run, config.data_root_path, registry) is sp
 
     mismatched_sp = sp.model_copy(
         update={"inputs": {"geometry": InputReference(artifact_id="another_geometry")}}
@@ -571,8 +577,8 @@ def test_passed_check_unblocks_sp_and_upstream_invalidation_cascades(tmp_path: P
     source_run.plan = source_run.plan.model_copy(
         update={"steps": [source_run.plan.steps[0], freq, mismatched_sp]}
     )
-    assert _next_ready_step(source_run, config.data_root_path) is None
-    blocked = _unmet_goal_checks(config.data_root_path, source_run, build_registry(config))
+    assert _next_ready_step(source_run, config.data_root_path, registry) is None
+    blocked = _unmet_goal_checks(config.data_root_path, source_run, registry)
     assert blocked[0]["actual_status"] == "unverified"
     assert "not bound to the dependent Step geometry" in blocked[0]["reason"]
 
@@ -580,7 +586,12 @@ def test_passed_check_unblocks_sp_and_upstream_invalidation_cascades(tmp_path: P
         update={"steps": [source_run.plan.steps[0], freq, sp]}
     )
 
-    _invalidate_current_results(source_run, "opt")
+    apply_plan_change(
+        source_run,
+        source_run.plan,
+        registry,
+        changed_step_ids={"opt"},
+    )
 
     assert source_run.current_results == {}
     assert source_run.step_status["freq"] == "planned"
@@ -625,7 +636,16 @@ def test_repair_context_includes_prior_attempts_remaining_limits_and_original_co
         diagnostics={"category": "opt_not_converged"},
     )
 
-    context = json.loads(repair_context(run, step, result, [], remaining_timeout_seconds=321.5))
+    context = json.loads(
+        repair_context(
+            run,
+            step,
+            result,
+            [],
+            budget_category="electronic_structure",
+            remaining_timeout_seconds=321.5,
+        )
+    )
 
     assert context["prior_attempts"][0]["status"] == "failed"
     assert context["attempt_budget"] == {
@@ -662,11 +682,11 @@ def test_science_attempt_and_extra_execution_budgets_are_cumulative(tmp_path: Pa
 
     assert agent._reserve_attempt(run, retry_step, registry.get(retry_step.tool))
     assert run.attempt_counts["opt"] == 2
-    assert run.extra_orca_executions == 1
+    assert run.extra_executions_by_category["electronic_structure"] == 1
     assert not agent._reserve_attempt(run, retry_step, registry.get(retry_step.tool))
     assert run.pending_data["budget_exhausted"] == "max_attempts_per_science_step"
     assert not agent._reserve_attempt(run, new_step, registry.get(new_step.tool))
-    assert run.pending_data["budget_exhausted"] == "max_extra_orca_executions"
+    assert run.pending_data["budget_exhausted"] == "max_extra_executions"
 
 
 def test_expired_active_time_budget_stops_before_tool_execution(tmp_path: Path) -> None:
@@ -749,6 +769,21 @@ def test_recovered_opt_geometry_flows_to_frequency_and_sp_without_repeating_prep
         scientific_checks: dict[str, ScientificCheckResult] | None = None,
     ) -> Result:
         output_artifacts = artifacts_out or []
+        input_bindings: dict[str, str] = {}
+        for input_name, reference in step.inputs.items():
+            if reference.artifact_id is not None:
+                input_bindings[input_name] = reference.artifact_id
+            elif reference.step_id is not None:
+                relative = run.current_results.get(reference.step_id)
+                if relative is not None:
+                    payload = json.loads(
+                        (Path(config.data_root_path) / "runs" / run.id / relative).read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    artifact_id = payload.get("output_ports", {}).get(reference.port)
+                    if isinstance(artifact_id, str):
+                        input_bindings[input_name] = artifact_id
         run.attempts.append(
             {
                 "step_id": step.id,
@@ -766,6 +801,8 @@ def test_recovered_opt_geometry_flows_to_frequency_and_sp_without_repeating_prep
             values=values or {},
             artifact_ids=[item.id for item in output_artifacts],
             output_ports=output_ports or {},
+            input_bindings=input_bindings,
+            input_artifact_ids=list(input_bindings.values()),
             diagnostics=diagnostics or {},
             scientific_checks=scientific_checks or {},
             attempt_relative_path=f"{step.id}/attempt-{attempt:02d}",
@@ -887,7 +924,15 @@ def test_recovered_opt_geometry_flows_to_frequency_and_sp_without_repeating_prep
             run,
             step,
             run.attempt_counts[step.id],
-            values={"vibrational_frequencies": {"complete": True, "unit": "cm^-1"}},
+            values={
+                "vibrational_frequencies": {
+                    "modes": [{"index": 0, "value": 120.0, "unit": "cm^-1"}],
+                    "unit": "cm^-1",
+                    "scaling_factor": 1.0,
+                    "scaling_applied": True,
+                    "complete": True,
+                }
+            },
             scientific_checks={
                 "local_minimum_supported": ScientificCheckResult(
                     status="passed",
@@ -917,11 +962,13 @@ def test_recovered_opt_geometry_flows_to_frequency_and_sp_without_repeating_prep
     registry = ToolRegistry(
         [
             base_registry.get(name).model_copy(
-                update={
-                    "execute_function": executor_by_name.get(
-                        name, base_registry.get(name).execute_function
-                    )
-                }
+                    update={
+                        "execute_function": executor_by_name.get(
+                            name, base_registry.get(name).execute_function
+                        ),
+                        # These test executors return intentionally minimal simulated evidence.
+                        "result_validation_function": None,
+                    }
             )
             for name in base_registry.names()
         ]
@@ -1021,7 +1068,7 @@ def test_recovered_opt_geometry_flows_to_frequency_and_sp_without_repeating_prep
 
     agent.advance(run)
 
-    assert run.status == "succeeded"
+    assert run.status == "succeeded", run.pending_data
     assert calls == [
         "resolve_molecule",
         "generate_geometry",
@@ -1163,6 +1210,8 @@ def test_chat_freq_only_request_runs_on_supplied_xyz_without_preparation(
             },
             artifact_ids=[hessian.id],
             output_ports={"hessian": hessian.id},
+            input_bindings={"geometry": geometry.id},
+            input_artifact_ids=[geometry.id],
             attempt_relative_path=f"{step.id}/attempt-{attempt:02d}",
         )
 

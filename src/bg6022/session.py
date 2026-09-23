@@ -11,7 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .models import Artifact, Result, Run
+from .models import Artifact, Result, Run, Step, Tool
+from .output_contracts import is_compatible_value
 
 # Retain the active Run plus up to five distinct earlier Runs.
 MAX_RECENT_RUNS = 6
@@ -348,6 +349,98 @@ def save_result(data_root: str | Path, run: Run, result: Result) -> Path:
     path = directory / "result.json"
     atomic_write_json(path, result.model_dump(mode="json"))
     return path
+
+
+def publish_step_result(
+    data_root: str | Path,
+    run: Run,
+    step: Step,
+    tool: Tool,
+    result: Result,
+    *,
+    expected_input_bindings: dict[str, str],
+    expected_input_hashes: dict[str, str],
+    parameter_sources: dict[str, str] | None = None,
+) -> str:
+    """Validate and publish one candidate Result before a downstream Step can run."""
+
+    if result.run_id != run.id or result.step_id != step.id:
+        raise ValueError("Tool Result is not bound to the active Run and Step")
+    if result.status not in {"succeeded", "failed", "cancelled", "interrupted", "needs_input"}:
+        raise ValueError("Tool Result has an unsupported status")
+    if result.input_bindings != expected_input_bindings:
+        raise ValueError("Tool-reported input bindings differ from the frozen Step inputs")
+    if result.input_artifact_ids != list(expected_input_bindings.values()):
+        raise ValueError("Tool-reported input Artifact ids differ from its input bindings")
+    if set(expected_input_hashes) != set(expected_input_bindings.values()):
+        raise ValueError("frozen input hashes do not cover the bound Step inputs")
+
+    run_root = run_directory(data_root, run.id).resolve()
+    attempt_root = (run_root / result.attempt_relative_path).resolve()
+    if run_root not in attempt_root.parents:
+        raise ValueError("Tool Result attempt path escapes the Run directory")
+    if attempt_root.name != f"attempt-{result.attempt:02d}":
+        raise ValueError("Tool Result attempt directory does not match its attempt number")
+
+    if set(result.values) - set(tool.results):
+        raise ValueError("Tool Result contains undeclared values")
+    for name, value in result.values.items():
+        if not is_compatible_value(value, tool.results[name]):
+            raise ValueError(f"Tool Result value {name!r} violates its declared type")
+    if set(result.output_ports) - set(tool.output_ports):
+        raise ValueError("Tool Result contains undeclared output ports")
+    if set(result.scientific_checks) - set(tool.scientific_checks):
+        raise ValueError("Tool Result contains undeclared scientific checks")
+    known_artifacts = {item.id: item for item in run.artifact_index}
+    for artifact_id, expected_hash in expected_input_hashes.items():
+        artifact = known_artifacts.get(artifact_id)
+        if artifact is None or artifact.sha256 != expected_hash:
+            raise ValueError("a frozen input Artifact changed ownership during execution")
+        source_path = artifact_path(data_root, run, artifact)
+        if sha256_file(source_path) != expected_hash:
+            raise ValueError("a frozen input Artifact changed while the Tool was running")
+    if set(result.artifact_ids) - set(known_artifacts):
+        raise ValueError("Tool Result refers to an Artifact outside the active Run")
+    for port, artifact_id in result.output_ports.items():
+        artifact = known_artifacts.get(artifact_id)
+        if (
+            artifact is None
+            or artifact_id not in result.artifact_ids
+            or artifact.run_id != run.id
+            or artifact.step_id != step.id
+            or artifact.attempt != result.attempt
+            or artifact.artifact_type != tool.output_ports[port]
+            or artifact.role == "restart_candidate"
+        ):
+            raise ValueError(f"Tool output port {port!r} is not bound to a verified Artifact")
+        artifact_path(data_root, run, artifact)
+    if result.status == "succeeded" and not tool.validate_result(run, step, result):
+        raise ValueError("Tool Result does not satisfy its declared verified-result contract")
+
+    result.step_fingerprint = _step_fingerprint_for_publish(step)
+    result.parameter_sources = dict(parameter_sources or result.parameter_sources)
+    relative = f"{result.attempt_relative_path}/result.json"
+    snapshot = run.model_copy(deep=True)
+    try:
+        save_result(data_root, run, result)
+        if relative not in run.result_index:
+            run.result_index.append(relative)
+        run.step_status[step.id] = result.status
+        if result.status == "succeeded":
+            run.current_results[step.id] = relative
+        save_run(data_root, run)
+    except Exception:
+        for name in Run.model_fields:
+            setattr(run, name, getattr(snapshot, name))
+        raise
+    return relative
+
+
+def _step_fingerprint_for_publish(step: Step) -> str:
+    payload = json.dumps(
+        step.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def register_file_artifact(

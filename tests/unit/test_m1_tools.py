@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -13,7 +14,14 @@ from bg6022.orca.profiles import resolve_parameters
 from bg6022.orca.repair_rules import applicable_repairs
 from bg6022.orca.runner import ProcessFacts
 from bg6022.repair import RepairProposal, apply_repair_proposal
-from bg6022.session import clear_execution_guard, register_bytes_artifact, run_directory, utc_now
+from bg6022.session import (
+    artifact_path,
+    clear_execution_guard,
+    find_artifact,
+    register_bytes_artifact,
+    run_directory,
+    utc_now,
+)
 from bg6022.tools.pubchem import fetch_pubchem
 from bg6022.tools.registry import build_registry
 
@@ -252,7 +260,12 @@ def test_restart_rule_requires_evidence_and_validated_candidate(tmp_path: Path) 
         evidence_refs=list(options[0].evidence_refs),
     )
     replacement, record = apply_repair_proposal(
-        proposal, option=options[0], run=run, step=step, result=result
+        proposal,
+        option=options[0],
+        run=run,
+        step=step,
+        result=result,
+        tool=build_registry().get("optimize_geometry"),
     )
     assert replacement.parameters["geom_maxiter"] == 100
     assert replacement.inputs["geometry"].artifact_id == candidate.id
@@ -302,7 +315,6 @@ def test_agent_repair_continues_same_run_after_failed_opt(tmp_path: Path, monkey
             ResultTarget(step_id="opt", port="optimized_geometry"),
         ],
     )
-    monkeypatch.setattr("bg6022.agent.validate_execution_environment", lambda _config: None)
     monkeypatch.setattr("bg6022.tools.orca.validate_execution_environment", lambda _config: None)
     first_stdout = (
         b"GEOMETRY OPTIMIZATION CYCLE 1\n"
@@ -397,6 +409,14 @@ def test_agent_repair_continues_same_run_after_failed_opt(tmp_path: Path, monkey
     assert run.id == run_id
     assert result is not None
     assert result.status == "succeeded"
-    assert run.extra_orca_executions == 1
+    assert run.extra_executions_by_category["electronic_structure"] == 1
     assert len(run.repair_records) == 1
     assert run.current_results["opt"].endswith("attempt-02/result.json")
+    energy_artifact = find_artifact(run, result.output_ports["energy_data"])
+    geometry_artifact = find_artifact(run, result.output_ports["optimized_geometry"])
+    energy_data = json.loads(artifact_path(config.data_root_path, run, energy_artifact).read_text())
+    assert energy_artifact.id in result.artifact_ids
+    assert energy_data["value"] == result.values["opt_final_electronic_energy"]["value"]
+    assert energy_data["geometry"]["sha256"] == geometry_artifact.sha256
+    assert energy_data["method_profile"] == "r2scan3c"
+    assert energy_data["source"] == {"step_id": "opt", "attempt": result.attempt}

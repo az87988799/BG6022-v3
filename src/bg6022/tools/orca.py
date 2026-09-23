@@ -15,19 +15,23 @@ from bg6022.config import AppConfig, validate_execution_environment
 from bg6022.models import (
     InputReference,
     Plan,
+    RepairOption,
+    Request,
     Result,
     ResultProperty,
     Run,
     ScientificCheckResult,
     Step,
     Tool,
+    ToolPreparation,
 )
 from bg6022.orca.checks import CheckOutcome, evaluate_success
 from bg6022.orca.input import OrcaInputSpec, render_input
 from bg6022.orca.parser import EnergyObservation, inspect_attempt
-from bg6022.orca.profiles import get_profile
+from bg6022.orca.profiles import get_profile, resolve_parameters
 from bg6022.orca.repair_rules import applicable_repairs, applicable_scf_repair
 from bg6022.orca.runner import ProcessFacts, RunnerResources, run_orca
+from bg6022.output_contracts import is_compatible_value
 from bg6022.session import (
     RuntimeLock,
     artifact_path,
@@ -94,17 +98,28 @@ def make_single_point_tool(config: AppConfig | None = None) -> Tool:
         config,
         operation="SP",
         name="single_point",
+        display_name="独立单点计算",
         description="Run an independent ORCA single-point calculation on a registered geometry.",
         parameter_model=SinglePointParameters,
-        output_ports={},
+        output_ports={"energy_data": "energy_data"},
         results={"sp_electronic_energy": "Eh"},
-        result_properties={"sp_electronic_energy": "electronic_energy"},
+        result_properties={
+            "sp_electronic_energy": "electronic_energy",
+            "energy_data": "energy_data",
+        },
+        result_check_prerequisites={
+            "sp_electronic_energy": ["local_minimum_supported"],
+        },
         result_metadata={
             "sp_electronic_energy": {
                 "label": "单点电子能",
                 "description": "给定输入几何上的电子能，不含零点能和热校正",
                 "caveat": "这是固定几何的单点结果，不代表几何优化或频率验证",
-            }
+            },
+            "energy_data": {
+                "label": "单点电子能数据",
+                "description": "含数值、方法、电子态、结构哈希和生成来源的结构化能量数据",
+            },
         },
         request_parameters=[
             "method_profile",
@@ -121,15 +136,20 @@ def make_optimize_tool(config: AppConfig | None = None) -> Tool:
         config,
         operation="Opt",
         name="optimize_geometry",
+        display_name="几何优化",
         description=(
             "Optimize a registered geometry and return its converged final geometry and energy."
         ),
         parameter_model=OptimizeParameters,
-        output_ports={"optimized_geometry": "molecular_geometry"},
+        output_ports={
+            "optimized_geometry": "molecular_geometry",
+            "energy_data": "energy_data",
+        },
         results={"opt_final_electronic_energy": "Eh", "optimized_geometry": "molecular_geometry"},
         result_properties={
             "opt_final_electronic_energy": "electronic_energy",
             "optimized_geometry": "molecular_geometry",
+            "energy_data": "energy_data",
         },
         result_metadata={
             "opt_final_electronic_energy": {
@@ -141,6 +161,12 @@ def make_optimize_tool(config: AppConfig | None = None) -> Tool:
                 "label": "优化后的几何",
                 "description": "通过几何优化收敛检查的输出结构",
                 "caveat": "频率稳定性、全局最低点和热力学性质未验证",
+            },
+            "energy_data": {
+                "label": "优化末态电子能数据",
+                "description": (
+                    "含优化末态数值、方法、电子态、末态结构哈希和生成来源的结构化能量数据"
+                ),
             },
         },
         request_parameters=[
@@ -159,6 +185,7 @@ def make_frequency_tool(config: AppConfig | None = None) -> Tool:
         config,
         operation="Freq",
         name="frequency",
+        display_name="频率计算",
         description=(
             "Run an ORCA vibrational frequency calculation on the registered input geometry; "
             "this Tool does not optimize the geometry."
@@ -201,6 +228,10 @@ def make_frequency_tool(config: AppConfig | None = None) -> Tool:
                 "and no negative vibrational modes after ORCA's supported external-mode check."
             ),
         },
+        scientific_check_input_ports={
+            "frequency_complete": "geometry",
+            "local_minimum_supported": "geometry",
+        },
         request_parameters=[
             "method_profile",
             "environment",
@@ -216,6 +247,7 @@ def _make_tool(
     *,
     operation: str,
     name: str,
+    display_name: str,
     description: str,
     parameter_model: type[OrcaParameters],
     output_ports: dict[str, str],
@@ -223,6 +255,8 @@ def _make_tool(
     result_properties: dict[str, ResultProperty],
     result_metadata: dict[str, dict[str, str]],
     scientific_checks: dict[str, str] | None = None,
+    scientific_check_input_ports: dict[str, str] | None = None,
+    result_check_prerequisites: dict[str, list[str]] | None = None,
     request_parameters: list[str],
 ) -> Tool:
     def execute(step: Step, run: Run, cancel: Event) -> Result:
@@ -237,8 +271,104 @@ def _make_tool(
             parameter_model=parameter_model,
         )
 
-    return Tool(
+    tool_holder: dict[str, Tool] = {}
+
+    def prepare(step: Step, context: Any) -> ToolPreparation:
+        tool = tool_holder["tool"]
+        original_parameters = dict(step.parameters)
+        checked = tool.validate_parameters(original_parameters, allow_deferred=True)
+        supplied = {name: checked[name] for name in original_parameters if name in checked}
+        request = context.get("request")
+        if not isinstance(request, Request):
+            raise TypeError("ORCA parameter preparation needs a Request")
+        pending = context.get("pending_parameters")
+        locked = bool(context.get("parameters_locked"))
+        if locked or (
+            isinstance(pending, dict)
+            and pending.get("step_id") == step.id
+            and pending.get("parameters") == step.parameters
+            and pending.get("parameter_sources")
+        ):
+            validated = tool.validate_parameters(step.parameters)
+            _validate_orca_parameters(validated, operation)
+            return ToolPreparation(
+                step=step.model_copy(update={"parameters": validated}),
+                parameter_sources=(
+                    dict(pending.get("parameter_sources", {})) if isinstance(pending, dict) else {}
+                ),
+            )
+        resolution = resolve_parameters(
+            {
+                **request.explicit_parameters,
+                **(
+                    next(
+                        (
+                            item.parameters
+                            for item in request.requirements
+                            if item.id == step.requirement_id
+                        ),
+                        {},
+                    )
+                ),
+            },
+            dict(context.get("structure_facts", {})),
+            supplied,
+            dict(context.get("defaults", {})),
+            user_modifications={
+                **request.user_modifications,
+                **request.user_modifications_by_requirement.get(step.requirement_id or "", {}),
+            },
+            parameter_fields=tuple(parameter_model.model_fields),
+        )
+        if resolution.missing_fields:
+            _validate_orca_parameters(resolution.effective_parameters, operation)
+            return ToolPreparation(
+                step=step.model_copy(update={"parameters": supplied}),
+                missing_fields=tuple(resolution.missing_fields),
+                parameter_sources=dict(resolution.parameter_sources),
+                question="Please provide the missing electronic state parameters.",
+            )
+        validated = tool.validate_parameters(resolution.effective_parameters)
+        _validate_orca_parameters(validated, operation)
+        prepared = Step.model_validate(
+            {**step.model_dump(mode="python"), "parameters": validated}, strict=True
+        )
+        return ToolPreparation(
+            step=prepared,
+            parameter_sources=dict(resolution.parameter_sources),
+        )
+
+    def repair_options(run: Run, step: Step, result: Result) -> list[RepairOption]:
+        return applicable_repairs(run, step, result) + applicable_scf_repair(run, step, result)
+
+    def apply_repair(
+        option: RepairOption,
+        run: Run,
+        step: Step,
+        result: Result,
+        proposal: Any,
+    ) -> tuple[Step, dict[str, Any]]:
+        aliases = dict(option.input_aliases)
+        selected_aliases = list(proposal.get("input_aliases", []))
+        if any(alias not in aliases for alias in selected_aliases):
+            raise ValueError("repair proposal selected an input alias not offered by the Tool")
+        candidate_id = aliases[selected_aliases[0]] if selected_aliases else None
+        from bg6022.orca.repair_rules import validate_repair_option
+
+        return validate_repair_option(
+            option,
+            run=run,
+            step=step,
+            result=result,
+            requested_action=str(proposal.get("option_id", "")),
+            requested_patch=dict(proposal.get("parameters", {})),
+            requested_candidate_id=candidate_id,
+            evidence_refs=list(proposal.get("evidence_refs", [])),
+        )
+
+    tool = Tool(
         name=name,
+        display_name=display_name,
         description=description,
         operations=[operation],
         parameter_model=parameter_model.__name__,
@@ -250,6 +380,8 @@ def _make_tool(
         result_properties=result_properties,
         result_metadata=result_metadata,
         scientific_checks=scientific_checks or {},
+        scientific_check_input_ports=scientific_check_input_ports or {},
+        result_check_prerequisites=result_check_prerequisites or {},
         success_conditions=(
             [
                 "normal ORCA termination",
@@ -274,9 +406,29 @@ def _make_tool(
             "SP": ["increase_scf_maxiter"],
             "Freq": [],
         }[operation],
+        repair_parameter_fields={
+            "Opt": {
+                "restart_optimization": ["geom_maxiter"],
+                "increase_scf_maxiter": ["scf_maxiter"],
+            },
+            "SP": {"increase_scf_maxiter": ["scf_maxiter"]},
+            "Freq": {},
+        }[operation],
+        repair_parameter_limits={
+            "Opt": {
+                "restart_optimization": {"geom_maxiter": 1000},
+                "increase_scf_maxiter": {"scf_maxiter": 1000},
+            },
+            "SP": {"increase_scf_maxiter": {"scf_maxiter": 1000}},
+            "Freq": {},
+        }[operation],
+        repair_input_aliases={
+            "Opt": {"restart_optimization": ["last_complete_geometry"]},
+            "SP": {},
+            "Freq": {},
+        }[operation],
         requires_compute_permission=True,
-        parameter_preparation="orca_electronic_state",
-        execution_budget="orca",
+        execution_budget="electronic_structure",
         deferred_parameters=["charge", "multiplicity"],
         request_parameters=request_parameters,
         geometry_output_input_ports=(
@@ -291,8 +443,212 @@ def _make_tool(
                 "Freq": [],
             }[operation],
         ),
+        preparation_function=prepare,
+        repair_options_function=repair_options,
+        apply_repair_function=apply_repair,
+        result_validation_function=lambda run, step, result: _validate_orca_result(
+            config, operation, run, step, result
+        ),
+        preflight_function=(
+            (lambda: validate_execution_environment(config)) if config is not None else None
+        ),
         execute_function=execute if config is not None else None,
     )
+    tool_holder["tool"] = tool
+    return tool
+
+
+def _validate_orca_result(
+    config: AppConfig | None, operation: str, run: Run, step: Step, result: Result
+) -> bool:
+    if config is None:
+        return True
+    if operation == "Freq":
+        return _validate_frequency_result(config, run, step, result)
+    return _validate_energy_result(config, operation, run, step, result)
+
+
+def _validate_energy_result(
+    config: AppConfig, operation: str, run: Run, step: Step, result: Result
+) -> bool:
+    required_checks = [
+        "runner_succeeded",
+        "exit_code_zero",
+        "process_tree_empty",
+        "normal_termination",
+        "stdout_valid_utf8",
+        "stdout_within_size_limit",
+        "stderr_within_size_limit",
+        "scf_converged",
+        "input_hashes_match",
+        "final_energy_selected",
+        "finite_final_energy",
+    ]
+    if operation == "Opt":
+        required_checks.extend(
+            [
+                "optimization_converged",
+                "output_geometry_present",
+                "stdout_geometry_present",
+                "geometry_consistent",
+            ]
+        )
+    if any(result.checks.get(name) is not True for name in required_checks):
+        return False
+
+    energy_name = {
+        "SP": "sp_electronic_energy",
+        "Opt": "opt_final_electronic_energy",
+    }.get(operation)
+    if energy_name is None:
+        return False
+    energy_value = result.values.get(energy_name)
+    if not is_compatible_value(energy_value, "Eh"):
+        return False
+
+    energy_artifact_id = result.output_ports.get("energy_data")
+    if not isinstance(energy_artifact_id, str) or energy_artifact_id not in result.artifact_ids:
+        return False
+    try:
+        energy_artifact = find_artifact(run, energy_artifact_id)
+        if (
+            energy_artifact.run_id != run.id
+            or energy_artifact.step_id != step.id
+            or energy_artifact.attempt != result.attempt
+            or energy_artifact.artifact_type != "energy_data"
+            or energy_artifact.role != "verified_energy_data"
+        ):
+            return False
+        payload = json.loads(
+            artifact_path(config.data_root_path, run, energy_artifact).read_text(encoding="utf-8")
+        )
+        parameters = step.parameters
+        profile = get_profile(str(parameters["method_profile"]))
+        geometry_source = payload.get("geometry") if isinstance(payload, dict) else None
+        if not isinstance(geometry_source, dict):
+            return False
+        geometry_id = geometry_source.get("artifact_id")
+        expected_geometry_id = (
+            result.input_bindings.get("geometry")
+            if operation == "SP"
+            else result.output_ports.get("optimized_geometry")
+        )
+        if not isinstance(geometry_id, str) or geometry_id != expected_geometry_id:
+            return False
+        geometry_artifact = find_artifact(run, geometry_id)
+        expected_geometry_role = "optimized_geometry" if operation == "Opt" else None
+        if (
+            geometry_artifact.run_id != run.id
+            or geometry_artifact.artifact_type != "molecular_geometry"
+            or geometry_artifact.sha256 != geometry_source.get("sha256")
+            or (
+                expected_geometry_role is not None
+                and geometry_artifact.role != expected_geometry_role
+            )
+            or (
+                operation == "SP"
+                and geometry_id not in result.input_artifact_ids
+            )
+            or (
+                operation == "Opt"
+                and geometry_id not in result.artifact_ids
+            )
+        ):
+            return False
+        artifact_path(config.data_root_path, run, geometry_artifact)
+
+        expected_value = energy_value["value"]
+        observation = payload.get("observation") if isinstance(payload, dict) else None
+        expected_fields = {
+            "schema": "bg6022.energy_data.v1",
+            "property": "electronic_energy",
+            "value": expected_value,
+            "unit": "Eh",
+            "method_profile": profile.name,
+            "method_keyword": profile.orca_keyword,
+            "operation": operation,
+            "charge": parameters.get("charge"),
+            "multiplicity": parameters.get("multiplicity"),
+            "source": {"step_id": step.id, "attempt": result.attempt},
+        }
+        if any(payload.get(name) != value for name, value in expected_fields.items()):
+            return False
+        if (
+            not isinstance(observation, dict)
+            or observation != energy_value
+            or not math.isfinite(float(expected_value))
+            or energy_artifact.metadata.get("geometry_sha256") != geometry_artifact.sha256
+            or energy_artifact.metadata.get("method_profile") != profile.name
+            or energy_artifact.metadata.get("operation") != operation
+            or energy_artifact.metadata.get("charge") != parameters.get("charge")
+            or energy_artifact.metadata.get("multiplicity") != parameters.get("multiplicity")
+            or energy_artifact.metadata.get("unit") != "Eh"
+        ):
+            return False
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return True
+
+
+def _validate_frequency_result(config: AppConfig, run: Run, step: Step, result: Result) -> bool:
+    required_checks = (
+        "runner_succeeded",
+        "exit_code_zero",
+        "process_tree_empty",
+        "normal_termination",
+        "stdout_valid_utf8",
+        "stdout_within_size_limit",
+        "stderr_within_size_limit",
+        "scf_converged",
+        "input_hashes_match",
+        "frequency_section_complete",
+        "frequency_values_finite",
+        "frequency_mode_indices_match_hessian",
+        "hessian_present",
+        "hessian_valid",
+    )
+    if any(result.checks.get(name) is not True for name in required_checks):
+        return False
+    if not is_compatible_value(result.values.get("vibrational_frequencies"), "frequency"):
+        return False
+    input_id = result.input_bindings.get("geometry")
+    check = result.scientific_checks.get("frequency_complete")
+    if not isinstance(input_id, str) or check is None or check.status != "passed":
+        return False
+    try:
+        input_geometry = find_artifact(run, input_id)
+        if (
+            input_geometry.artifact_type != "molecular_geometry"
+            or check.input_geometry_sha256 != input_geometry.sha256
+        ):
+            return False
+        artifact_path(config.data_root_path, run, input_geometry)
+        hessian_id = result.output_ports.get("hessian")
+        if not isinstance(hessian_id, str) or hessian_id not in result.artifact_ids:
+            return False
+        hessian = find_artifact(run, hessian_id)
+        if (
+            hessian.run_id != run.id
+            or hessian.step_id != step.id
+            or hessian.attempt != result.attempt
+            or hessian.artifact_type != "orca_hessian"
+            or hessian.role != "verified_hessian"
+        ):
+            return False
+        artifact_path(config.data_root_path, run, hessian)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _validate_orca_parameters(parameters: dict[str, Any], operation: str) -> None:
+    profile = get_profile(str(parameters["method_profile"]))
+    if parameters["environment"] not in profile.supported_environments:
+        raise ValueError(
+            f"environment {parameters['environment']!r} is not implemented for {profile.name!r}"
+        )
+    if operation not in profile.supported_operations:
+        raise ValueError(f"operation {operation!r} is not implemented for {profile.name!r}")
 
 
 def _profile_repair_capabilities(
@@ -658,7 +1014,63 @@ def _execute_prepared_attempt(
     }
     values: dict[str, Any] = {}
     if outcome.success:
-        values.update(_electronic_energy_value(operation, observed))
+        energy_values = _electronic_energy_value(operation, observed)
+        values.update(energy_values)
+        energy_result_name = {
+            "SP": "sp_electronic_energy",
+            "Opt": "opt_final_electronic_energy",
+        }.get(operation)
+        if energy_result_name is not None and energy_result_name in energy_values:
+            if operation == "Opt":
+                optimized_geometry_id = output_ports.get("optimized_geometry")
+                energy_geometry = (
+                    find_artifact(run, optimized_geometry_id)
+                    if optimized_geometry_id is not None
+                    else None
+                )
+                if energy_geometry is None or energy_geometry.role != "optimized_geometry":
+                    raise ValueError(
+                        "successful Opt result has no verified optimized geometry for energy_data"
+                    )
+            else:
+                energy_geometry = geometry_artifact
+            energy_data = _energy_data_payload(
+                energy_values[energy_result_name],
+                operation=operation,
+                parameters=parameters,
+                geometry_artifact=energy_geometry,
+                step=step,
+                attempt=attempt,
+            )
+            energy_artifact = register_bytes_artifact(
+                config.data_root_path,
+                run,
+                json.dumps(
+                    energy_data,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+                + b"\n",
+                artifact_type="energy_data",
+                role="verified_energy_data",
+                source=f"{step.id}/attempt-{attempt:02d}/energy_data.json",
+                extension=".json",
+                step_id=step.id,
+                attempt=attempt,
+                metadata={
+                    "property": "electronic_energy",
+                    "unit": "Eh",
+                    "method_profile": parameters.method_profile,
+                    "operation": operation,
+                    "charge": parameters.charge,
+                    "multiplicity": parameters.multiplicity,
+                    "geometry_sha256": energy_geometry.sha256,
+                },
+            )
+            artifact_ids.append(energy_artifact.id)
+            output_ports["energy_data"] = energy_artifact.id
     scientific_checks: dict[str, ScientificCheckResult] = {}
     if operation == "Freq":
         section = facts.frequency_section
@@ -732,6 +1144,7 @@ def _execute_prepared_attempt(
         diagnostics=diagnostics,
         artifact_ids=artifact_ids,
         output_ports=output_ports,
+        input_bindings={"geometry": geometry_artifact.id},
         input_artifact_ids=[geometry_artifact.id],
         attempt_relative_path=f"{step.id}/attempt-{attempt:02d}",
     )
@@ -1176,6 +1589,37 @@ def _electronic_energy_value(
             "token": observed.token,
             "source_line": observed.line,
         }
+    }
+
+
+def _energy_data_payload(
+    energy: dict[str, Any],
+    *,
+    operation: str,
+    parameters: OrcaParameters,
+    geometry_artifact: Any,
+    step: Step,
+    attempt: int,
+) -> dict[str, Any]:
+    """Bind one verified energy observation to its method, state, and geometry."""
+
+    profile = get_profile(parameters.method_profile)
+    return {
+        "schema": "bg6022.energy_data.v1",
+        "property": "electronic_energy",
+        "value": energy["value"],
+        "unit": "Eh",
+        "observation": dict(energy),
+        "method_profile": profile.name,
+        "method_keyword": profile.orca_keyword,
+        "operation": operation,
+        "charge": parameters.charge,
+        "multiplicity": parameters.multiplicity,
+        "geometry": {
+            "artifact_id": geometry_artifact.id,
+            "sha256": geometry_artifact.sha256,
+        },
+        "source": {"step_id": step.id, "attempt": attempt},
     }
 
 

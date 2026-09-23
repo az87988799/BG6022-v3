@@ -7,34 +7,51 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 
 from bg6022.llm import LlmClient
-from bg6022.models import Result, Run, Step
-from bg6022.orca.repair_rules import RepairOption, validate_repair_option
+from bg6022.models import RepairOption, Result, Run, Step, Tool
 from bg6022.planner import load_prompt
 
 
 class RepairProposal(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    action: StrictStr
+    option_id: StrictStr | None = None
+    # Read-only compatibility with earlier saved repair prompts.
+    action: StrictStr | None = None
     failed_step_key: StrictStr
     candidate_alias: StrictStr | None = None
+    parameters: dict[str, Any] = Field(default_factory=dict)
     parameter_patch: dict[str, Any] = Field(default_factory=dict)
+    input_aliases: list[StrictStr] = Field(default_factory=list)
     evidence_refs: list[StrictStr] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _candidate_for_action(self) -> RepairProposal:
-        if (
-            self.action == "restart_optimization"
-            and self.candidate_alias != "last_complete_geometry"
+    def _proposal_contract(self) -> RepairProposal:
+        if self.option_id is None and self.action is None:
+            raise ValueError("repair proposal must select an option_id")
+        if self.option_id is not None and self.action is not None and self.option_id != self.action:
+            raise ValueError("legacy action conflicts with option_id")
+        if self.parameters and self.parameter_patch and self.parameters != self.parameter_patch:
+            raise ValueError("legacy parameter_patch conflicts with parameters")
+        if self.candidate_alias is not None and self.input_aliases:
+            if self.input_aliases != [self.candidate_alias]:
+                raise ValueError("candidate_alias conflicts with input_aliases")
+        if self.selected_option_id == "none" and (
+            self.selected_parameters or self.evidence_refs or self.selected_input_aliases
         ):
-            raise ValueError(
-                "restart_optimization requires the program-provided last_complete_geometry alias"
-            )
-        if self.action != "restart_optimization" and self.candidate_alias is not None:
-            raise ValueError("candidate_alias is only valid for restart_optimization")
-        if self.action == "none" and (self.parameter_patch or self.evidence_refs):
             raise ValueError("none repair proposal cannot contain a patch or evidence")
         return self
+
+    @property
+    def selected_option_id(self) -> str:
+        return self.option_id or self.action or "none"
+
+    @property
+    def selected_parameters(self) -> dict[str, Any]:
+        return self.parameters or self.parameter_patch
+
+    @property
+    def selected_input_aliases(self) -> list[str]:
+        return list(self.input_aliases or ([self.candidate_alias] if self.candidate_alias else []))
 
 
 def propose_repair(
@@ -44,6 +61,7 @@ def propose_repair(
     step: Step,
     result: Result,
     options: list[RepairOption],
+    budget_category: str = "none",
     cancel: Any = None,
     remaining_timeout_seconds: float | None = None,
 ) -> RepairProposal | None:
@@ -59,6 +77,7 @@ def propose_repair(
                     step,
                     result,
                     options,
+                    budget_category=budget_category,
                     remaining_timeout_seconds=remaining_timeout_seconds,
                 ),
             },
@@ -66,12 +85,10 @@ def propose_repair(
         RepairProposal,
         purpose="repair",
         example={
-            "action": options[0].action,
+            "option_id": options[0].option_id,
             "failed_step_key": step.id,
-            "candidate_alias": "last_complete_geometry"
-            if options[0].candidate_artifact_id
-            else None,
-            "parameter_patch": options[0].parameter_patch,
+            "parameters": dict(options[0].parameters),
+            "input_aliases": list(options[0].input_aliases),
             "evidence_refs": list(options[0].evidence_refs),
         },
         cancel=cancel,
@@ -87,19 +104,29 @@ def apply_repair_proposal(
     run: Run,
     step: Step,
     result: Result,
+    tool: Tool,
 ) -> tuple[Step, dict[str, Any]]:
     if proposal.failed_step_key != step.id:
         raise ValueError("repair proposal targets a different step")
-    candidate_id = option.candidate_artifact_id if proposal.candidate_alias else None
-    return validate_repair_option(
+    if proposal.selected_option_id != option.option_id:
+        raise ValueError("repair option is not one of the currently applicable options")
+    if proposal.selected_parameters != dict(option.parameters):
+        raise ValueError("repair parameters differ from the selected Tool option")
+    if set(proposal.selected_input_aliases) != set(option.input_aliases):
+        raise ValueError("repair input aliases differ from the selected Tool option")
+    if set(proposal.evidence_refs) != set(option.evidence_refs):
+        raise ValueError("repair evidence references differ from the selected Tool option")
+    return tool.apply_repair(
         option,
-        run=run,
-        step=step,
-        result=result,
-        requested_action=proposal.action,
-        requested_patch=proposal.parameter_patch,
-        requested_candidate_id=candidate_id,
-        evidence_refs=list(proposal.evidence_refs),
+        run,
+        step,
+        result,
+        {
+            "option_id": option.option_id,
+            "parameters": proposal.selected_parameters,
+            "input_aliases": proposal.selected_input_aliases,
+            "evidence_refs": list(proposal.evidence_refs),
+        },
     )
 
 
@@ -109,6 +136,7 @@ def _context(
     result: Result,
     options: list[RepairOption],
     *,
+    budget_category: str,
     remaining_timeout_seconds: float | None,
 ) -> str:
     import json
@@ -152,9 +180,10 @@ def _context(
                 "remaining": max(0, max_attempts - used_attempts),
             },
             "run_budget": {
-                "extra_orca_executions_used": run.extra_orca_executions,
-                "extra_orca_executions_maximum": int(
-                    run.budget.get("max_extra_orca_executions", 3)
+                "execution_category": budget_category,
+                "extra_executions_used": run.extra_executions_by_category.get(budget_category, 0),
+                "extra_executions_maximum": int(
+                    run.budget.get("max_extra_executions_by_category", {}).get(budget_category, 0)
                 ),
                 "remaining_active_seconds": remaining_timeout_seconds,
             },

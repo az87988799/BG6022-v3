@@ -26,7 +26,7 @@ from .answer import (
     select_facts_for_question,
     validate_result_answer,
 )
-from .config import AppConfig, validate_execution_environment
+from .config import AppConfig
 from .llm import LlmClient, LlmError
 from .models import InputReference, Plan, Request, Result, Run, Step, Tool
 from .molecule_identity import (
@@ -37,12 +37,11 @@ from .molecule_identity import (
     identity_matches_facts,
     normalize_formula_token,
 )
-from .orca.profiles import get_profile, resolve_parameters
-from .orca.repair_rules import applicable_repairs, applicable_scf_repair
 from .output_contracts import is_compatible_value, public_type_info
 from .planner import (
     QuerySelection,
     _request_output_preferences,
+    apply_plan_change,
     electronic_state_clarification,
     intake_blocking_requirements,
     intake_message,
@@ -62,18 +61,18 @@ from .session import (
     load_run,
     load_session,
     new_id,
+    publish_step_result,
     register_bytes_artifact,
     register_file_artifact,
     run_directory,
-    save_result,
     save_run,
     save_session,
+    sha256_file,
     utc_now,
 )
 from .tools.molecule import (
     parse_xyz_bytes,
     resolve_artifact_reference,
-    validate_electronic_state,
 )
 from .tools.pubchem import _facts_from_smiles
 from .tools.registry import ToolRegistry, merge_explicit_step_parameters
@@ -111,7 +110,18 @@ def _is_waiting_for_identity(run: Run | None) -> bool:
 def _pending_intake_context(run: Run | None) -> dict[str, Any]:
     if run is None or run.status != "waiting":
         return {}
-    identity = run.request.structure_input.get("molecule_identity")
+    waiting_step = next(
+        (item for item in run.plan.steps if item.id == run.pending_data.get("step_id")),
+        None,
+    )
+    subject_id = waiting_step.subject_id if waiting_step is not None else None
+    subject = run.request.subjects.get(subject_id or "", {})
+    subject_input = subject.get("structure_input", {}) if isinstance(subject, Mapping) else {}
+    identity = (
+        subject_input.get("molecule_identity") if isinstance(subject_input, Mapping) else None
+    )
+    if not isinstance(identity, Mapping):
+        identity = run.request.structure_input.get("molecule_identity")
     identity = identity if isinstance(identity, Mapping) else {}
     candidates = run.pending_data.get("candidates")
     candidates = candidates if isinstance(candidates, list) else []
@@ -130,9 +140,19 @@ def _pending_intake_context(run: Run | None) -> dict[str, Any]:
         "can_replace_identity": sum(step.tool == "resolve_molecule" for step in run.plan.steps)
         == 1,
         "category": run.pending_data.get("category"),
+        "pending_subject_id": subject_id,
         "raw_query": str(identity.get("raw_query") or "")[:128],
         "lookup_query": str(identity.get("lookup_query") or "")[:128],
         "operations": list(run.request.operations),
+        "requirements": [
+            {
+                "requirement_id": item.id,
+                "capability": item.capability,
+                "subject_id": item.subject_id,
+                "parameters": dict(item.parameters),
+            }
+            for item in run.request.requirements
+        ],
         "requested_results": [
             target.port or target.field or target.check
             for target in run.request.requested_results[:24]
@@ -204,10 +224,10 @@ class Agent:
             raise PermissionError("execution permission was not explicitly granted")
         plan = validate_request_plan(request, plan, self.registry)
         _validate_request_parameter_scope(request, plan, self.registry)
-        # The explicit command has always checked the machine before creating a
-        # Run. Chat intentionally defers this check until an ORCA Tool starts.
-        if any(self.registry.get(step.tool).execution_budget == "orca" for step in plan.steps):
-            validate_execution_environment(self.config)
+        # Each Tool owns its environment preflight; the core only invokes the
+        # declared hook for capabilities that require one.
+        for step in plan.steps:
+            self.registry.get(step.tool).preflight()
         geometry_path = Path(xyz_path).resolve()
         parse_xyz_bytes(geometry_path.read_bytes())
         run = Run(
@@ -452,6 +472,12 @@ class Agent:
                     intake.operations, intake.requested_results
                 )
             )
+            if not parameter_continuation and intake.requirements:
+                index_parameter_names.update(
+                    self.registry.request_index_parameter_fields_for_requirements(
+                        intake.requirements
+                    )
+                )
             normalized_parameters = normalize_user_explicit_parameters(
                 text,
                 intake.explicit_parameters,
@@ -476,7 +502,10 @@ class Agent:
                     and _pending_missing_fields_are_scoped(current, intake, self.registry)
                 ):
                     response = self._apply_parameter_update(
-                        current, explicit_parameters, cancel=request_cancel
+                        current,
+                        explicit_parameters,
+                        requirement_id=intake.parameter_target_requirement_id,
+                        cancel=request_cancel,
                     )
                     self._record_response(response, cancel=request_cancel)
                     return response
@@ -573,7 +602,10 @@ class Agent:
                 and _is_parameter_continuation(current, intake, text, explicit_parameters)
             ):
                 response = self._apply_parameter_update(
-                    current, explicit_parameters, cancel=request_cancel
+                    current,
+                    explicit_parameters,
+                    requirement_id=intake.parameter_target_requirement_id,
+                    cancel=request_cancel,
                 )
                 self._record_response(response, cancel=request_cancel)
                 return response
@@ -741,7 +773,9 @@ class Agent:
                     run.finish_active_interval()
                     save_run(self.config.data_root_path, run)
                     return last_result
-                step = _next_ready_step(run, self.config.data_root_path)
+                step = _next_ready_step(
+                    run, self.config.data_root_path, registry=self.registry
+                )
                 if step is None:
                     blocked_checks = _unmet_goal_checks(
                         self.config.data_root_path, run, self.registry
@@ -779,27 +813,29 @@ class Agent:
                         run.finish_active_interval()
                         save_run(self.config.data_root_path, run)
                         return last_result
-                if tool.parameter_preparation == "orca_electronic_state":
+                if tool.preparation_function is not None:
                     preparing_step_id = step.id
                     try:
                         if tool.requires_compute_permission and not run.execution_permission:
-                            # Resolve every ORCA Step before showing one confirmation
+                            # Resolve every prepared Tool Step before one confirmation
                             # for the whole Plan. Later operations often consume a
-                            # future geometry port, so structure facts are traced
+                            # future output port, so structure facts are traced
                             # back through that port to the already prepared input.
                             for planned_step in run.plan.steps:
                                 planned_tool = self.registry.get(planned_step.tool)
-                                if planned_tool.parameter_preparation != "orca_electronic_state":
+                                if planned_tool.preparation_function is None:
                                     continue
                                 preparing_step_id = planned_step.id
-                                prepared_step = self._prepare_orca_step(run, planned_step)
+                                prepared_step = self._prepare_tool_step(
+                                    run, planned_step, planned_tool
+                                )
                                 if prepared_step is None:
                                     run.finish_active_interval()
                                     save_run(self.config.data_root_path, run)
                                     return last_result
                             step = next(item for item in run.plan.steps if item.id == step.id)
                         else:
-                            prepared_step = self._prepare_orca_step(run, step)
+                            prepared_step = self._prepare_tool_step(run, step, tool)
                             if prepared_step is None:
                                 run.finish_active_interval()
                                 save_run(self.config.data_root_path, run)
@@ -842,40 +878,56 @@ class Agent:
                 run.step_status[step.id] = "running"
                 save_run(self.config.data_root_path, run)
                 try:
+                    expected_bindings, expected_hashes = self._frozen_step_inputs(run, step)
                     result = tool.execute(step, run, cancel=cancel_event)
-                except (PermissionError, ValueError, OSError) as error:
+                    step_parameter_sources = run.parameter_sources_by_step.get(step.id)
+                    if not step_parameter_sources and run.pending_data.get("parameter_sources"):
+                        step_parameter_sources = dict(run.pending_data["parameter_sources"])
+                    result_path = publish_step_result(
+                        self.config.data_root_path,
+                        run,
+                        step,
+                        tool,
+                        result,
+                        expected_input_bindings=expected_bindings,
+                        expected_input_hashes=expected_hashes,
+                        parameter_sources=step_parameter_sources,
+                    )
+                except Exception as error:
                     run.status = "failed"
+                    run.step_status[step.id] = "failed"
                     run.pending_data = {
                         "category": "execution_boundary",
                         "reason": str(error),
+                        "exception_type": type(error).__name__,
                         "step_id": step.id,
                     }
                     run.finish_active_interval()
-                    save_run(self.config.data_root_path, run)
-                    raise
+                    try:
+                        save_run(self.config.data_root_path, run)
+                    except Exception:
+                        pass
+                    return last_result
                 last_result = result
-                result.step_fingerprint = _step_fingerprint(step)
-                step_parameter_sources = run.parameter_sources_by_step.get(step.id)
-                if step_parameter_sources:
-                    result.parameter_sources = dict(step_parameter_sources)
-                elif run.pending_data.get("parameter_sources"):
-                    result.parameter_sources = dict(run.pending_data["parameter_sources"])
-                result.input_bindings = {
-                    name: artifact.id
-                    for name, reference in step.inputs.items()
-                    if (artifact := self._artifact_from_reference(run, reference)) is not None
-                }
-                result.input_artifact_ids = list(result.input_bindings.values())
-                save_result(self.config.data_root_path, run, result)
-                result_path = result.attempt_relative_path + "/result.json"
-                if result_path not in run.result_index:
-                    run.result_index.append(result_path)
-                run.step_status[step.id] = result.status
                 if result.status == "succeeded":
-                    run.current_results[step.id] = result_path
                     run.pending_data = {}
                     self._record_result_summary(run, result)
-                    save_run(self.config.data_root_path, run)
+                    try:
+                        save_run(self.config.data_root_path, run)
+                    except OSError as error:
+                        run.status = "failed"
+                        run.pending_data = {
+                            "category": "result_publish_failed",
+                            "reason": str(error),
+                            "step_id": step.id,
+                            "result_path": result_path,
+                        }
+                        run.finish_active_interval()
+                        try:
+                            save_run(self.config.data_root_path, run)
+                        except Exception:
+                            pass
+                        return result
                     continue
                 if result.status == "needs_input":
                     run.status = "waiting"
@@ -901,12 +953,18 @@ class Agent:
             cancel_event.set()
             run.status = "cancelled"
             run.finish_active_interval()
-            save_run(self.config.data_root_path, run)
+            try:
+                save_run(self.config.data_root_path, run)
+            except Exception:
+                pass
             raise
         finally:
             if run.status in {"succeeded", "failed", "cancelled", "interrupted"}:
                 run.finish_active_interval()
-                save_run(self.config.data_root_path, run)
+                try:
+                    save_run(self.config.data_root_path, run)
+                except Exception:
+                    pass
 
     def confirm(self, run: Run | str | None = None) -> AgentResponse:
         request_token, request_cancel = self._begin_request()
@@ -1118,10 +1176,8 @@ class Agent:
                 raise ValueError("copied history geometry hash differs from its verified source")
             assert isinstance(history_alias, str)
             alias_replacements[history_alias] = copied.id
-        input_artifact = self._seed_structure_input(run)
-        if input_artifact is not None:
-            alias_replacements["request_geometry"] = input_artifact.id
-            alias_replacements[INPUT_GEOMETRY_PLACEHOLDER] = input_artifact.id
+        for alias, input_artifact in self._seed_structure_inputs(run).items():
+            alias_replacements[alias] = input_artifact.id
         updated_steps = []
         for step in run.plan.steps:
             inputs = {
@@ -1142,16 +1198,55 @@ class Agent:
         save_run(self.config.data_root_path, run)
         return run
 
-    def _seed_structure_input(self, run: Run) -> Any | None:
+    def _seed_structure_inputs(self, run: Run) -> dict[str, Any]:
+        """Register caller-supplied XYZ once per subject and expose safe aliases."""
+
+        replacements: dict[str, Any] = {}
         value = run.request.structure_input
         xyz_text = value.get("xyz_text") or value.get("xyz") if isinstance(value, dict) else None
-        if xyz_text is None:
-            return None
+        if xyz_text is not None:
+            artifact = self._register_input_geometry(
+                run,
+                xyz_text,
+                value.get("molecule_identity") if isinstance(value, Mapping) else None,
+                subject_key=None,
+            )
+            replacements["request_geometry"] = artifact
+            replacements[INPUT_GEOMETRY_PLACEHOLDER] = artifact
+        for subject_id, subject in run.request.subjects.items():
+            if not isinstance(subject, Mapping):
+                continue
+            subject_input = subject.get("structure_input", {})
+            if not isinstance(subject_input, Mapping):
+                continue
+            subject_xyz = subject_input.get("xyz_text") or subject_input.get("xyz")
+            if subject_xyz is None:
+                continue
+            subject_key = str(subject.get("key") or subject_id)
+            if xyz_text is not None and len(run.request.subjects) == 1 and subject_xyz == xyz_text:
+                artifact = replacements["request_geometry"]
+            else:
+                artifact = self._register_input_geometry(
+                    run,
+                    subject_xyz,
+                    subject_input.get("molecule_identity"),
+                    subject_key=subject_key,
+                )
+            replacements[f"request_geometry_{subject_key}"] = artifact
+        return replacements
+
+    def _register_input_geometry(
+        self,
+        run: Run,
+        xyz_text: Any,
+        identity: Any,
+        *,
+        subject_key: str | None,
+    ) -> Any:
         if not isinstance(xyz_text, str):
-            raise ValueError("chat structure_input.xyz_text must be text")
+            raise ValueError("chat subject XYZ must be text")
         geometry_bytes = xyz_text.encode("utf-8")
         geometry = parse_xyz_bytes(geometry_bytes)
-        identity = value.get("molecule_identity") if isinstance(value, Mapping) else None
         if isinstance(identity, Mapping) and identity.get("element_counts") is not None:
             matches, reason = identity_matches_facts(
                 identity,
@@ -1163,82 +1258,74 @@ class Agent:
                 },
             )
             if not matches:
-                raise ValueError(f"inline XYZ does not satisfy the molecule formula: {reason}")
+                raise ValueError(
+                    f"inline XYZ does not satisfy subject {subject_key or 'subject_1'}'s "
+                    f"molecule formula: {reason}"
+                )
         artifact = register_bytes_artifact(
             self.config.data_root_path,
             run,
             geometry_bytes,
             artifact_type="molecular_geometry",
             role="input_geometry",
-            source="chat:inline_xyz",
+            source="chat:inline_xyz" if subject_key is None else f"chat:inline_xyz:{subject_key}",
             extension=".xyz",
-            metadata={"imported_as_raw_bytes": True, "source": "chat"},
+            metadata={
+                "imported_as_raw_bytes": True,
+                "source": "chat",
+                **({"subject_key": subject_key} if subject_key is not None else {}),
+            },
         )
         return artifact
 
-    def _prepare_orca_step(self, run: Run, step: Step) -> Step | None:
-        tool = self.registry.get(step.tool)
-        original_parameters = dict(step.parameters)
-        checked_parameters = tool.validate_parameters(original_parameters, allow_deferred=True)
-        supplied_parameters = {
-            name: checked_parameters[name]
-            for name in original_parameters
-            if name in checked_parameters
-        }
-        parameter_fields = _tool_parameter_fields(tool)
-        if (
-            run.accepted_snapshot
-            and "charge" in step.parameters
-            and "multiplicity" in step.parameters
-        ):
-            validated = tool.validate_parameters(step.parameters)
-            _validate_orca_profile(validated)
-            return step.model_copy(update={"parameters": validated})
-        if (
-            run.pending_data.get("step_id") == step.id
-            and run.pending_data.get("parameters") == step.parameters
-            and run.pending_data.get("parameter_sources")
-        ):
-            validated = self.registry.get(step.tool).validate_parameters(step.parameters)
-            _validate_orca_profile(validated)
-            return step.model_copy(update={"parameters": validated})
-        facts = self._known_structure_facts(run, step)
-        resolution = resolve_parameters(
-            run.request.explicit_parameters,
-            facts,
-            supplied_parameters,
-            self.config.defaults,
-            user_modifications=run.request.user_modifications,
-            parameter_fields=parameter_fields,
+    def _prepare_tool_step(self, run: Run, step: Step, tool: Tool) -> Step | None:
+        """Apply the selected Tool's optional domain parameter preparation hook."""
+
+        prepared = tool.prepare(
+            step,
+            {
+                "request": run.request,
+                "structure_facts": self._known_structure_facts(run, step),
+                "defaults": self.config.defaults,
+                "parameters_locked": bool(run.accepted_snapshot),
+                "pending_parameters": dict(run.pending_data),
+            },
         )
-        if resolution.missing_fields:
+        if prepared.missing_fields or prepared.step is None:
             run.status = "waiting"
             run.waiting_for = "clarification"
             run.pending_data = {
-                "question": "Please provide the missing electronic state parameters.",
+                "category": "parameter_preparation",
+                "question": prepared.question
+                or "Please provide the missing parameters for this Tool.",
                 "step_id": step.id,
-                "missing_fields": list(resolution.missing_fields),
-                "parameter_sources": resolution.parameter_sources,
+                "missing_fields": list(prepared.missing_fields),
+                "parameter_sources": dict(prepared.parameter_sources),
                 "parameters": dict(step.parameters),
             }
             return None
-        validated = tool.validate_parameters(resolution.effective_parameters)
-        _validate_orca_profile(validated)
-        replacement = Step.model_validate(
-            {**step.model_dump(mode="python"), "parameters": validated}, strict=True
-        )
-        run.plan = _replace_step(run.plan, replacement)
+        replacement = prepared.step
+        assert replacement is not None
+        if replacement.id != step.id or replacement.tool != step.tool:
+            raise ValueError("Tool preparation cannot change the Step identity or capability")
+        if replacement != step:
+            run.plan = _replace_step(run.plan, replacement)
         run.pending_data = {
             "step_id": step.id,
-            "parameters": dict(validated),
-            "parameter_sources": resolution.parameter_sources,
-            "effective_parameters": validated,
+            "parameters": dict(replacement.parameters),
+            "parameter_sources": dict(prepared.parameter_sources),
+            "effective_parameters": dict(replacement.parameters),
         }
-        run.parameter_sources_by_step[step.id] = dict(resolution.parameter_sources)
+        run.parameter_sources_by_step[step.id] = dict(prepared.parameter_sources)
         return replacement
 
     def _apply_parameter_update(
-        self, run: Run, parameters: dict[str, Any], *, cancel: Event | None = None
+        self,
+        run: Run,
+        parameters: dict[str, Any],
+        *,
+        requirement_id: str | None = None,
+        cancel: Event | None = None,
     ) -> AgentResponse:
         if cancel is not None and cancel.is_set():
             return AgentResponse("当前请求已取消。", run=run)
@@ -1250,84 +1337,127 @@ class Agent:
         if not parameters:
             return AgentResponse("没有识别到可应用的计算参数修改。", run=run)
 
-        candidate_request = run.request.model_copy(
-            update={
-                "explicit_parameters": {
-                    **run.request.explicit_parameters,
-                    **parameters,
-                },
-                "user_modifications": {
-                    **run.request.user_modifications,
-                    **parameters,
-                },
+        editable_steps = [
+            step
+            for step in editable_steps
+            if set(parameters) & set(self.registry.get(step.tool).request_parameters)
+        ]
+        scoped_requirement_id = requirement_id
+        if scoped_requirement_id is not None:
+            selected_requirement = next(
+                (item for item in run.request.requirements if item.id == scoped_requirement_id),
+                None,
+            )
+            if selected_requirement is None:
+                return AgentResponse("参数修改已拒绝：目标要求项不属于当前任务。", run=run)
+            editable_steps = [
+                step for step in editable_steps if step.requirement_id == scoped_requirement_id
+            ]
+        elif len(editable_steps) == 1:
+            # A single unlabelled target remains a request-wide update for
+            # backwards compatibility; only an explicit target uses a scoped map.
+            scoped_requirement_id = None
+        elif len({step.requirement_id or f"step:{step.id}" for step in editable_steps}) > 1:
+            choices = "\n".join(
+                [
+                    *(
+                        f"- {item.id}: {item.capability} / {item.subject_id}"
+                        for item in run.request.requirements
+                        if any(step.requirement_id == item.id for step in editable_steps)
+                    ),
+                    *(
+                        f"- {step.id}: {step.tool} / {step.subject_id or 'unknown subject'}"
+                        for step in editable_steps
+                        if step.requirement_id is None
+                    ),
+                ]
+            )
+            return AgentResponse(
+                "当前有多个参数作用域，请明确只修改其中一个要求项：\n" + choices,
+                run=run,
+            )
+        if not editable_steps:
+            return AgentResponse("参数修改与所选要求项没有兼容的参数字段。", run=run)
+
+        if scoped_requirement_id is None:
+            candidate_request = run.request.model_copy(
+                update={
+                    "explicit_parameters": {**run.request.explicit_parameters, **parameters},
+                    "user_modifications": {**run.request.user_modifications, **parameters},
+                }
+            )
+        else:
+            scoped = dict(run.request.user_modifications_by_requirement)
+            scoped[scoped_requirement_id] = {
+                **scoped.get(scoped_requirement_id, {}),
+                **parameters,
             }
-        )
+            candidate_request = run.request.model_copy(
+                update={"user_modifications_by_requirement": scoped}
+            )
         try:
             _validate_request_parameter_scope(candidate_request, run.plan, self.registry)
             candidate_steps: list[Step] = []
             candidate_sources: dict[str, dict[str, str]] = {}
             for step in run.plan.steps:
                 tool = self.registry.get(step.tool)
-                if not tool.request_parameters:
+                if not tool.request_parameters or step not in editable_steps:
                     candidate_steps.append(step)
                     continue
 
-                if tool.parameter_preparation != "orca_electronic_state":
+                if tool.preparation_function is None:
                     replacement = merge_explicit_step_parameters(tool, step, candidate_request)
                     candidate_steps.append(replacement)
+                    scoped_explicit: dict[str, Any] = {}
+                    scoped_modifications: dict[str, Any] = {}
+                    if step.requirement_id is not None:
+                        requirement = next(
+                            item
+                            for item in candidate_request.requirements
+                            if item.id == step.requirement_id
+                        )
+                        scoped_explicit = requirement.parameters
+                        scoped_modifications = (
+                            candidate_request.user_modifications_by_requirement.get(
+                                step.requirement_id, {}
+                            )
+                        )
                     candidate_sources[step.id] = {
                         name: (
                             "user_modification"
-                            if name in candidate_request.user_modifications
+                            if name in scoped_modifications
+                            or name in candidate_request.user_modifications
+                            else "requirement_explicit"
+                            if name in scoped_explicit
                             else "request_explicit"
                         )
                         for name in tool.request_parameters
                         if name in replacement.parameters
                         and (
-                            name in candidate_request.user_modifications
+                            name in scoped_modifications
+                            or name in scoped_explicit
+                            or name in candidate_request.user_modifications
                             or name in candidate_request.explicit_parameters
                         )
                     }
                     continue
 
-                parameter_fields = _tool_parameter_fields(tool)
-                step_patch = {
-                    name: value for name, value in parameters.items() if name in parameter_fields
-                }
-                merged = dict(step.parameters)
-                merged.update(step_patch)
-                checked = tool.validate_parameters(merged, allow_deferred=True)
-                supplied = {name: checked[name] for name in merged if name in checked}
-                resolution = resolve_parameters(
-                    candidate_request.explicit_parameters,
-                    self._known_structure_facts(run, step),
-                    supplied,
-                    self.config.defaults,
-                    user_modifications=candidate_request.user_modifications,
-                    parameter_fields=parameter_fields,
+                candidate_step = merge_explicit_step_parameters(tool, step, candidate_request)
+                checked = tool.validate_parameters(candidate_step.parameters, allow_deferred=True)
+                candidate_step = candidate_step.model_copy(update={"parameters": checked})
+                prepared = tool.prepare(
+                    candidate_step,
+                    {
+                        "request": candidate_request,
+                        "structure_facts": self._known_structure_facts(run, step),
+                        "defaults": self.config.defaults,
+                        "parameters_locked": False,
+                        "pending_parameters": {},
+                    },
                 )
-                effective = tool.validate_parameters(
-                    resolution.effective_parameters,
-                    allow_deferred=bool(resolution.missing_fields),
-                )
-                if tool.execution_budget == "orca":
-                    _validate_orca_profile(effective)
-                    reference = step.inputs.get("geometry")
-                    if (
-                        "charge" in effective
-                        and "multiplicity" in effective
-                        and reference is not None
-                        and self._artifact_from_reference(run, reference) is not None
-                    ):
-                        # Validate against a geometry already available at this
-                        # boundary. A downstream Step may reference an Opt port
-                        # that is intentionally not produced until after confirmation.
-                        self._validate_candidate_electronic_state(run, step, effective)
-                replacement = Step.model_validate(
-                    {**step.model_dump(mode="python"), "parameters": effective}, strict=True
-                )
+                replacement = prepared.step or candidate_step
                 candidate_steps.append(replacement)
-                candidate_sources[step.id] = dict(resolution.parameter_sources)
+                candidate_sources[step.id] = dict(prepared.parameter_sources)
 
             candidate_plan = Plan.model_validate(
                 {
@@ -1348,13 +1478,16 @@ class Agent:
             for old, step in zip(run.plan.steps, candidate_plan.steps, strict=True)
             if old.parameters != step.parameters
         ]
-        run.request = candidate_request
-        run.plan = candidate_plan
+        apply_plan_change(
+            run,
+            candidate_plan,
+            self.registry,
+            candidate_request=candidate_request,
+            changed_step_ids=set(changed_steps),
+        )
         run.execution_permission = not self.config.runtime.confirm_before_compute
         run.accepted_snapshot = {}
         run.accepted_execution_sha256 = None
-        for changed_step_id in changed_steps:
-            _invalidate_current_results(run, changed_step_id)
         run.parameter_sources_by_step.update(candidate_sources)
         run.waiting_for = None
         run.status = "running"
@@ -1424,7 +1557,15 @@ class Agent:
             query = str(selected_candidate_cid)
             kind = "cid"
         try:
-            structure_input = dict(run.request.structure_input)
+            subject_id = step.subject_id
+            subject_record = run.request.subjects.get(subject_id or "")
+            subject_value = dict(subject_record) if isinstance(subject_record, Mapping) else None
+            subject_input_value = (
+                subject_record.get("structure_input", {})
+                if isinstance(subject_record, Mapping)
+                else run.request.structure_input
+            )
+            structure_input = dict(subject_input_value)
             if candidate is not None:
                 identity = structure_input.get("molecule_identity")
                 if not isinstance(identity, Mapping):
@@ -1508,7 +1649,18 @@ class Agent:
                         "该分子选择已拒绝（rejected）：" + (reason or "结构身份与原分子式不一致"),
                         run=run,
                     )
-            candidate_request = run.request.model_copy(update={"structure_input": structure_input})
+            if subject_value is not None and subject_id is not None:
+                subject_value["structure_input"] = structure_input
+                subjects = dict(run.request.subjects)
+                subjects[subject_id] = subject_value
+                updates: dict[str, Any] = {"subjects": subjects}
+                if len(subjects) == 1:
+                    updates["structure_input"] = structure_input
+                candidate_request = run.request.model_copy(update=updates)
+            else:
+                candidate_request = run.request.model_copy(
+                    update={"structure_input": structure_input}
+                )
         except (TypeError, ValueError) as error:
             return AgentResponse(f"该分子选择已拒绝（rejected）：{error}", run=run)
         try:
@@ -1535,9 +1687,13 @@ class Agent:
             )
         except ValueError as error:
             return AgentResponse(f"该分子选择已拒绝（rejected）：{error}", run=run)
-        run.request = candidate_request
-        run.plan = candidate_plan
-        _invalidate_current_results(run, step.id)
+        apply_plan_change(
+            run,
+            candidate_plan,
+            self.registry,
+            candidate_request=candidate_request,
+            changed_step_ids={step.id},
+        )
         run.execution_permission = not self.config.runtime.confirm_before_compute
         run.accepted_snapshot = {}
         run.accepted_execution_sha256 = None
@@ -1554,7 +1710,8 @@ class Agent:
     def _try_repair(self, run: Run, step: Step, result: Result, cancel: Event) -> bool:
         if not self.config.repair.enabled:
             return False
-        options = applicable_repairs(run, step, result) + applicable_scf_repair(run, step, result)
+        tool = self.registry.get(step.tool)
+        options = tool.repair_options(run, step, result)
         if not options or self.llm is None:
             return False
         if run.plan_revisions >= int(run.budget.get("max_plan_revisions", 2)):
@@ -1571,13 +1728,10 @@ class Agent:
             }
             save_run(self.config.data_root_path, run)
             return False
-        max_extra = int(
-            run.budget.get(
-                "max_extra_orca_executions",
-                self.config.repair.max_extra_orca_executions,
-            )
-        )
-        if run.extra_orca_executions >= max_extra:
+        category = tool.execution_budget
+        max_extra = self._extra_execution_limit(run, category)
+        used_extra = run.extra_executions_by_category.get(category, 0)
+        if category != "none" and used_extra >= max_extra:
             return False
         try:
             proposal = propose_repair(
@@ -1586,6 +1740,7 @@ class Agent:
                 step=step,
                 result=result,
                 options=options,
+                budget_category=tool.execution_budget,
                 cancel=cancel,
                 remaining_timeout_seconds=self._remaining_active_seconds(run),
             )
@@ -1593,34 +1748,42 @@ class Agent:
             run.pending_data = {"repair_unavailable": error.category, "reason": str(error)}
             save_run(self.config.data_root_path, run)
             return False
-        if proposal is None or proposal.action == "none":
+        if proposal is None or proposal.selected_option_id == "none":
             return False
-        option = next((item for item in options if item.action == proposal.action), None)
+        option = next(
+            (item for item in options if item.option_id == proposal.selected_option_id), None
+        )
         if option is None:
             return False
         try:
             replacement, record = apply_repair_proposal(
-                proposal, option=option, run=run, step=step, result=result
+                proposal,
+                option=option,
+                run=run,
+                step=step,
+                result=result,
+                tool=tool,
             )
         except ValueError as error:
             run.pending_data = {"repair_rejected": str(error)}
             save_run(self.config.data_root_path, run)
             return False
-        run.plan = _replace_step(run.plan, replacement)
-        run.plan = self.registry.validate_plan(run.plan)
-        run.plan = Plan.model_validate(
-            {**run.plan.model_dump(mode="python"), "revision": run.plan.revision + 1},
-            strict=True,
+        candidate_plan = self.registry.validate_plan(_replace_step(run.plan, replacement))
+        apply_plan_change(
+            run,
+            candidate_plan,
+            self.registry,
+            changed_step_ids={step.id},
         )
         run.plan_revisions += 1
         record["derived_plan_sha256"] = _plan_fingerprint(run.plan)
         run.repair_records.append(record)
-        _invalidate_current_results(run, step.id)
         save_run(self.config.data_root_path, run)
         return True
 
     def _reserve_attempt(self, run: Run, step: Step, tool: Tool) -> bool:
-        if tool.execution_budget != "orca":
+        category = tool.execution_budget
+        if category == "none":
             return True
         origin = run.origin_step_map.get(step.id, step.origin_step_id or step.id)
         known_origin = step.id in run.origin_step_map or origin in run.origin_step_map.values()
@@ -1634,18 +1797,26 @@ class Agent:
                 "step_id": step.id,
             }
             return False
-        if (count > 0 or new_science_step) and run.extra_orca_executions >= int(
-            run.budget.get("max_extra_orca_executions", 3)
+        used_extra = run.extra_executions_by_category.get(category, 0)
+        if (count > 0 or new_science_step) and used_extra >= self._extra_execution_limit(
+            run, category
         ):
             run.pending_data = {
-                "budget_exhausted": "max_extra_orca_executions",
+                "budget_exhausted": "max_extra_executions",
+                "budget_category": category,
                 "step_id": step.id,
             }
             return False
         run.attempt_counts[origin] = count + 1
         if count > 0 or new_science_step:
-            run.extra_orca_executions += 1
+            run.extra_executions_by_category[category] = used_extra + 1
         return True
+
+    def _extra_execution_limit(self, run: Run, category: str) -> int:
+        configured = run.budget.get("max_extra_executions_by_category", {})
+        if isinstance(configured, dict) and category in configured:
+            return int(configured[category])
+        return int(self.config.repair.execution_budgets_by_category.get(category, 0))
 
     def _prepare_confirmation(self, run: Run, step: Step) -> None:
         run.status = "waiting"
@@ -1757,8 +1928,7 @@ class Agent:
                     target.model_dump(mode="json") for target in run.request.requested_results
                 ],
             },
-            "operation": (self.registry.get(step.tool).operations or [None])[0]
-            or {"optimize_geometry": "Opt", "single_point": "SP"}.get(step.tool, "Tool"),
+            "operation": (self.registry.get(step.tool).operations or ["Tool"])[0],
             "step_id": step.id,
             "tool": step.tool,
             "plan_steps": self._preview_plan_steps(run),
@@ -1810,22 +1980,37 @@ class Agent:
                         ),
                     }
                 )
-            goals = [
-                {
-                    "source_step": (
-                        f"步骤 {step_numbers[goal.source_step_id]}"
-                        if goal.source_step_id in step_numbers
-                        else "未知步骤"
-                    ),
-                    "check": goal.check,
-                    "required_status": goal.required_status,
-                }
-                for goal in step.goal_checks
-            ]
+            goals = []
+            for goal in step.goal_checks:
+                source_step = next(
+                    (item for item in run.plan.steps if item.id == goal.source_step_id), None
+                )
+                source_tool = (
+                    self.registry.get(source_step.tool) if source_step is not None else None
+                )
+                goals.append(
+                    {
+                        "source_step": (
+                            f"步骤 {step_numbers[goal.source_step_id]}"
+                            if goal.source_step_id in step_numbers
+                            else "未知步骤"
+                        ),
+                        "check": goal.check,
+                        "label": (
+                            source_tool.result_metadata.get(goal.check, {}).get(
+                                "label", goal.check.replace("_", " ")
+                            )
+                            if source_tool is not None
+                            else goal.check.replace("_", " ")
+                        ),
+                        "required_status": goal.required_status,
+                    }
+                )
             summaries.append(
                 {
                     "index": index,
                     "tool": tool.name,
+                    "tool_label": tool.display_name or tool.name,
                     "operations": list(tool.operations),
                     "parameters": dict(step.parameters),
                     "inputs": inputs,
@@ -1957,27 +2142,6 @@ class Agent:
             return enriched
         return {}
 
-    def _validate_candidate_electronic_state(
-        self, run: Run, step: Step, parameters: dict[str, Any]
-    ) -> None:
-        reference = step.inputs.get("geometry")
-        if reference is None:
-            return
-        geometry_artifact = self._artifact_from_reference(run, reference)
-        if geometry_artifact is None:
-            raise ValueError("candidate geometry is not a current successful artifact")
-        try:
-            geometry = parse_xyz_bytes(
-                artifact_path(self.config.data_root_path, run, geometry_artifact).read_bytes()
-            )
-        except (OSError, ValueError) as error:
-            raise ValueError("candidate geometry cannot be validated") from error
-        validate_electronic_state(
-            geometry,
-            charge=parameters["charge"],
-            multiplicity=parameters["multiplicity"],
-        )
-
     def _molecule_artifact_for_geometry(
         self, run: Run, artifact: Any, *, seen: set[str]
     ) -> Any | None:
@@ -2037,38 +2201,29 @@ class Agent:
                 capabilities = set(tool.applicable_repair_capabilities(step.parameters))
             except (TypeError, ValueError):
                 capabilities = set()
-            mutable_parameters: list[str] = []
-            immutable_parameters = ["method_profile", "environment", "charge", "multiplicity"]
+            mutable_parameters: set[str] = set()
+            declared_parameters = (
+                set(tool.parameter_type.model_fields) if tool.parameter_type is not None else set()
+            )
             actions: dict[str, Any] = {}
-            if "restart_optimization" in capabilities:
-                mutable_parameters.append("geom_maxiter")
-                immutable_parameters.append("scf_maxiter")
+            for action in sorted(capabilities):
+                fields = tool.repair_parameter_fields.get(action, [])
+                mutable_parameters.update(fields)
                 if iteration_increase_allowed:
-                    actions["restart_optimization"] = {
-                        "fields": ["geom_maxiter"],
-                        "maximum": 1000,
-                        "maximum_is_program_cap": True,
+                    limits = tool.repair_parameter_limits.get(action, {})
+                    maximum = min(limits.values()) if limits else None
+                    actions[action] = {
+                        "fields": list(fields),
+                        "limits": dict(limits),
+                        "maximum": maximum,
+                        "input_aliases": list(tool.repair_input_aliases.get(action, [])),
                     }
-            if "increase_scf_maxiter" in capabilities:
-                mutable_parameters.append("scf_maxiter")
-                immutable_parameters.append("geom_maxiter")
-                if iteration_increase_allowed:
-                    actions["increase_scf_maxiter"] = {
-                        "fields": ["scf_maxiter"],
-                        "maximum": 1000,
-                        "maximum_is_program_cap": True,
-                    }
-            if not capabilities.intersection({"restart_optimization", "increase_scf_maxiter"}):
+            if not capabilities:
                 continue
             scopes[step.id] = {
                 "origin_step_id": run.origin_step_map.get(step.id, step.origin_step_id or step.id),
-                "mutable_parameters": mutable_parameters,
-                "immutable_parameters": immutable_parameters,
-                "geometry_rule": (
-                    "only a program-validated restart_candidate from this Step"
-                    if "restart_optimization" in capabilities
-                    else "retain the accepted geometry reference"
-                ),
+                "mutable_parameters": sorted(mutable_parameters),
+                "immutable_parameters": sorted(declared_parameters - mutable_parameters),
                 "actions": actions,
             }
         return {
@@ -2077,7 +2232,9 @@ class Agent:
             "steps": scopes,
             "resources_immutable": dict(run.resources),
             "max_attempts_per_science_step": run.budget.get("max_attempts_per_science_step"),
-            "max_extra_orca_executions": run.budget.get("max_extra_orca_executions"),
+            "max_extra_executions_by_category": run.budget.get(
+                "max_extra_executions_by_category", {}
+            ),
         }
 
     def _allowed_repairs(self, run: Run, step: Step) -> list[str]:
@@ -2124,6 +2281,23 @@ class Agent:
         except ValueError:
             return None
 
+    def _frozen_step_inputs(self, run: Run, step: Step) -> tuple[dict[str, str], dict[str, str]]:
+        """Resolve and hash-check every bound input immediately before invocation."""
+
+        bindings: dict[str, str] = {}
+        hashes: dict[str, str] = {}
+        for input_name, reference in step.inputs.items():
+            artifact = self._artifact_from_reference(run, reference)
+            if artifact is None:
+                raise ValueError(f"Step input {input_name!r} is not a current verified Artifact")
+            path = artifact_path(self.config.data_root_path, run, artifact)
+            actual_hash = sha256_file(path)
+            if actual_hash != artifact.sha256:
+                raise ValueError(f"Step input {input_name!r} changed before Tool invocation")
+            bindings[input_name] = artifact.id
+            hashes[artifact.id] = actual_hash
+        return bindings, hashes
+
     def _latest_result(self, run: Run) -> Result | None:
         if not run.result_index:
             return None
@@ -2154,9 +2328,10 @@ class Agent:
             return None
 
     def _default_budget(self) -> dict[str, Any]:
+        category_limits = self.config.repair.execution_budgets_by_category
         return {
             "max_attempts_per_science_step": self.config.repair.max_attempts_per_science_step,
-            "max_extra_orca_executions": self.config.repair.max_extra_orca_executions,
+            "max_extra_executions_by_category": category_limits,
             "max_plan_revisions": self.config.repair.max_plan_revisions,
         }
 
@@ -2411,6 +2586,7 @@ class Agent:
         preview_reason: str | None = None
         previewable = expected_type in {
             "molecular_geometry",
+            "energy_data",
             "molecule",
             "text_file",
             "file",
@@ -2485,6 +2661,18 @@ class Agent:
                     "label": metadata.get("label"),
                     "description": metadata.get("description"),
                     "caveat": metadata.get("caveat"),
+                    "verified_value": (fact.get("value") if kind in {"field", "check"} else None),
+                    "task_context": {
+                        key: fact.get(key)
+                        for key in (
+                            "system",
+                            "step_tool",
+                            "method_profile",
+                            "environment",
+                            "result_status",
+                        )
+                        if fact.get(key) is not None
+                    },
                     "file": (
                         {
                             "available": True,
@@ -3020,7 +3208,13 @@ class Agent:
                         ):
                             continue
                         if not _result_check_input_is_bound(
-                            self.config.data_root_path, run, result, check
+                            self.config.data_root_path,
+                            run,
+                            step,
+                            result,
+                            name,
+                            check,
+                            self.registry,
                         ):
                             continue
                     else:
@@ -3277,7 +3471,7 @@ class Agent:
             },
             "system": structure,
             "step": {
-                "purpose": _step_purpose(step),
+                "purpose": tool.display_name or tool.description,
                 "tool": tool.name,
                 "method_profile": step.parameters.get("method_profile"),
                 "environment": step.parameters.get("environment"),
@@ -3380,7 +3574,9 @@ class Agent:
                 check.model_dump(mode="python"), "scientific_check"
             ):
                 return None
-            if not _result_check_input_is_bound(self.config.data_root_path, run, result, check):
+            if not _result_check_input_is_bound(
+                self.config.data_root_path, run, step, result, name, check, self.registry
+            ):
                 return None
             value = check.model_dump(mode="python")
         structure = self._query_structure(run, step, result)
@@ -3464,6 +3660,7 @@ class Agent:
         labels: list[str] = []
         for target in run.plan.requested_results:
             if target.check is not None:
+                step = None
                 candidates = [
                     step
                     for step in run.plan.steps
@@ -3487,15 +3684,23 @@ class Agent:
                         check is not None
                         and check.status == "passed"
                         and _result_check_input_is_bound(
-                            self.config.data_root_path, run, result, check
+                            self.config.data_root_path,
+                            run,
+                            step,
+                            result,
+                            target.check,
+                            check,
+                            self.registry,
                         )
                     ):
                         continue
-                check_labels = {
-                    "frequency_complete": "完整频率检查",
-                    "local_minimum_supported": "局部极小值检查",
-                }
-                label = check_labels.get(target.check, target.check.replace("_", " "))
+                label = (
+                    self.registry.get(step.tool).result_metadata.get(target.check, {}).get(
+                        "label", target.check.replace("_", " ")
+                    )
+                    if step is not None
+                    else target.check.replace("_", " ")
+                )
                 if label not in labels:
                     labels.append(label)
                 continue
@@ -3620,32 +3825,9 @@ class Agent:
                 return False
             if result.input_bindings.get(input_name) != artifact.id:
                 return False
-        if step.tool == "frequency":
-            required_checks = (
-                "runner_succeeded",
-                "exit_code_zero",
-                "process_tree_empty",
-                "normal_termination",
-                "stdout_valid_utf8",
-                "stdout_within_size_limit",
-                "stderr_within_size_limit",
-                "scf_converged",
-                "input_hashes_match",
-                "frequency_section_complete",
-                "frequency_values_finite",
-                "frequency_mode_indices_match_hessian",
-                "hessian_present",
-                "hessian_valid",
-            )
-            if any(result.checks.get(name) is not True for name in required_checks):
-                return False
-            if not _query_value_is_compatible(
-                result.values.get("vibrational_frequencies"), "frequency"
-            ):
-                return False
-            artifact = self._query_port_artifact(run, step, result, "hessian", "orca_hessian")
-            if artifact is None or artifact.role != "verified_hessian":
-                return False
+        tool = self.registry.get(step.tool)
+        if tool.scientific_checks and not tool.validate_result(run, step, result):
+            return False
         return True
 
     def _query_port_artifact(
@@ -3968,6 +4150,8 @@ def _artifact_mime_type(expected_type: Any, suffix: str | None) -> str:
         return "chemical/x-xyz"
     if expected_type == "molecule":
         return "application/json"
+    if expected_type == "energy_data":
+        return "application/json"
     if expected_type == "text_file":
         return "text/plain"
     if expected_type == "orca_hessian":
@@ -4019,12 +4203,10 @@ def _normalize_explicit_plan(
                 for name in original_parameters
                 if name in checked_parameters
             }
-            if defaults is not None and tool.parameter_preparation == "orca_electronic_state":
+            if defaults is not None and tool.preparation_function is not None:
                 supplied_parameters.setdefault("method_profile", defaults.method_profile)
                 supplied_parameters.setdefault("environment", defaults.environment)
             parameters = tool.validate_parameters(supplied_parameters)
-            if tool.execution_budget == "orca":
-                _validate_orca_profile(parameters)
             step = step.model_copy(update={"parameters": parameters})
         steps.append(step)
     return plan.model_copy(update={"steps": steps})
@@ -4040,6 +4222,8 @@ def _is_parameter_continuation(
         return False
     if (
         intake.molecule_query
+        or intake.subjects
+        or intake.requirements
         or intake.structure_input
         or intake.history_geometry_alias
         or intake.requested_results
@@ -4048,6 +4232,12 @@ def _is_parameter_continuation(
     if intake.operations and run.request.operations:
         if intake.operations != run.request.operations:
             return False
+    if (
+        intake.parameter_target_requirement_id is not None
+        and intake.parameter_target_requirement_id
+        not in {item.id for item in run.request.requirements}
+    ):
+        return False
     if _looks_like_molecule_change(message) and not _looks_like_parameter_only_change(message):
         return False
     return run.waiting_for in {"clarification", "confirmation"}
@@ -4078,6 +4268,17 @@ def _selected_artifact_aliases(
     ):
         aliases["request_geometry"] = "request_geometry"
         aliases[INPUT_GEOMETRY_PLACEHOLDER] = INPUT_GEOMETRY_PLACEHOLDER
+    for subject_id, subject in request.subjects.items():
+        if not isinstance(subject, Mapping):
+            continue
+        subject_input = subject.get("structure_input", {})
+        if not isinstance(subject_input, Mapping) or not (
+            subject_input.get("xyz_text") is not None or subject_input.get("xyz") is not None
+        ):
+            continue
+        key = str(subject.get("key") or subject_id)
+        alias = f"request_geometry_{key}"
+        aliases[alias] = alias
     return aliases
 
 
@@ -4393,7 +4594,7 @@ def _looks_like_parameter_only_change(message: str) -> bool:
 
     parameter_change = re.compile(
         r"(?:几何优化|优化几何|geometry optimization|geom_maxiter|SCF|scf_maxiter|"
-        r"atom_[ij])"
+        r"atom_[ijk])"
         r".{0,16}?(?:改成|改为|设为|设置为|change(?:d)?\s+to|set\s+to|=)\s*[-+]?\d+",
         re.IGNORECASE,
     )
@@ -4419,7 +4620,7 @@ def _parameter_issue_clarification(issues: Mapping[str, str]) -> str:
 def _has_explicit_atom_index_update(message: str) -> bool:
     return bool(
         re.search(
-            r"(?<![A-Za-z0-9_])atom_[ij](?![A-Za-z0-9_]).{0,16}?"
+            r"(?<![A-Za-z0-9_])atom_[ijk](?![A-Za-z0-9_]).{0,16}?"
             r"(?:=|:|改成|改为|设为|设置为)\s*[-+]?\d+(?!\d)",
             message,
             re.IGNORECASE,
@@ -4479,9 +4680,27 @@ def _validate_request_parameter_scope(request: Request, plan: Plan, registry: To
             "request parameter(s) have no compatible calculation step in this Plan: "
             + ", ".join(unscoped)
         )
+    for requirement in request.requirements:
+        tool = registry.get(requirement.capability)
+        for source_name, mapping in (
+            ("requirement parameters", requirement.parameters),
+            (
+                "requirement user modifications",
+                request.user_modifications_by_requirement.get(requirement.id, {}),
+            ),
+        ):
+            unknown = sorted(set(mapping) - set(tool.request_parameters))
+            if unknown:
+                raise ValueError(
+                    f"{source_name} for {requirement.id!r} include fields outside "
+                    f"{tool.name}: {unknown}"
+                )
+            tool.validate_parameter_patch(mapping)
 
 
-def _next_ready_step(run: Run, data_root: str | None = None) -> Step | None:
+def _next_ready_step(
+    run: Run, data_root: str | None = None, registry: ToolRegistry | None = None
+) -> Step | None:
     for step in run.plan.steps:
         if step.id in run.current_results:
             continue
@@ -4490,7 +4709,14 @@ def _next_ready_step(run: Run, data_root: str | None = None) -> Step | None:
             for reference in step.inputs.values()
         ) and all(
             data_root is not None
-            and _goal_check_requirement_met(data_root, run, requirement, dependent_step=step)
+            and registry is not None
+            and _goal_check_requirement_met(
+                data_root,
+                run,
+                requirement,
+                registry,
+                dependent_step=step,
+            )
             for requirement in step.goal_checks
         ):
             return step
@@ -4501,6 +4727,7 @@ def _goal_check_requirement_met(
     data_root: str,
     run: Run,
     requirement: Any,
+    registry: ToolRegistry,
     *,
     dependent_step: Step | None = None,
 ) -> bool:
@@ -4523,44 +4750,73 @@ def _goal_check_requirement_met(
     return bool(
         check is not None
         and check.status == requirement.required_status
-        and _result_check_input_is_bound(data_root, run, result, check)
+        and _result_check_input_is_bound(
+            data_root,
+            run,
+            source_step,
+            result,
+            requirement.check,
+            check,
+            registry,
+        )
         and (
             dependent_step is None
-            or _goal_check_geometry_matches(requirement, source_step, dependent_step)
+            or _goal_check_inputs_match(requirement, source_step, dependent_step, registry)
         )
     )
 
 
-def _goal_check_geometry_matches(requirement: Any, source_step: Step, dependent_step: Step) -> bool:
-    """Keep a local-minimum gate attached to the exact geometry it verified."""
+def _goal_check_inputs_match(
+    requirement: Any,
+    source_step: Step,
+    dependent_step: Step,
+    registry: ToolRegistry,
+) -> bool:
+    """Keep a check's declared source input attached to an identical consumer input."""
 
-    if requirement.check != "local_minimum_supported":
+    source_tool = registry.get(source_step.tool)
+    input_name = source_tool.scientific_check_input_ports.get(requirement.check)
+    if input_name is None:
         return True
-    source_geometry = source_step.inputs.get("geometry")
-    dependent_geometry = dependent_step.inputs.get("geometry")
-    return (
-        source_step.tool == "frequency"
-        and source_geometry is not None
-        and source_geometry == dependent_geometry
+    source_reference = source_step.inputs.get(input_name)
+    source_type = source_tool.input_ports.get(input_name)
+    dependent_tool = registry.get(dependent_step.tool)
+    return source_reference is not None and any(
+        declared_type == source_type and dependent_step.inputs.get(name) == source_reference
+        for name, declared_type in dependent_tool.input_ports.items()
     )
 
 
-def _result_check_input_is_bound(data_root: str, run: Run, result: Result, check: Any) -> bool:
-    """Bind a scientific check to the exact, hash-verified geometry input."""
+def _result_check_input_is_bound(
+    data_root: str,
+    run: Run,
+    step: Step,
+    result: Result,
+    check_name: str,
+    check: Any,
+    registry: ToolRegistry,
+) -> bool:
+    """Bind a scientific check to the exact, hash-verified input it declares."""
 
-    artifact_id = result.input_bindings.get("geometry")
-    if (
-        not isinstance(artifact_id, str)
-        or artifact_id not in result.input_artifact_ids
-        or not isinstance(check.input_geometry_sha256, str)
-    ):
+    tool = registry.get(step.tool)
+    input_name = tool.scientific_check_input_ports.get(check_name)
+    if input_name is None:
+        return check.input_geometry_sha256 is None and not check.input_artifact_sha256_by_port
+    input_type = tool.input_ports.get(input_name)
+    artifact_id = result.input_bindings.get(input_name)
+    if not isinstance(artifact_id, str) or artifact_id not in result.input_artifact_ids:
+        return False
+    expected_hash = check.input_artifact_sha256_by_port.get(input_name)
+    if expected_hash is None and input_type == "molecular_geometry":
+        expected_hash = check.input_geometry_sha256
+    if not isinstance(expected_hash, str):
         return False
     try:
         artifact = find_artifact(run, artifact_id)
         if (
             artifact.run_id != run.id
-            or artifact.artifact_type != "molecular_geometry"
-            or artifact.sha256 != check.input_geometry_sha256
+            or artifact.artifact_type != input_type
+            or artifact.sha256 != expected_hash
         ):
             return False
         artifact_path(data_root, run, artifact)
@@ -4593,8 +4849,16 @@ def _unmet_goal_checks(data_root: str, run: Run, registry: ToolRegistry) -> list
             actual_status = check.status if check is not None else "unverified"
             input_bound = (
                 check is not None
-                and _result_check_input_is_bound(data_root, run, source_result, check)
-                and _goal_check_geometry_matches(requirement, source_step, step)
+                and _result_check_input_is_bound(
+                    data_root,
+                    run,
+                    source_step,
+                    source_result,
+                    requirement.check,
+                    check,
+                    registry,
+                )
+                and _goal_check_inputs_match(requirement, source_step, step, registry)
             )
             if actual_status != requirement.required_status or not input_bound:
                 blocked.append(
@@ -4639,7 +4903,13 @@ def _unmet_goal_checks(data_root: str, run: Run, registry: ToolRegistry) -> list
         check = source_result.scientific_checks.get(target.check)
         actual_status = check.status if check is not None else "unverified"
         input_bound = check is not None and _result_check_input_is_bound(
-            data_root, run, source_result, check
+            data_root,
+            run,
+            source_step,
+            source_result,
+            target.check,
+            check,
+            registry,
         )
         if actual_status != "passed" or not input_bound:
             blocked.append(
@@ -4707,27 +4977,6 @@ def _normalized_run_target(
     return kind, name
 
 
-def _invalidate_current_results(run: Run, changed_step_id: str) -> None:
-    """Drop current outputs for a changed step and every downstream consumer."""
-
-    invalidated = {changed_step_id}
-    changed = True
-    while changed:
-        changed = False
-        for step in run.plan.steps:
-            if step.id in invalidated:
-                continue
-            if any(reference.step_id in invalidated for reference in step.inputs.values()) or any(
-                requirement.source_step_id in invalidated for requirement in step.goal_checks
-            ):
-                invalidated.add(step.id)
-                changed = True
-    for step_id in invalidated:
-        run.current_results.pop(step_id, None)
-        run.parameter_sources_by_step.pop(step_id, None)
-        run.step_status[step_id] = "planned"
-
-
 def _requested_results_satisfied(data_root: str, run: Run, registry: ToolRegistry) -> bool:
     for operation in run.request.operations:
         required_steps = [
@@ -4753,7 +5002,16 @@ def _requested_results_satisfied(data_root: str, run: Run, registry: ToolRegistr
             if target_kind is None or target_name is None:
                 return False
             step_id = target.step_id
-            if step_id is None:
+            if step_id is None and target.requirement_id is not None:
+                matches = [
+                    step.id
+                    for step in run.plan.steps
+                    if step.requirement_id == target.requirement_id
+                ]
+                if len(matches) != 1:
+                    return False
+                step_id = matches[0]
+            elif step_id is None:
                 # Old M0 targets were unqualified; the registry ensures this
                 # is unique, so the first producer is the only legal binding.
                 matches = [
@@ -4787,7 +5045,9 @@ def _requested_results_satisfied(data_root: str, run: Run, registry: ToolRegistr
                 check = result.scientific_checks.get(target_name)
                 if check is None or check.status != "passed":
                     return False
-                if not _result_check_input_is_bound(data_root, run, result, check):
+                if not _result_check_input_is_bound(
+                    data_root, run, step, result, target_name, check, registry
+                ):
                     return False
             if target_kind == "port":
                 tool = registry.get(step.tool)
@@ -4853,17 +5113,6 @@ def _query_value_is_compatible(value: Any, declared_type: str) -> bool:
     return is_compatible_value(value, declared_type)
 
 
-def _step_purpose(step: Step) -> str:
-    return {
-        "resolve_molecule": "解析分子身份",
-        "generate_geometry": "生成初始几何",
-        "single_point": "计算单点电子能",
-        "optimize_geometry": "进行几何优化并检查收敛",
-        "frequency": "计算振动频率并检查 Hessian",
-        "geometry_distance": "测量指定原子间距离",
-    }.get(step.tool, step.tool)
-
-
 def _query_system_label(structure: Mapping[str, Any]) -> str:
     formula = structure.get("formula")
     if formula == "H2O":
@@ -4877,14 +5126,6 @@ def _query_system_label(structure: Mapping[str, Any]) -> str:
     if isinstance(query, str) and query:
         return query
     return "该体系"
-
-
-def _validate_orca_profile(parameters: dict[str, Any]) -> None:
-    profile = get_profile(parameters["method_profile"])
-    if parameters["environment"] not in profile.supported_environments:
-        raise ValueError(
-            f"environment {parameters['environment']!r} is not implemented for {profile.name!r}"
-        )
 
 
 def _plan_fingerprint(plan: Plan) -> str:

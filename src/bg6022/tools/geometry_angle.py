@@ -1,10 +1,11 @@
-"""Test-only angle Tool used to prove generic multi-output delivery."""
+"""Deterministic angle measurement on a verified XYZ geometry."""
 
 from __future__ import annotations
 
 import csv
 import io
 import math
+from collections.abc import Mapping
 from threading import Event
 from typing import Any
 
@@ -24,9 +25,9 @@ from bg6022.tools.molecule import parse_xyz_bytes, resolve_artifact_reference
 class GeometryAngleParameters(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    atom_i: StrictInt = Field(ge=1)
-    atom_j: StrictInt = Field(ge=1)
-    atom_k: StrictInt = Field(ge=1)
+    atom_i: StrictInt = Field(ge=1, description="1-based XYZ atom index")
+    atom_j: StrictInt = Field(ge=1, description="1-based XYZ atom index; angle vertex")
+    atom_k: StrictInt = Field(ge=1, description="1-based XYZ atom index")
 
     @model_validator(mode="after")
     def _distinct_atoms(self) -> GeometryAngleParameters:
@@ -36,15 +37,30 @@ class GeometryAngleParameters(BaseModel):
         return self
 
 
-def make_geometry_angle_tool(config: AppConfig) -> Tool:
+def validate_angle_parameters(parameters: dict[str, Any], context: Mapping[str, Any]) -> None:
+    atom_count = context.get("geometry_atom_count")
+    if atom_count is None:
+        return
+    if isinstance(atom_count, bool) or not isinstance(atom_count, int) or atom_count < 1:
+        raise ValueError("geometry_atom_count must be a positive integer")
+    if max(parameters["atom_i"], parameters["atom_j"], parameters["atom_k"]) > atom_count:
+        raise ValueError(
+            f"atom index is outside the known XYZ geometry; it contains {atom_count} atoms"
+        )
+
+
+def make_geometry_angle_tool(config: AppConfig | None = None) -> Tool:
     def execute(step: Step, run: Run, cancel: Event) -> Result:
+        if config is None:
+            raise RuntimeError("tool 'geometry_angle' is a description-only Tool")
         return execute_geometry_angle(config, step=step, run=run, cancel=cancel)
 
     return Tool(
         name="geometry_angle",
+        display_name="几何夹角测量",
         description=(
-            "Measure an angle from three explicit atoms in a verified XYZ and "
-            "export the selected atom records."
+            "Measure the angle at an explicitly selected vertex atom in a verified XYZ "
+            "geometry and export the selected atom records."
         ),
         parameter_model=GeometryAngleParameters.__name__,
         parameter_schema=GeometryAngleParameters.model_json_schema(),
@@ -73,15 +89,15 @@ def make_geometry_angle_tool(config: AppConfig) -> Tool:
             },
         },
         success_conditions=[
-            "verified molecular-geometry artifact",
+            "verified molecular-geometry Artifact",
             "strict 1-based distinct atom indices",
             "finite angle in degrees",
-            "CSV artifact is bound to the same geometry hash",
+            "CSV Artifact is bound to the same geometry hash",
         ],
-        repair_capabilities=[],
         requires_compute_permission=False,
         execution_budget="none",
-        execute_function=execute,
+        execute_function=execute if config is not None else None,
+        parameter_validation_function=validate_angle_parameters,
     )
 
 
@@ -108,8 +124,9 @@ def execute_geometry_angle(config: AppConfig, *, step: Step, run: Run, cancel: E
                 config, run, reference, expected_type="molecular_geometry"
             )
             input_artifact_id = geometry_artifact.id
-            geometry_file = artifact_path(config.data_root_path, run, geometry_artifact)
-            geometry_bytes = geometry_file.read_bytes()
+            geometry_bytes = artifact_path(
+                config.data_root_path, run, geometry_artifact
+            ).read_bytes()
             geometry = parse_xyz_bytes(geometry_bytes)
             indices = (parameters.atom_i, parameters.atom_j, parameters.atom_k)
             if max(indices) > geometry.atom_count:
@@ -128,22 +145,20 @@ def execute_geometry_angle(config: AppConfig, *, step: Step, run: Run, cancel: E
             cosine = sum(a * b for a, b in zip(left, right, strict=True)) / (left_norm * right_norm)
             if not math.isfinite(cosine):
                 raise ValueError("angle cosine is not finite")
-            cosine = max(-1.0, min(1.0, cosine))
-            angle = math.degrees(math.acos(cosine))
+            angle = math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
             if not math.isfinite(angle) or not 0.0 <= angle <= 180.0:
                 raise ValueError("angle is outside the physical 0-180 degree range")
             if cancel.is_set():
                 status = "cancelled"
                 diagnostics = {"category": "cancelled", "reason": "cancelled before CSV export"}
             else:
-                csv_bytes = _records_csv(selected)
                 report = register_bytes_artifact(
                     config.data_root_path,
                     run,
-                    csv_bytes,
+                    _records_csv(selected),
                     artifact_type="text_file",
                     role="angle_atom_report",
-                    source=(f"geometry_angle:{geometry_artifact.id}:{geometry_artifact.sha256}"),
+                    source=f"geometry_angle:{geometry_artifact.id}:{geometry_artifact.sha256}",
                     extension=".csv",
                     step_id=step.id,
                     attempt=attempt,
@@ -204,6 +219,7 @@ def execute_geometry_angle(config: AppConfig, *, step: Step, run: Run, cancel: E
         artifact_ids=artifact_ids,
         output_ports=output_ports,
         diagnostics=diagnostics,
+        input_bindings={"geometry": input_artifact_id} if input_artifact_id else {},
         input_artifact_ids=[input_artifact_id] if input_artifact_id else [],
         attempt_relative_path=relative,
     )
@@ -212,20 +228,17 @@ def execute_geometry_angle(config: AppConfig, *, step: Step, run: Run, cancel: E
 def _selected_records(geometry: Any, indices: tuple[int, int, int]) -> list[dict[str, Any]]:
     lines = geometry.raw_bytes.decode("utf-8").splitlines()
     coordinate_lines = lines[2 : 2 + geometry.atom_count]
-    records: list[dict[str, Any]] = []
-    for index in indices:
-        x, y, z = geometry.coordinates[index - 1]
-        records.append(
-            {
-                "atom_index": index,
-                "element": geometry.symbols[index - 1],
-                "x": x,
-                "y": y,
-                "z": z,
-                "raw_line": coordinate_lines[index - 1],
-            }
-        )
-    return records
+    return [
+        {
+            "atom_index": index,
+            "element": geometry.symbols[index - 1],
+            "x": geometry.coordinates[index - 1][0],
+            "y": geometry.coordinates[index - 1][1],
+            "z": geometry.coordinates[index - 1][2],
+            "raw_line": coordinate_lines[index - 1],
+        }
+        for index in indices
+    ]
 
 
 def _records_csv(records: list[dict[str, Any]]) -> bytes:
@@ -253,8 +266,4 @@ def _next_attempt(run: Run, step_id: str) -> int:
     return max(attempts, default=0) + 1
 
 
-__all__ = [
-    "GeometryAngleParameters",
-    "execute_geometry_angle",
-    "make_geometry_angle_tool",
-]
+__all__ = ["GeometryAngleParameters", "execute_geometry_angle", "make_geometry_angle_tool"]

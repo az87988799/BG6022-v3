@@ -10,8 +10,7 @@ import pytest
 from bg6022.agent import Agent
 from bg6022.config import load_config
 from bg6022.llm import LlmClient
-from bg6022.tools.registry import ToolRegistry, build_registry
-from tests.support.geometry_angle_tool import make_geometry_angle_tool
+from bg6022.tools.registry import build_registry
 
 
 @pytest.mark.live_llm
@@ -22,10 +21,7 @@ def test_live_llm_geometry_angle_and_csv_followup(pytestconfig) -> None:
     if not config_path:
         pytest.fail("--orca-config is required for live_llm")
     config = load_config(config_path)
-    base = build_registry(config)
-    registry = ToolRegistry(
-        [base.get(name) for name in base.names()] + [make_geometry_angle_tool(config)]
-    )
+    registry = build_registry(config)
     client = LlmClient(config)
     agent = Agent(config, registry, llm=client)
     xyz = "3\nright angle\nH 1.0 0.0 0.0\nO 0.0 0.0 0.0\nH 0.0 1.0 0.0\n"

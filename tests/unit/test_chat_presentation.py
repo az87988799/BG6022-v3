@@ -188,17 +188,20 @@ def test_confirmation_includes_verified_hexane_identity_in_plan_heading() -> Non
                 {
                     "index": 1,
                     "tool": "resolve_molecule",
+                    "tool_label": "解析分子",
                     "parameters": {"query": "hexane"},
                 },
                 {
                     "index": 2,
                     "tool": "generate_geometry",
+                    "tool_label": "生成初始结构",
                     "parameters": {},
                     "inputs": [{"name": "molecule", "source_step": "步骤 1", "port": "molecule"}],
                 },
                 {
                     "index": 3,
                     "tool": "optimize_geometry",
+                    "tool_label": "几何优化",
                     "parameters": {
                         "method_profile": "r2scan3c",
                         "environment": "gas",
@@ -212,7 +215,7 @@ def test_confirmation_includes_verified_hexane_identity_in_plan_heading() -> Non
             "repair_scope": {"steps": {"s03_opt": {"actions": {"restart_optimization": {}}}}},
             "budget": {
                 "max_attempts_per_science_step": 3,
-                "max_extra_orca_executions": 3,
+                "max_extra_executions_by_category": {"electronic_structure": 3},
             },
         }
     )

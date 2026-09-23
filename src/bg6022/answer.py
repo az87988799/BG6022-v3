@@ -82,11 +82,7 @@ def compose_answer(
     context: Mapping[str, Any] | None = None,
     cancel: Any = None,
 ) -> AnswerOutput:
-    """Ask one bounded model call to organize a public answer.
-
-    The model receives names and descriptions only.  Verified values, paths,
-    and file bytes remain program-owned and are rendered by the caller.
-    """
+    """Ask one bounded model call to organize and explain verified outputs."""
 
     payload = {
         "question": question,
@@ -144,14 +140,12 @@ def validate_result_answer(
     required_refs: Sequence[str],
     preferences: Mapping[str, Any] | None = None,
 ) -> tuple[str, ...]:
-    """Validate the reference-only result/query presentation contract."""
+    """Validate cited verified outputs and bounded, nonnumeric explanations."""
 
     if output is None or output.action != "respond" or output.clarification:
         raise ValueError("completed result presentation must use respond")
     used: list[str] = []
     for section in output.sections:
-        if section.text is not None:
-            raise ValueError("free model prose is not allowed in result/query mode")
         if not section.output_refs:
             raise ValueError("a result section must reference verified outputs")
         for ref in section.output_refs:
@@ -164,6 +158,8 @@ def validate_result_answer(
             ):
                 raise ValueError("link view requires an explicit link-only file request")
             used.append(ref)
+        if section.text is not None:
+            _validate_output_explanation(section.text, section.output_refs, outputs_by_ref)
     if len(used) != len(set(used)):
         raise ValueError("duplicate output rendering")
     required = {str(ref) for ref in required_refs}
@@ -179,24 +175,17 @@ def render_answer_output(
     required_refs: Sequence[str] = (),
     preferences: Mapping[str, Any] | None = None,
 ) -> str:
-    """Render knowledge prose or reference-only verified result outputs.
-
-    In result/query mode all visible facts are read from ``outputs_by_ref``;
-    the model chooses only section order and supported view, never the text.
-    """
+    """Render deterministic facts with optional explanations grounded in them."""
 
     if output is None:
         return ""
     if outputs_by_ref is not None:
-        used = validate_result_answer(
+        validate_result_answer(
             output,
             outputs_by_ref,
             required_refs,
             preferences=preferences,
         )
-        section_by_ref: dict[str, AnswerSection] = {
-            ref: section for section in output.sections for ref in section.output_refs
-        }
         lines: list[str] = []
         heading_labels = {
             "results": "结果",
@@ -205,20 +194,22 @@ def render_answer_output(
             "notes": "说明",
         }
         emitted_headings: set[str] = set()
-        for ref in used:
-            section = section_by_ref[ref]
+        for section in output.sections:
             if section.heading and section.heading not in emitted_headings:
                 lines.append(f"{heading_labels[section.heading]}：")
                 emitted_headings.add(section.heading)
-            entry = outputs_by_ref[ref]
-            rendered = _render_public_output(
-                entry,
-                section.format,
-                detail=section.detail,
-                preferences=preferences,
-            )
-            if rendered:
-                lines.append(rendered)
+            for ref in section.output_refs:
+                entry = outputs_by_ref[ref]
+                rendered = _render_public_output(
+                    entry,
+                    section.format,
+                    detail=section.detail,
+                    preferences=preferences,
+                )
+                if rendered:
+                    lines.append(rendered)
+            if section.text and section.text.strip():
+                lines.append(section.text.strip())
         return "\n".join(lines)
     sections = [
         section.text.strip()
@@ -228,6 +219,30 @@ def render_answer_output(
     if output.clarification and output.clarification.strip():
         sections.insert(0, output.clarification.strip())
     return "\n\n".join(sections)
+
+
+def _validate_output_explanation(
+    text: str,
+    references: Sequence[str],
+    outputs_by_ref: Mapping[str, Mapping[str, Any]],
+) -> None:
+    if not text.strip() or len(text) > 800:
+        raise ValueError("result explanations must contain 1 to 800 characters")
+    if re.search(r"\d|[A-Za-z]:[\\/]|https?://|\\\\", text):
+        raise ValueError("result explanations cannot introduce numbers or paths")
+    cited_checks = [
+        _mapping(outputs_by_ref[ref].get("fact"))
+        for ref in references
+        if outputs_by_ref[ref].get("kind") == "check"
+    ]
+    negative_status = any(
+        _mapping(item.get("value")).get("status") in {"not_met", "unverified"}
+        for item in cited_checks
+    )
+    if negative_status and re.search(
+        r"通过|已验证|已确认|稳定|satisfied|verified|stable", text, re.I
+    ):
+        raise ValueError("result explanation contradicts a cited unmet or unverified check")
 
 
 def _check_supported_view(entry: Mapping[str, Any], requested: str) -> None:
@@ -911,22 +926,6 @@ def _metadata(tool: Any, name: str) -> dict[str, str]:
 
 def _fact_context(fact: Mapping[str, Any], *, include_task_identity: bool = False) -> str:
     system = _string_or_none(fact.get("system"))
-    tool = fact.get("step_tool")
-    operation = (
-        "优化"
-        if tool == "optimize_geometry"
-        else "单点"
-        if tool == "single_point"
-        else "距离测量"
-        if tool == "geometry_distance"
-        else "频率计算"
-        if tool == "frequency"
-        else "初始结构生成"
-        if tool == "generate_geometry"
-        else "分子解析"
-        if tool == "resolve_molecule"
-        else ""
-    )
     method = _method_label(fact.get("method_profile"))
     environment = _environment_label(fact.get("environment"))
     details = [
@@ -948,10 +947,8 @@ def _fact_context(fact: Mapping[str, Any], *, include_task_identity: bool = Fals
         if created_at:
             details.append(f"创建于 {created_at[:16]}")
     qualifier = f"（{'；'.join(details)}）" if details else ""
-    if system and operation:
-        return f"{system}{operation}结果{qualifier}"
     if system:
-        return f"{system}的已验证结果"
+        return f"{system}的已验证结果{qualifier}"
     return "已验证结果"
 
 
@@ -984,14 +981,6 @@ def _confirmation_step_line(value: Any) -> str:
     index = item.get("index")
     ordinal = _format_scalar(index) if type(index) is int else "?"
     tool = str(item.get("tool") or "未知工具")
-    tool_labels = {
-        "resolve_molecule": "解析分子",
-        "generate_geometry": "生成初始结构",
-        "optimize_geometry": "几何优化",
-        "frequency": "频率计算",
-        "single_point": "独立单点计算",
-        "geometry_distance": "原子间距离测量",
-    }
     operation_names = {
         "SP": "单点计算",
         "Opt": "几何优化",
@@ -1007,9 +996,15 @@ def _confirmation_step_line(value: Any) -> str:
         if isinstance(operations, list)
         else []
     )
-    label = tool_labels.get(tool, tool)
-    if operation_labels and not all(operation == label for operation in operation_labels):
-        label = f"{label}（{'、'.join(operation_labels)}）"
+    targets = item.get("requested_results")
+    target_label = None
+    if isinstance(targets, list) and targets:
+        target_label = _string_or_none(_mapping(targets[0]).get("label"))
+    label = (
+        _string_or_none(item.get("tool_label"))
+        or target_label
+        or (operation_labels[0] if operation_labels else tool)
+    )
 
     parameters = _mapping(item.get("parameters"))
     details: list[str] = []
@@ -1051,7 +1046,7 @@ def _confirmation_step_line(value: Any) -> str:
     if isinstance(checks, list):
         for raw_check in checks:
             check = _mapping(raw_check)
-            check_name = _check_label(str(check.get("check") or "科学检查"))
+            check_name = str(check.get("label") or check.get("check") or "科学检查")
             status = str(check.get("required_status") or "passed")
             details.append(
                 f"须先满足{check.get('source_step', '前置步骤')}的{check_name}（{status}）"
@@ -1074,13 +1069,6 @@ def _artifact_role_label(value: str) -> str:
         "input_geometry": "提供的结构",
         "optimized_geometry": "已优化结构",
         "restart_candidate": "受限修复候选结构",
-    }.get(value, value.replace("_", " "))
-
-
-def _check_label(value: str) -> str:
-    return {
-        "frequency_complete": "频率完整性检查",
-        "local_minimum_supported": "局部极小值检查",
     }.get(value, value.replace("_", " "))
 
 
@@ -1115,6 +1103,16 @@ def _fact_sentence(fact: Mapping[str, Any]) -> str:
                     f"{_format_scalar(indices[1])} 号 {symbols[1]} 原子"
                 )
                 return f"{label}为 **{_format_scalar(raw)} Å**（{pair}；来源：已验证几何）。"
+    if fact.get("expected_type") == "Eh" and isinstance(fact.get("value"), Mapping):
+        value = _mapping(fact.get("value"))
+        method_a, method_b = value.get("method_a"), value.get("method_b")
+        if isinstance(method_a, str) and isinstance(method_b, str):
+            number = value.get("value")
+            if type(number) in {int, float} and math.isfinite(float(number)):
+                return (
+                    f"{label}为 **{_format_scalar(number)} Eh**（按 {_method_label(method_b)} "
+                    f"减去 {_method_label(method_a)} 计算；方法差异不代表准确度）。"
+                )
     value, unit = _display_value(fact.get("value"), fact.get("expected_type"))
     return f"{label}为 **{value}{unit}**。"
 
@@ -1142,7 +1140,7 @@ def _repair_record_sentence(record: Mapping[str, Any]) -> str | None:
 def _budget_stop_reason(pending_data: Mapping[str, Any]) -> str | None:
     labels = {
         "max_attempts_per_science_step": "该计算步骤已达到最大尝试次数",
-        "max_extra_orca_executions": "已达到额外 ORCA 执行预算",
+        "max_extra_executions": "已达到该 Tool 执行类别的额外预算",
         "max_plan_revisions": "已达到最大计划修订次数",
     }
     return labels.get(str(pending_data.get("budget_exhausted")))
@@ -1324,14 +1322,18 @@ def _repair_maximum(scope: Mapping[str, Any], action: str, fallback: int) -> int
 def _budget_sentence(value: Any) -> str:
     budget = _mapping(value)
     attempts = budget.get("max_attempts_per_science_step")
-    extra = budget.get("max_extra_orca_executions")
-    if attempts is None and extra is None:
+    category_limits = _mapping(budget.get("max_extra_executions_by_category"))
+    if attempts is None and not category_limits:
         return ""
     parts: list[str] = []
     if attempts is not None:
         parts.append(f"本步骤最多尝试 {_format_scalar(attempts)} 次（包含首次计算）")
-    if extra is not None:
-        parts.append(f"整个任务最多允许 {_format_scalar(extra)} 次额外计算")
+    if category_limits:
+        categories = "、".join(
+            f"{category} {_format_scalar(limit)} 次"
+            for category, limit in sorted(category_limits.items())
+        )
+        parts.append(f"各 Tool 类别额外执行上限：{categories}")
     return "，".join(parts) + "，这些限制同时生效。"
 
 

@@ -28,7 +28,8 @@ structured_output_corrections = 1
 [repair]
 enabled = true
 max_attempts_per_science_step = 3
-max_extra_orca_executions = 3
+max_extra_executions_by_category = { electronic_structure = 3 }
+max_extra_executions_by_category = { orca = 3 }
 max_plan_revisions = 2
 
 [molecule]

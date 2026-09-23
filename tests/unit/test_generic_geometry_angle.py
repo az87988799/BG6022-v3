@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event
 
 from bg6022.agent import Agent
 from bg6022.config import load_config
 from bg6022.models import InputReference, Plan, Request, ResultTarget, Run, Step
 from bg6022.planner import QuerySelection, QueryTarget
 from bg6022.session import create_run, register_bytes_artifact, save_run, utc_now
-from bg6022.tools.registry import ToolRegistry, build_registry
-from tests.support.geometry_angle_tool import make_geometry_angle_tool
+from bg6022.tools.registry import build_registry
 
 
 def _config(tmp_path: Path):
@@ -27,10 +27,7 @@ data_root = 'data'
 
 def test_geometry_angle_proves_scalar_records_and_csv_delivery(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    base = build_registry(config)
-    registry = ToolRegistry(
-        [base.get(name) for name in base.names()] + [make_geometry_angle_tool(config)]
-    )
+    registry = build_registry(config)
     request = Request(
         id="request_angle",
         description="measure the angle and show the selected atom CSV",
@@ -109,6 +106,7 @@ def test_geometry_angle_proves_scalar_records_and_csv_delivery(tmp_path: Path) -
     assert "原子坐标 CSV" in response.text
     assert "atom_index,element,x,y,z,raw_line" in response.text
     assert "file_1" not in response.text
+    assert "geometry_angle" in registry.names()
 
     catalog = agent._build_query_catalog()
     angle_entry = next(item for item in catalog if item["result"]["property"] == "angle")
@@ -152,3 +150,55 @@ def test_geometry_angle_proves_scalar_records_and_csv_delivery(tmp_path: Path) -
     assert cancelled.delivery["status"] == "cancelled"
     assert cancelled.delivery["rendered_refs"] == []
     assert "complete" not in cancelled.delivery["status"]
+
+
+def test_registered_geometry_angle_rejects_missing_and_out_of_range_inputs(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    registry = build_registry(config)
+    tool = registry.get("geometry_angle")
+    request = Request(id="request_angle_failures", description="measure angle", source="chat")
+    step = Step(
+        id="angle",
+        tool="geometry_angle",
+        parameters={"atom_i": 1, "atom_j": 2, "atom_k": 3},
+        inputs={},
+    )
+    plan = Plan(id="plan_angle_failures", request_id=request.id, steps=[step])
+    run = Run(
+        id="run_angle_failures",
+        request=request,
+        plan=plan,
+        resources=config.resources,
+        status="planned",
+        session_id="session_angle_failures",
+        created_at=utc_now(),
+        updated_at=utc_now(),
+    )
+    create_run(config.data_root_path, run)
+
+    missing = tool.execute(step, run, cancel=Event())
+    assert missing.status == "failed"
+    assert missing.diagnostics["category"] == "angle_measurement_failed"
+    assert "requires a geometry input" in missing.diagnostics["reason"]
+
+    xyz = b"2\nnot enough atoms\nH 0.0 0.0 0.0\nO 0.0 0.0 1.0\n"
+    geometry = register_bytes_artifact(
+        config.data_root_path,
+        run,
+        xyz,
+        artifact_type="molecular_geometry",
+        role="initial_geometry",
+        source="test:geometry_angle_failure",
+        extension=".xyz",
+        step_id="source",
+        attempt=1,
+    )
+    invalid_step = step.model_copy(
+        update={"inputs": {"geometry": InputReference(artifact_id=geometry.id)}}
+    )
+    run.plan = plan.model_copy(update={"steps": [invalid_step]})
+    save_run(config.data_root_path, run)
+    invalid = tool.execute(invalid_step, run, cancel=Event())
+    assert invalid.status == "failed"
+    assert invalid.diagnostics["category"] == "angle_measurement_failed"
+    assert "2 atoms" in invalid.diagnostics["reason"]

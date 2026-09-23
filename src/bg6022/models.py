@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -77,6 +79,7 @@ class ResultTarget(StrictModel):
     """
 
     step_id: str | None = None
+    requirement_id: str | None = None
     field: str | None = None
     port: str | None = None
     check: str | None = None
@@ -86,6 +89,31 @@ class ResultTarget(StrictModel):
         if sum(value is not None for value in (self.field, self.port, self.check)) != 1:
             raise ValueError("result target must contain exactly one field, port, or check")
         return self
+
+
+class Requirement(StrictModel):
+    """One user-requested capability instance, nested inside Request."""
+
+    id: str
+    subject_id: str = "subject_1"
+    capability: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    outputs: list[str] = Field(default_factory=list)
+    constraints: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("id", "subject_id", "capability")
+    @classmethod
+    def _nonblank_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("requirement identity fields must not be blank")
+        return value
+
+    @field_validator("outputs")
+    @classmethod
+    def _unique_outputs(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("requirement outputs must be unique")
+        return value
 
 
 class RequiredGeometryBinding(StrictModel):
@@ -99,16 +127,52 @@ class RequiredGeometryBinding(StrictModel):
 
     consumer_operation: Operation | None = None
     consumer_tool: str | None = None
+    consumer_requirement_id: str | None = None
+    consumer_requirement_key: str | None = None
     input_port: str
-    source_operation: Operation | None
+    source_operation: Operation | None = None
+    source_requirement_id: str | None = None
+    source_requirement_key: str | None = None
     source_port: str
 
     @model_validator(mode="after")
     def _one_consumer_selector(self) -> RequiredGeometryBinding:
-        if (self.consumer_operation is None) == (self.consumer_tool is None):
-            raise ValueError(
-                "geometry binding must identify exactly one consumer_operation or consumer_tool"
+        if (
+            sum(
+                value is not None
+                for value in (
+                    self.consumer_operation,
+                    self.consumer_tool,
+                    self.consumer_requirement_id,
+                    self.consumer_requirement_key,
+                )
             )
+            != 1
+        ):
+            raise ValueError(
+                "geometry binding must identify one consumer operation, Tool, or requirement"
+            )
+        if (
+            sum(
+                value is not None
+                for value in (
+                    self.source_operation,
+                    self.source_requirement_id,
+                    self.source_requirement_key,
+                )
+            )
+            > 1
+        ):
+            raise ValueError(
+                "geometry binding must select at most one source operation or requirement"
+            )
+        if (
+            self.source_operation is None
+            and self.source_requirement_id is None
+            and self.source_requirement_key is None
+            and self.source_port != "initial_geometry"
+        ):
+            raise ValueError("an unselected geometry source must use initial_geometry")
         return self
 
 
@@ -119,11 +183,14 @@ class Request(StrictModel):
     id: str
     description: str
     operations: list[Operation] = Field(default_factory=list)
+    requirements: list[Requirement] = Field(default_factory=list)
+    subjects: dict[str, dict[str, Any]] = Field(default_factory=dict)
     requested_results: list[ResultTarget] = Field(default_factory=list)
     explicit_parameters: dict[str, Any] = Field(default_factory=dict)
     source: Literal["cli", "chat"] = "cli"
     original_text: str | None = None
     user_modifications: dict[str, Any] = Field(default_factory=dict)
+    user_modifications_by_requirement: dict[str, dict[str, Any]] = Field(default_factory=dict)
     structure_input: dict[str, Any] = Field(default_factory=dict)
     missing_fields: list[str] = Field(default_factory=list)
     output_preferences: dict[str, str] = Field(
@@ -144,12 +211,45 @@ class Request(StrictModel):
         data["operations"] = [legacy]
         return data
 
-    @field_validator("operations")
+    @field_validator("requirements")
     @classmethod
-    def _unique_operations(cls, value: list[Operation]) -> list[Operation]:
-        if len(set(value)) != len(value):
-            raise ValueError("requested operations must be unique")
+    def _unique_requirement_ids(cls, value: list[Requirement]) -> list[Requirement]:
+        ids = [item.id for item in value]
+        if len(ids) != len(set(ids)):
+            raise ValueError("requirement ids must be unique")
         return value
+
+    @model_validator(mode="after")
+    def _requirement_subjects_are_known(self) -> Request:
+        known_subjects = set(self.subjects)
+        missing = sorted(
+            {
+                item.subject_id
+                for item in self.requirements
+                if known_subjects and item.subject_id not in known_subjects
+            }
+        )
+        if missing:
+            raise ValueError(f"requirements refer to unknown subject ids: {missing}")
+        unknown_modification_scopes = sorted(
+            set(self.user_modifications_by_requirement) - {item.id for item in self.requirements}
+        )
+        if unknown_modification_scopes:
+            raise ValueError(
+                "user modifications refer to unknown requirement ids: "
+                f"{unknown_modification_scopes}"
+            )
+        unknown_result_scopes = sorted(
+            {
+                target.requirement_id
+                for target in self.requested_results
+                if target.requirement_id is not None
+            }
+            - {item.id for item in self.requirements}
+        )
+        if unknown_result_scopes:
+            raise ValueError(f"results refer to unknown requirement ids: {unknown_result_scopes}")
+        return self
 
     @field_validator("requested_results", mode="before")
     @classmethod
@@ -158,9 +258,9 @@ class Request(StrictModel):
             return []
         return [{"field": item} if isinstance(item, str) else item for item in value]
 
-    @field_validator("structure_input")
-    @classmethod
-    def _validate_required_geometry_bindings(cls, value: dict[str, Any]) -> dict[str, Any]:
+    @model_validator(mode="after")
+    def _validate_required_geometry_bindings(self) -> Request:
+        value = self.structure_input
         identity = value.get("molecule_identity")
         if identity is not None:
             from bg6022.molecule_identity import validate_identity_constraint
@@ -168,8 +268,23 @@ class Request(StrictModel):
             validate_identity_constraint(identity)
         raw_bindings = value.get("required_bindings")
         if raw_bindings is None:
-            return value
+            return self
         bindings = _REQUIRED_GEOMETRY_BINDINGS.validate_python(raw_bindings, strict=True)
+        requirement_ids = {item.id for item in self.requirements}
+        for binding in bindings:
+            if (
+                binding.consumer_requirement_key is not None
+                or binding.source_requirement_key is not None
+            ):
+                raise ValueError("Request geometry bindings must use program requirement ids")
+            for requirement_id in (
+                binding.consumer_requirement_id,
+                binding.source_requirement_id,
+            ):
+                if requirement_id is not None and requirement_id not in requirement_ids:
+                    raise ValueError(
+                        f"geometry binding refers to unknown requirement id {requirement_id!r}"
+                    )
         identities = [
             (
                 "operation",
@@ -178,11 +293,17 @@ class Request(StrictModel):
             )
             if item.consumer_operation is not None
             else ("tool", item.consumer_tool, item.input_port)
+            if item.consumer_tool is not None
+            else (
+                "requirement",
+                item.consumer_requirement_id,
+                item.input_port,
+            )
             for item in bindings
         ]
         if len(identities) != len(set(identities)):
             raise ValueError("required geometry bindings must be unique per calculation input")
-        return value
+        return self
 
     @field_validator("output_preferences", mode="before")
     @classmethod
@@ -227,6 +348,7 @@ class ScientificCheckResult(StrictModel):
 
     status: ScientificCheckStatus
     input_geometry_sha256: str | None = None
+    input_artifact_sha256_by_port: dict[str, str] = Field(default_factory=dict)
     conditions: dict[str, Any] = Field(default_factory=dict)
     reason: str | None = None
 
@@ -237,6 +359,8 @@ class Step(StrictModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     inputs: dict[str, InputReference] = Field(default_factory=dict)
     goal_checks: list[GoalCheckRequirement] = Field(default_factory=list)
+    requirement_id: str | None = None
+    subject_id: str | None = None
     origin_step_id: str | None = None
 
 
@@ -323,6 +447,7 @@ class Run(StrictModel):
     budget: dict[str, Any] = Field(default_factory=dict)
     attempt_counts: dict[str, int] = Field(default_factory=dict)
     extra_orca_executions: int = 0
+    extra_executions_by_category: dict[str, int] = Field(default_factory=dict)
     plan_revisions: int = 0
     origin_step_map: dict[str, str] = Field(default_factory=dict)
     session_id: str | None = None
@@ -331,6 +456,31 @@ class Run(StrictModel):
     updated_at: str
 
     _active_interval_started_at: float | None = PrivateAttr(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_legacy_execution_budget(cls, value: Any) -> Any:
+        """Read pre-category Run budgets into the generic Tool category contract."""
+
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        budget = dict(data.get("budget", {}))
+        category_limits = dict(budget.get("max_extra_executions_by_category", {}))
+        legacy_limit = budget.get("max_extra_orca_executions")
+        legacy_limit = category_limits.pop("orca", legacy_limit)
+        if legacy_limit is not None:
+            category_limits.setdefault("electronic_structure", legacy_limit)
+        if category_limits:
+            budget["max_extra_executions_by_category"] = category_limits
+        budget.pop("max_extra_orca_executions", None)
+        data["budget"] = budget
+        execution_counts = dict(data.get("extra_executions_by_category", {}))
+        legacy_count = execution_counts.pop("orca", data.get("extra_orca_executions", 0))
+        if legacy_count:
+            execution_counts.setdefault("electronic_structure", legacy_count)
+        data["extra_executions_by_category"] = execution_counts
+        return data
 
     def start_active_interval(self, *, now: float | None = None) -> None:
         """Start the one active execution interval, without changing its total."""
@@ -372,12 +522,59 @@ class Run(StrictModel):
 
 ExecuteFunction = Callable[[Step, Run, Any], Result]
 ParameterValidationFunction = Callable[[dict[str, Any], Mapping[str, Any]], None]
+ResultValidationFunction = Callable[[Run, Step, Result], bool]
 ResultProperty = StrictStr
+
+
+@dataclass(frozen=True)
+class ToolPreparation:
+    """Transient result from a Tool's optional parameter preparation hook."""
+
+    step: Step | None
+    missing_fields: tuple[str, ...] = ()
+    parameter_sources: Mapping[str, str] = dataclass_field(default_factory=dict)
+    question: str | None = None
+
+
+@dataclass(frozen=True)
+class RepairOption:
+    """A bounded, evidence-backed action offered by one Tool adapter."""
+
+    action: str
+    failed_step_id: str
+    candidate_artifact_id: str | None
+    parameter_patch: dict[str, Any]
+    evidence_refs: tuple[str, ...]
+    reason: str
+
+    @property
+    def option_id(self) -> str:
+        return self.action
+
+    @property
+    def parameters(self) -> Mapping[str, Any]:
+        return self.parameter_patch
+
+    @property
+    def input_aliases(self) -> Mapping[str, str]:
+        if self.candidate_artifact_id is None:
+            return {}
+        return {"last_complete_geometry": self.candidate_artifact_id}
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "option_id": self.option_id,
+            "parameters": dict(self.parameter_patch),
+            "input_aliases": list(self.input_aliases),
+            "evidence_refs": list(self.evidence_refs),
+            "reason": self.reason,
+        }
 
 
 class Tool(StrictModel):
     name: str
     description: str
+    display_name: str | None = None
     operations: list[Operation] = Field(default_factory=list)
     parameter_model: str = "none"
     parameter_schema: dict[str, Any] = Field(default_factory=dict)
@@ -389,16 +586,34 @@ class Tool(StrictModel):
     result_metadata: dict[str, dict[str, str]] = Field(default_factory=dict)
     success_conditions: list[str] = Field(default_factory=list)
     scientific_checks: dict[str, str] = Field(default_factory=dict)
+    scientific_check_input_ports: dict[str, str] = Field(default_factory=dict)
+    result_check_prerequisites: dict[str, list[str]] = Field(default_factory=dict)
     repair_capabilities: list[str] = Field(default_factory=list)
+    repair_parameter_fields: dict[str, list[str]] = Field(default_factory=dict)
+    repair_parameter_limits: dict[str, dict[str, int]] = Field(default_factory=dict)
+    repair_input_aliases: dict[str, list[str]] = Field(default_factory=dict)
     requires_compute_permission: bool = True
-    parameter_preparation: Literal["none", "orca_electronic_state"] = "none"
-    execution_budget: Literal["none", "orca"] = "none"
+    execution_budget: str = "none"
     deferred_parameters: list[str] = Field(default_factory=list)
     request_parameters: list[str] = Field(default_factory=list)
     geometry_output_input_ports: dict[str, str] = Field(default_factory=dict)
     available: bool = True
     execute_function: ExecuteFunction | None = Field(default=None, exclude=True, repr=False)
+    preflight_function: Callable[[], None] | None = Field(default=None, exclude=True, repr=False)
+    preparation_function: Callable[[Step, Mapping[str, Any]], ToolPreparation] | None = Field(
+        default=None, exclude=True, repr=False
+    )
+    repair_options_function: Callable[[Run, Step, Result], list[RepairOption]] | None = Field(
+        default=None, exclude=True, repr=False
+    )
+    apply_repair_function: (
+        Callable[[RepairOption, Run, Step, Result, Mapping[str, Any]], tuple[Step, dict[str, Any]]]
+        | None
+    ) = Field(default=None, exclude=True, repr=False)
     parameter_validation_function: ParameterValidationFunction | None = Field(
+        default=None, exclude=True, repr=False
+    )
+    result_validation_function: ResultValidationFunction | None = Field(
         default=None, exclude=True, repr=False
     )
     repair_capabilities_function: Callable[[dict[str, Any]], list[str]] | None = Field(
@@ -418,6 +633,8 @@ class Tool(StrictModel):
         """
 
         declared = set(self.results) | set(self.output_ports) | set(self.scientific_checks)
+        if self.display_name is not None and not self.display_name.strip():
+            raise ValueError("Tool display_name must be nonempty when supplied")
         undeclared_properties = sorted(set(self.result_properties) - declared)
         if undeclared_properties:
             raise ValueError(f"result properties have undeclared keys: {undeclared_properties}")
@@ -431,6 +648,19 @@ class Tool(StrictModel):
                 validate_declared_type(name, expected_type, kind=kind)
         for name in self.scientific_checks:
             validate_declared_type(name, "scientific_check", kind="check")
+        undeclared_prerequisite_outputs = sorted(
+            set(self.result_check_prerequisites) - (set(self.results) | set(self.output_ports))
+        )
+        if undeclared_prerequisite_outputs:
+            raise ValueError(
+                "result check prerequisites refer to undeclared outputs: "
+                f"{undeclared_prerequisite_outputs}"
+            )
+        for output, checks in self.result_check_prerequisites.items():
+            if not checks or len(checks) != len(set(checks)):
+                raise ValueError(
+                    f"result check prerequisites for {output!r} must be nonempty and unique"
+                )
 
         for name, property_name in self.result_properties.items():
             if name in self.scientific_checks:
@@ -475,10 +705,28 @@ class Tool(StrictModel):
                 "geometry output declarations must connect molecular-geometry ports: "
                 f"{incompatible_geometry_bindings}"
             )
+        unknown_check_bindings = sorted(
+            set(self.scientific_check_input_ports) - set(self.scientific_checks)
+        )
+        if unknown_check_bindings:
+            raise ValueError(
+                "scientific check input bindings reference undeclared checks: "
+                f"{unknown_check_bindings}"
+            )
+        unknown_check_inputs = sorted(
+            set(self.scientific_check_input_ports.values()) - set(self.input_ports)
+        )
+        if unknown_check_inputs:
+            raise ValueError(
+                "scientific check input bindings reference undeclared inputs: "
+                f"{unknown_check_inputs}"
+            )
         if len(self.request_parameters) != len(set(self.request_parameters)):
             raise ValueError("request_parameters must not contain duplicates")
         if self.request_parameters and self.parameter_type is None:
             raise ValueError("request_parameters require a parameter model")
+        if self.execution_budget != self.execution_budget.strip():
+            raise ValueError("execution budget category must not contain surrounding whitespace")
         if self.parameter_type is not None:
             unknown_request_parameters = sorted(
                 set(self.request_parameters) - set(self.parameter_type.model_fields)
@@ -488,6 +736,27 @@ class Tool(StrictModel):
                     "request_parameters are not fields of the parameter model: "
                     f"{unknown_request_parameters}"
                 )
+        if len(self.repair_capabilities) != len(set(self.repair_capabilities)):
+            raise ValueError("repair_capabilities must not contain duplicates")
+        if set(self.repair_parameter_fields) - set(self.repair_capabilities):
+            raise ValueError("repair parameter fields must belong to a declared capability")
+        if set(self.repair_parameter_limits) - set(self.repair_capabilities):
+            raise ValueError("repair parameter limits must belong to a declared capability")
+        if set(self.repair_input_aliases) - set(self.repair_capabilities):
+            raise ValueError("repair input aliases must belong to a declared capability")
+        if self.parameter_type is not None:
+            declared_fields = set(self.parameter_type.model_fields)
+            for action, fields in self.repair_parameter_fields.items():
+                if len(fields) != len(set(fields)) or set(fields) - declared_fields:
+                    raise ValueError(
+                        f"repair capability {action!r} refers to invalid parameter fields"
+                    )
+                limits = self.repair_parameter_limits.get(action, {})
+                invalid_limit = any(
+                    type(limit) is not int or limit < 1 for limit in limits.values()
+                )
+                if set(limits) - set(fields) or invalid_limit:
+                    raise ValueError(f"repair capability {action!r} has invalid parameter limits")
         # Resolve the canonical public directory during registration.  This
         # catches property collisions (including a collision with a check)
         # before a Tool can be exposed to Intake or query handling.
@@ -500,6 +769,35 @@ class Tool(StrictModel):
         if self.execute_function is None:
             raise RuntimeError(f"tool {self.name!r} has no executable implementation")
         return self.execute_function(step, run, cancel)
+
+    def preflight(self) -> None:
+        if self.preflight_function is not None:
+            self.preflight_function()
+
+    def prepare(self, step: Step, context: Mapping[str, Any]) -> ToolPreparation:
+        if self.preparation_function is None:
+            return ToolPreparation(step=step)
+        prepared = self.preparation_function(step, context)
+        if not isinstance(prepared, ToolPreparation):
+            raise TypeError(f"tool {self.name!r} returned an invalid preparation result")
+        return prepared
+
+    def repair_options(self, run: Run, step: Step, result: Result) -> list[RepairOption]:
+        if self.repair_options_function is None:
+            return []
+        return list(self.repair_options_function(run, step, result))
+
+    def apply_repair(
+        self,
+        option: RepairOption,
+        run: Run,
+        step: Step,
+        result: Result,
+        proposal: Mapping[str, Any],
+    ) -> tuple[Step, dict[str, Any]]:
+        if self.apply_repair_function is None:
+            raise ValueError(f"tool {self.name!r} does not support repairs")
+        return self.apply_repair_function(option, run, step, result, proposal)
 
     def validate_parameters(
         self,
@@ -531,6 +829,32 @@ class Tool(StrictModel):
         if self.parameter_validation_function is not None:
             self.parameter_validation_function(validated, context or {})
         return validated
+
+    def validate_parameter_patch(
+        self,
+        parameters: dict[str, Any],
+        *,
+        context: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Validate supplied values without requiring the rest of a Tool's schema."""
+
+        if self.parameter_type is None:
+            if parameters:
+                raise ValueError(f"tool {self.name!r} does not accept parameters")
+            return {}
+        validated = _validate_partial_model(self.parameter_type, parameters)
+        if self.parameter_validation_function is not None and set(self.request_parameters) <= set(
+            validated
+        ):
+            self.parameter_validation_function(validated, context or {})
+        return validated
+
+    def validate_result(self, run: Run, step: Step, result: Result) -> bool:
+        """Apply a Tool-local verified-result check when the Tool declares one."""
+
+        if self.result_validation_function is None:
+            return True
+        return self.result_validation_function(run, step, result) is True
 
     def applicable_repair_capabilities(self, parameters: dict[str, Any]) -> list[str]:
         """Return repair actions permitted for this Tool and its parameters."""

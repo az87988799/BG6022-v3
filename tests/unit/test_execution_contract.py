@@ -219,7 +219,6 @@ def test_residual_process_failure_has_no_public_values_and_stops_following_step(
             ),
         ],
     )
-    monkeypatch.setattr("bg6022.agent.validate_execution_environment", lambda config: None)
     monkeypatch.setattr("bg6022.tools.orca.validate_execution_environment", lambda config: None)
     calls = 0
     stdout = (
