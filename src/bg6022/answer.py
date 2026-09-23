@@ -228,8 +228,22 @@ def _validate_output_explanation(
 ) -> None:
     if not text.strip() or len(text) > 800:
         raise ValueError("result explanations must contain 1 to 800 characters")
-    if re.search(r"\d|[A-Za-z]:[\\/]|https?://|\\\\", text):
-        raise ValueError("result explanations cannot introduce numbers or paths")
+    if re.search(r"[A-Za-z]:[\\/]|https?://|\\\\", text):
+        raise ValueError("result explanations cannot introduce paths or URLs")
+    cited_facts = [
+        _mapping(outputs_by_ref[ref].get("fact"))
+        for ref in references
+        if outputs_by_ref[ref].get("fact") is not None
+    ]
+    unverified_numbers = [
+        token
+        for token in re.findall(r"(?<![A-Za-z])[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", text)
+        if not any(_number_is_in_fact(token, fact) for fact in cited_facts)
+    ]
+    if unverified_numbers:
+        raise ValueError(
+            "result explanations may use only numbers present in cited verified values"
+        )
     cited_checks = [
         _mapping(outputs_by_ref[ref].get("fact"))
         for ref in references
@@ -239,10 +253,30 @@ def _validate_output_explanation(
         _mapping(item.get("value")).get("status") in {"not_met", "unverified"}
         for item in cited_checks
     )
-    if negative_status and re.search(
-        r"通过|已验证|已确认|稳定|satisfied|verified|stable", text, re.I
-    ):
-        raise ValueError("result explanation contradicts a cited unmet or unverified check")
+    if negative_status:
+        raise ValueError("program-rendered check status must carry unmet or unverified results")
+
+
+def _number_is_in_fact(token: str, fact: Mapping[str, Any]) -> bool:
+    try:
+        target = float(token)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not math.isfinite(target):
+        return False
+
+    def contains(value: Any) -> bool:
+        if isinstance(value, bool) or value is None:
+            return False
+        if type(value) in {int, float}:
+            return math.isfinite(float(value)) and float(value) == target
+        if isinstance(value, Mapping):
+            return any(contains(item) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(contains(item) for item in value)
+        return False
+
+    return contains(fact.get("value")) or contains(fact.get("task_context"))
 
 
 def _check_supported_view(entry: Mapping[str, Any], requested: str) -> None:
@@ -426,9 +460,23 @@ def render_confirmation(preview: Mapping[str, Any]) -> str:
         lines.extend(_confirmation_step_line(step) for step in plan_steps)
     else:
         lines = [f"准备对{system}{heading_separator}{task_phrase}，采用 {method}。"]
-        target_line = _result_target_sentence(preview.get("result_targets"), request)
-        if target_line:
-            lines.append(target_line)
+
+    target_line = _result_target_sentence(preview.get("result_targets"), request)
+    if target_line:
+        lines.append(target_line)
+
+    proposals = preview.get("method_resolution_proposals")
+    if isinstance(proposals, Sequence) and not isinstance(proposals, (str, bytes)):
+        for proposal in proposals:
+            if not isinstance(proposal, Mapping):
+                continue
+            requested = proposal.get("request")
+            proposed_profile = proposal.get("profile")
+            if isinstance(requested, str) and isinstance(proposed_profile, str):
+                lines.append(
+                    f"方法请求“{requested}”匹配到注册配置 {proposed_profile}；"
+                    "这是唯一方法族的建议匹配，请确认后运行。"
+                )
 
     charge = parameters.get("charge")
     multiplicity = parameters.get("multiplicity")
@@ -903,6 +951,8 @@ def _fact(
         "run_status": run.status,
         "result_status": result.status,
         "step_id": result.step_id,
+        "requirement_id": step.requirement_id if step is not None else None,
+        "subject_id": step.subject_id if step is not None else None,
         "step_tool": step.tool if step is not None else None,
         "method_profile": params.get("method_profile"),
         "environment": params.get("environment"),

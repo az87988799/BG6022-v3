@@ -377,15 +377,19 @@ def test_intake_parameter_catalog_is_tool_derived_and_operation_scoped() -> None
         strict=True,
     )
     assert valid.explicit_parameters == {"geom_maxiter": 100, "scf_maxiter": 80}
-    with pytest.raises(ValueError, match="outside the Tool catalog"):
-        schema.model_validate(
-            {
-                "intent": "chemistry_compute",
-                "operations": ["SP"],
-                "explicit_parameters": {"geom_maxiter": 100},
-            },
-            strict=True,
-        )
+    unsupported_for_operation = schema.model_validate(
+        {
+            "intent": "chemistry_compute",
+            "operations": ["SP"],
+            "explicit_parameters": {"geom_maxiter": 100},
+        },
+        strict=True,
+    )
+    assert any("geom_maxiter" in item for item in unsupported_for_operation.missing_fields)
+    assert any(
+        "no compatible calculation step" in item
+        for item in unsupported_for_operation.missing_fields
+    )
     with pytest.raises(ValueError, match="outside the Tool catalog"):
         schema.model_validate(
             {

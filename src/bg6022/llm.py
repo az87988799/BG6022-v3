@@ -26,11 +26,13 @@ class LlmError(RuntimeError):
         category: str,
         retryable: bool = False,
         purpose: str | None = None,
+        diagnostics: tuple[dict[str, str], ...] = (),
     ) -> None:
         super().__init__(message)
         self.category = category
         self.retryable = retryable
         self.purpose = purpose
+        self.diagnostics = diagnostics
 
 
 @dataclass(frozen=True)
@@ -214,18 +216,20 @@ class LlmClient:
             except (TypeError, ValueError) as error:
                 ambiguous_energy = _is_ambiguous_energy_request(payload)
                 failure_category = "ambiguous_result" if ambiguous_energy else "schema_error"
+                diagnostics = _schema_failure_diagnostics(error)
                 self._replace_last_call(
                     category=failure_category,
                     structured_correction_count=correction_index,
                 )
                 if correction_index < corrections:
-                    correction_error = str(error)
+                    correction_error = _schema_failure_feedback(diagnostics)
                     corrected = True
                     continue
                 raise LlmError(
                     "model JSON failed the local schema",
                     category=failure_category,
                     purpose=purpose,
+                    diagnostics=diagnostics,
                 ) from error
             self._replace_last_call(
                 category="success",
@@ -528,6 +532,32 @@ def _validate_schema(schema: Any, payload: Any) -> Any:
     if not isinstance(payload, dict):
         raise ValueError("JSON output must be an object")
     return payload
+
+
+def _schema_failure_diagnostics(error: BaseException) -> tuple[dict[str, str], ...]:
+    """Keep field paths and messages while omitting echoed input values."""
+
+    errors_method = getattr(error, "errors", None)
+    if callable(errors_method):
+        try:
+            errors = errors_method(include_url=False)
+        except TypeError:
+            errors = errors_method()
+        diagnostics = []
+        for item in errors:
+            location = item.get("loc", ())
+            path = ".".join(str(part) for part in location) or "$"
+            message = str(item.get("msg") or "value failed local validation")
+            diagnostics.append({"path": path, "message": message[:512]})
+        if diagnostics:
+            return tuple(diagnostics[:12])
+    return ({"path": "$", "message": str(error)[:512]},)
+
+
+def _schema_failure_feedback(diagnostics: tuple[dict[str, str], ...]) -> str:
+    return "; ".join(f"{item['path']}: {item['message']}" for item in diagnostics) or (
+        "the response failed local schema validation"
+    )
 
 
 def _bounded_retry_after(

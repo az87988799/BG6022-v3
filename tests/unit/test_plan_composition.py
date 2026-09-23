@@ -493,5 +493,7 @@ def test_plan_rejects_missing_user_requested_result() -> None:
         ]
     )
 
-    with pytest.raises(ValueError, match="does not cover the requested result: energy"):
+    with pytest.raises(
+        ValueError, match="does not cover the requested result: opt_final_electronic_energy"
+    ):
         _compose(request, proposal, build_registry(), plan_id="plan_missing_result")

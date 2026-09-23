@@ -259,7 +259,7 @@ def test_restart_rule_requires_evidence_and_validated_candidate(tmp_path: Path) 
         parameter_patch=options[0].parameter_patch,
         evidence_refs=list(options[0].evidence_refs),
     )
-    replacement, record = apply_repair_proposal(
+    candidate_plan, record = apply_repair_proposal(
         proposal,
         option=options[0],
         run=run,
@@ -267,6 +267,7 @@ def test_restart_rule_requires_evidence_and_validated_candidate(tmp_path: Path) 
         result=result,
         tool=build_registry().get("optimize_geometry"),
     )
+    replacement = next(item for item in candidate_plan.steps if item.id == step.id)
     assert replacement.parameters["geom_maxiter"] == 100
     assert replacement.inputs["geometry"].artifact_id == candidate.id
     assert record["validated"] is True

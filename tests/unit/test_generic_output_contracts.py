@@ -166,8 +166,32 @@ def test_result_answer_bounds_explanations_and_renders_verified_file_content() -
             )
         ],
     )
-    with pytest.raises(ValueError, match="numbers or paths"):
+    with pytest.raises(ValueError, match="numbers present in cited verified values"):
         validate_result_answer(injected, outputs, ["out_1"])
+
+    verified_number = {
+        "out_energy": {
+            "kind": "field",
+            "type": "Eh",
+            "fact": {
+                "kind": "field",
+                "name": "opt_final_electronic_energy",
+                "value": {"value": -76.4, "unit": "Eh"},
+                "expected_type": "Eh",
+            },
+        }
+    }
+    grounded = AnswerOutput(
+        action="respond",
+        sections=[
+            AnswerSection(
+                format="auto",
+                output_refs=["out_energy"],
+                text="这是同一已验证能量值 -76.4 Eh 的定性说明。",
+            )
+        ],
+    )
+    validate_result_answer(grounded, verified_number, ["out_energy"])
 
     safe = AnswerOutput(
         action="respond",

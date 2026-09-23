@@ -17,6 +17,7 @@ from bg6022.tools.orca import make_frequency_tool, make_optimize_tool, make_sing
 from bg6022.tools.pubchem import make_resolve_molecule_tool
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_TOOL_ALIASES = {"energy_difference": "same_geometry_method_energy_difference"}
 
 
 class ToolRegistry:
@@ -57,10 +58,17 @@ class ToolRegistry:
                 property_sources[property_name] = f"{tool.name}.{output['name']}"
 
     def get(self, name: str) -> Tool:
+        name = _TOOL_ALIASES.get(name, name)
         try:
             return self._tools[name]
         except KeyError as error:
             raise ValueError(f"tool is not registered: {name}") from error
+
+    @staticmethod
+    def canonical_tool_name(name: str) -> str:
+        """Map a short-lived stored Tool alias to the production directory name."""
+
+        return _TOOL_ALIASES.get(name, name)
 
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self._tools))
@@ -339,6 +347,14 @@ class ToolRegistry:
 
         if not plan.steps:
             raise ValueError("plan must contain at least one Step")
+        normalized_steps = [
+            step.model_copy(update={"tool": self.canonical_tool_name(step.tool)})
+            if self.canonical_tool_name(step.tool) != step.tool
+            else step
+            for step in plan.steps
+        ]
+        if normalized_steps != plan.steps:
+            plan = plan.model_copy(update={"steps": normalized_steps})
         step_by_id: dict[str, Any] = {}
         for step in plan.steps:
             if not _ID_RE.fullmatch(step.id) or step.id in {".", ".."}:
@@ -463,11 +479,13 @@ def merge_explicit_step_parameters(tool: Tool, step: Step, request: Request) -> 
     requirement = next(
         (item for item in request.requirements if item.id == step.requirement_id), None
     )
-    sources = [request.explicit_parameters]
+    scoped_request = bool(request.requirements)
+    sources = [] if scoped_request else [request.explicit_parameters]
     if requirement is not None:
         # Resolve scope first, then apply that requirement's explicit values.
         sources.append(requirement.parameters)
-    sources.append(request.user_modifications)
+    if not scoped_request:
+        sources.append(request.user_modifications)
     if requirement is not None:
         sources.append(request.user_modifications_by_requirement.get(requirement.id, {}))
     for source in sources:

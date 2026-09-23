@@ -502,18 +502,14 @@ def test_opt_geometry_target_means_optimized_geometry_not_initial_geometry(
         requested_results=[ResultTarget(step_id="generate", port="geometry")],
     )
 
-    with pytest.raises(ValueError, match="does not cover the requested result: geometry"):
+    with pytest.raises(ValueError, match="does not cover the requested result: optimized_geometry"):
         validate_request_plan(request, plan, registry)
 
-    # Even if an invalid plan reaches the runtime boundary, a successful
-    # geometry-generation Step cannot complete an Opt Request.
+    # The Agent boundary rejects the same mismatch before persisting a Run.
     agent = Agent(config, registry)
-    run = agent._create_chat_run(request, registry.validate_plan(plan))
-    agent.advance(run)
-    assert run.status == "waiting"
-    assert run.waiting_for == "confirmation"
-    assert "generate" in run.current_results
-    assert "opt" not in run.current_results
+    with pytest.raises(ValueError, match="does not cover the requested result: optimized_geometry"):
+        agent._create_chat_run(request, registry.validate_plan(plan))
+    assert not (Path(config.data_root_path) / "runs").exists()
 
 
 def test_legacy_output_target_is_narrowly_converted_to_a_port() -> None:

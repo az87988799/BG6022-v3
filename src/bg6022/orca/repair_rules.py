@@ -53,8 +53,8 @@ def applicable_repairs(run: Run, step: Step, result: Result) -> list[RepairOptio
         RepairOption(
             action="restart_optimization",
             failed_step_id=step.id,
-            candidate_artifact_id=candidate.id,
             parameter_patch={"geom_maxiter": new},
+            input_aliases={"last_complete_geometry": candidate.id},
             evidence_refs=evidence,
             reason="ORCA reported the optimization iteration limit with a valid final geometry",
         )
@@ -93,8 +93,8 @@ def applicable_scf_repair(run: Run, step: Step, result: Result) -> list[RepairOp
         RepairOption(
             action="increase_scf_maxiter",
             failed_step_id=step.id,
-            candidate_artifact_id=None,
             parameter_patch={"scf_maxiter": new},
+            input_aliases={},
             evidence_refs=(
                 "scf_iteration_limit_reached",
                 "scf_near_converged",
@@ -114,15 +114,15 @@ def validate_repair_option(
     result: Result,
     requested_action: str,
     requested_patch: Mapping[str, Any],
-    requested_candidate_id: str | None,
+    requested_input_aliases: list[str],
     evidence_refs: list[str],
 ) -> tuple[Step, dict[str, Any]]:
     """Validate an advisory proposal and derive a new Step deterministically."""
 
     if requested_action != option.action:
         raise ValueError("repair action is not one of the currently applicable actions")
-    if requested_candidate_id != option.candidate_artifact_id:
-        raise ValueError("repair candidate is not the validated candidate for this attempt")
+    if set(requested_input_aliases) != set(option.input_aliases):
+        raise ValueError("repair input aliases are not the validated aliases for this attempt")
     if set(evidence_refs) != set(option.evidence_refs):
         raise ValueError("repair evidence references do not match the validated facts")
     normalized_patch = {str(key): value for key, value in requested_patch.items()}
@@ -141,6 +141,7 @@ def validate_repair_option(
         if step.tool != "optimize_geometry" or "geom_maxiter" not in normalized_patch:
             raise ValueError("restart_optimization applies only to geometry optimization")
         candidate = _candidate_for_result(run, result)
+        requested_candidate_id = option.input_aliases.get("last_complete_geometry")
         if candidate is None or candidate.id != requested_candidate_id:
             raise ValueError("restart candidate is missing from the failed Result")
         new_inputs = dict(step.inputs)
@@ -168,8 +169,12 @@ def validate_repair_option(
         "failed_step_id": step.id,
         "failed_attempt": result.attempt,
         "failed_result_path": result.attempt_relative_path + "/result.json",
-        "candidate_artifact_id": requested_candidate_id,
-        "candidate_sha256": _artifact_sha(run, requested_candidate_id),
+        "candidate_artifact_id": (
+            option.input_aliases.get("last_complete_geometry")
+            if option.action == "restart_optimization"
+            else None
+        ),
+        "candidate_sha256": _artifact_sha(run, option.input_aliases.get("last_complete_geometry")),
         "old_parameters": old_parameters,
         "new_parameters": new_parameters,
         "parameter_patch": normalized_patch,

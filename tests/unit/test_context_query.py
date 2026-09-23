@@ -409,12 +409,14 @@ def test_query_selection_cannot_use_a_reference_outside_this_round() -> None:
                 },
             }
 
-    with pytest.raises(ValueError, match="outside this catalog"):
+    with pytest.raises(LlmError, match="outside this catalog") as error:
         intake_message(
             InvalidClient(),
             "what is the energy?",
             result_catalog=[{"subject_ref": "t1", "result": {"property": "electronic_energy"}}],
         )
+    assert error.value.category == "schema_error"
+    assert error.value.diagnostics[0]["path"] == "query_selection.targets"
 
 
 def test_query_property_must_match_the_user_cited_property_phrase() -> None:

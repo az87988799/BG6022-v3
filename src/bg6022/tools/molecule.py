@@ -21,12 +21,10 @@ from pydantic import BaseModel, ConfigDict, StrictInt
 from bg6022.config import AppConfig
 from bg6022.models import InputReference, Result, Run, Step, Tool
 from bg6022.session import (
-    artifact_path,
     find_artifact,
-    register_bytes_artifact,
     run_directory,
-    save_run,
 )
+from bg6022.tools.runtime import ToolCallContext
 
 SUPPORTED_ELEMENTS = frozenset({"H", "C", "N", "O", "F", "P", "S", "Cl", "Br", "I"})
 ATOMIC_NUMBERS = {
@@ -116,13 +114,14 @@ if __name__ == "__main__":
 
 
 def make_generate_geometry_tool(config: AppConfig | None = None) -> Tool:
-    def execute(step: Step, run: Run, cancel: Event) -> Result:
+    def execute(step: Step, context: ToolCallContext) -> Result:
         if config is None:
             raise RuntimeError("tool 'generate_geometry' is a description-only Tool")
-        return execute_generate_geometry(config, step=step, run=run, cancel=cancel)
+        return execute_generate_geometry(config, step=step, context=context)
 
     return Tool(
         name="generate_geometry",
+        planning_role="preparation",
         display_name="生成初始结构",
         description="Generate a bounded RDKit ETKDGv3 initial geometry from a molecule artifact.",
         parameter_model=GenerateGeometryParameters.__name__,
@@ -150,12 +149,10 @@ def make_generate_geometry_tool(config: AppConfig | None = None) -> Tool:
     )
 
 
-def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel: Event) -> Result:
+def execute_generate_geometry(config: AppConfig, *, step: Step, context: ToolCallContext) -> Result:
+    run = context.run
+    cancel = context.cancel
     parameters = GenerateGeometryParameters.model_validate(step.parameters, strict=True)
-    attempt = _next_attempt(run, step.id)
-    relative = f"{step.id}/attempt-{attempt:02d}"
-    input_bindings: dict[str, str] = {}
-    (run_directory(config.data_root_path, run.id) / relative).mkdir(parents=True, exist_ok=True)
     try:
         reference = step.inputs.get("molecule")
         if reference is None:
@@ -163,9 +160,9 @@ def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel
         molecule_artifact = resolve_artifact_reference(
             config, run, reference, expected_type="molecule"
         )
-        input_bindings["molecule"] = molecule_artifact.id
-        molecule_path = artifact_path(config.data_root_path, run, molecule_artifact)
-        payload = json.loads(molecule_path.read_text(encoding="utf-8"))
+        if context.frozen_inputs.get("molecule", molecule_artifact).id != molecule_artifact.id:
+            raise ValueError("molecule reference differs from its frozen input")
+        payload = json.loads(context.read_input("molecule").decode("utf-8"))
         facts = payload.get("facts", {})
         smiles = facts.get("isomeric_smiles") or facts.get("canonical_smiles")
         if not isinstance(smiles, str) or not smiles:
@@ -218,20 +215,15 @@ def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel
             raise ValueError("generated geometry element counts do not match the resolved molecule")
         diagnostics: dict[str, Any] = {}
         if rdkit_stderr:
-            diagnostic_path = run_directory(config.data_root_path, run.id) / relative
-            diagnostic_file = diagnostic_path / "rdkit.stderr.log"
+            diagnostic_file = context.workdir / "rdkit.stderr.log"
             diagnostic_file.write_text(rdkit_stderr, encoding="utf-8")
             diagnostics["raw_paths"] = {"rdkit_stderr": str(diagnostic_file)}
-        geometry_artifact = register_bytes_artifact(
-            config.data_root_path,
-            run,
+        geometry_artifact = context.register_bytes(
             geometry_bytes,
             artifact_type="molecular_geometry",
             role="initial_geometry",
             source=f"rdkit:ETKDGv3:{used_seed}",
             extension=".xyz",
-            step_id=step.id,
-            attempt=attempt,
             metadata={
                 "molecule_artifact_id": molecule_artifact.id,
                 "structure_source": payload.get("source"),
@@ -242,49 +234,23 @@ def execute_generate_geometry(config: AppConfig, *, step: Step, run: Run, cancel
                 "initial_guess_only": True,
             },
         )
-        run.attempts.append(
-            {
-                "step_id": step.id,
-                "attempt": attempt,
-                "phase": "finished",
-                "status": "succeeded",
-                "artifact_ids": [geometry_artifact.id],
-                "output_ports": {"geometry": geometry_artifact.id},
-            }
-        )
-        save_run(config.data_root_path, run)
-        return _molecule_result(
-            run,
-            step,
-            attempt,
+        return context.make_result(
             "succeeded",
             values={"geometry_atom_count": geometry.atom_count},
             diagnostics=diagnostics,
             artifact_ids=[geometry_artifact.id],
             output_ports={"geometry": geometry_artifact.id},
-            input_bindings=input_bindings,
             parameter_sources={"geometry": f"rdkit:ETKDGv3:{used_seed}"},
-            relative=relative,
         )
     except GeometryEmbeddingError as error:
-        return _molecule_result(
-            run,
-            step,
-            attempt,
+        return context.make_result(
             "cancelled" if error.category == "cancelled" else "failed",
             diagnostics={"category": error.category, "reason": str(error)},
-            input_bindings=input_bindings,
-            relative=relative,
         )
     except (OSError, ValueError, json.JSONDecodeError) as error:
-        return _molecule_result(
-            run,
-            step,
-            attempt,
+        return context.make_result(
             "failed",
             diagnostics={"category": "geometry_generation_failed", "reason": str(error)},
-            input_bindings=input_bindings,
-            relative=relative,
         )
 
 
@@ -478,43 +444,6 @@ def resolve_artifact_reference(
     if artifact.role == "restart_candidate":
         raise ValueError("restart_candidate is not a normal molecule/geometry input")
     return artifact
-
-
-def _molecule_result(
-    run: Run,
-    step: Step,
-    attempt: int,
-    status: str,
-    *,
-    values: dict[str, Any] | None = None,
-    diagnostics: dict[str, Any] | None = None,
-    artifact_ids: list[str] | None = None,
-    output_ports: dict[str, str] | None = None,
-    input_bindings: dict[str, str] | None = None,
-    parameter_sources: dict[str, str] | None = None,
-    relative: str,
-) -> Result:
-    return Result(
-        run_id=run.id,
-        step_id=step.id,
-        attempt=attempt,
-        status=status,  # type: ignore[arg-type]
-        values=values or {},
-        diagnostics=diagnostics or {},
-        artifact_ids=artifact_ids or [],
-        output_ports=output_ports or {},
-        input_bindings=input_bindings or {},
-        input_artifact_ids=list((input_bindings or {}).values()),
-        parameter_sources=parameter_sources or {},
-        attempt_relative_path=relative,
-    )
-
-
-def _next_attempt(run: Run, step_id: str) -> int:
-    attempts = [
-        int(item.get("attempt", 0)) for item in run.attempts if item.get("step_id") == step_id
-    ]
-    return max(attempts, default=0) + 1
 
 
 def _step_fingerprint(step: Step) -> str:

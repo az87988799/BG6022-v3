@@ -28,7 +28,7 @@ from .answer import (
 )
 from .config import AppConfig
 from .llm import LlmClient, LlmError
-from .models import InputReference, Plan, Request, Result, Run, Step, Tool
+from .models import InputReference, Plan, Request, Result, Run, Step, Subject, Tool
 from .molecule_identity import (
     build_identity_constraint,
     canonical_structure,
@@ -720,6 +720,27 @@ class Agent:
                         "sp_electronic_energy（单点电子能）或 "
                         "opt_final_electronic_energy（优化末态电子能）；未启动计算。"
                     )
+                elif stage == "intake" and error.category == "schema_error":
+                    diagnostic_text = "；".join(
+                        f"{item.get('path', '$')}: {item.get('message', '')}"
+                        for item in error.diagnostics
+                    )
+                    if "electronic_state_parameter_invalid" in diagnostic_text:
+                        response = AgentResponse(
+                            "电子态参数取值无效（不是受支持的整数值）：电荷和自旋多重度"
+                            "必须是严格整数。"
+                            "请更正参数；本次没有生成或启动计算。"
+                        )
+                    elif "outside the Tool catalog" in diagnostic_text:
+                        response = AgentResponse(
+                            f"请求中有未注册的 Tool 参数字段（{diagnostic_text[:300]}）。"
+                            "请使用参数目录中的字段；本次没有生成或启动计算。"
+                        )
+                    else:
+                        response = AgentResponse(
+                            f"请求字段未通过校验（{diagnostic_text[:300]}）。"
+                            "请按提示修正；本次没有生成或启动计算。"
+                        )
                 elif stage_label is not None:
                     response = AgentResponse(
                         f"{stage_label}未获得有效模型响应（{error.category}）；"
@@ -868,29 +889,14 @@ class Agent:
                         run.artifact_index,
                         snapshot=run.accepted_snapshot,
                     )
-                if not self._reserve_attempt(run, step, tool):
-                    run.status = "failed"
-                    run.finish_active_interval()
-                    save_run(self.config.data_root_path, run)
-                    return last_result
-                run.step_status[step.id] = "running"
-                save_run(self.config.data_root_path, run)
                 try:
-                    expected_bindings, expected_hashes = self._frozen_step_inputs(run, step)
-                    result = tool.execute(step, run, cancel=cancel_event)
-                    step_parameter_sources = run.parameter_sources_by_step.get(step.id)
-                    if not step_parameter_sources and run.pending_data.get("parameter_sources"):
-                        step_parameter_sources = dict(run.pending_data["parameter_sources"])
-                    result_path = publish_step_result(
-                        self.config.data_root_path,
-                        run,
-                        step,
-                        tool,
-                        result,
-                        expected_input_bindings=expected_bindings,
-                        expected_input_hashes=expected_hashes,
-                        parameter_sources=step_parameter_sources,
-                    )
+                    invoked = self._invoke_step(run, step, tool, cancel_event)
+                    if invoked is None:
+                        run.status = "failed"
+                        run.finish_active_interval()
+                        save_run(self.config.data_root_path, run)
+                        return last_result
+                    result, result_path = invoked
                 except Exception as error:
                     run.status = "failed"
                     run.step_status[step.id] = "failed"
@@ -963,6 +969,104 @@ class Agent:
                     save_run(self.config.data_root_path, run)
                 except Exception:
                     pass
+
+    def _invoke_step(
+        self, run: Run, step: Step, tool: Tool, cancel: Event
+    ) -> tuple[Result, str] | None:
+        """Own one Tool call's budget, attempt record, frozen inputs, and publish edge."""
+
+        if tool.requires_compute_permission and not run.execution_permission:
+            raise PermissionError("Run does not have permission to invoke this compute Tool")
+        if not self._reserve_attempt(run, step, tool):
+            return None
+        expected_bindings, expected_hashes = self._frozen_step_inputs(run, step)
+        frozen_inputs = {
+            name: find_artifact(run, artifact_id) for name, artifact_id in expected_bindings.items()
+        }
+        attempt = (
+            max(
+                (
+                    int(item.get("attempt", 0))
+                    for item in run.attempts
+                    if item.get("step_id") == step.id
+                ),
+                default=0,
+            )
+            + 1
+        )
+        relative = f"{step.id}/attempt-{attempt:02d}"
+        workdir = run_directory(self.config.data_root_path, run.id) / relative
+        workdir.mkdir(parents=True, exist_ok=False)
+        attempt_record = {
+            "step_id": step.id,
+            "attempt": attempt,
+            "phase": "prepared",
+            "status": "running",
+            "relative_path": workdir.relative_to(self.config.data_root_path).as_posix(),
+            "result_relative_path": relative,
+            "artifact_ids": [],
+            "output_ports": {},
+            "input_artifact_ids": list(expected_bindings.values()),
+        }
+        run.attempts.append(attempt_record)
+        run.step_status[step.id] = "running"
+        save_run(self.config.data_root_path, run)
+        from .tools.runtime import ToolCallContext
+
+        context = ToolCallContext(
+            data_root=self.config.data_root_path,
+            run=run,
+            step=step,
+            attempt=attempt,
+            cancel=cancel,
+            workdir=workdir,
+            relative_attempt_path=relative,
+            frozen_inputs=frozen_inputs,
+            attempt_record=attempt_record,
+        )
+        try:
+            result = tool.execute(step, context)
+            if (
+                result.run_id != run.id
+                or result.step_id != step.id
+                or result.attempt != attempt
+                or result.attempt_relative_path != relative
+            ):
+                raise ValueError("Tool Result does not match its active ToolCallContext")
+            attempt_record.update(
+                {
+                    "phase": "finished",
+                    "status": result.status,
+                    "result_category": result.diagnostics.get("category"),
+                    "artifact_ids": list(result.artifact_ids),
+                    "output_ports": dict(result.output_ports),
+                    "input_artifact_ids": list(result.input_artifact_ids),
+                }
+            )
+            step_parameter_sources = run.parameter_sources_by_step.get(step.id)
+            if not step_parameter_sources and run.pending_data.get("parameter_sources"):
+                step_parameter_sources = dict(run.pending_data["parameter_sources"])
+            result_path = publish_step_result(
+                self.config.data_root_path,
+                run,
+                step,
+                tool,
+                result,
+                expected_input_bindings=expected_bindings,
+                expected_input_hashes=expected_hashes,
+                parameter_sources=step_parameter_sources,
+            )
+            return result, result_path
+        except Exception:
+            attempt_record.update(
+                {"phase": "finished", "status": "failed", "result_category": "execution_boundary"}
+            )
+            run.step_status[step.id] = "failed"
+            try:
+                save_run(self.config.data_root_path, run)
+            except Exception:
+                pass
+            raise
 
     def confirm(self, run: Run | str | None = None) -> AgentResponse:
         request_token, request_cancel = self._begin_request()
@@ -1119,6 +1223,7 @@ class Agent:
         *,
         history_geometry_binding: Mapping[str, Any] | None = None,
     ) -> Run:
+        plan = validate_request_plan(request, plan, self.registry)
         _validate_request_parameter_scope(request, plan, self.registry)
         history_alias = request.structure_input.get("history_geometry_alias")
         verified_history = (
@@ -1133,7 +1238,14 @@ class Agent:
             request=request,
             plan=plan,
             resources=self.config.resources,
-            execution_permission=not self.config.runtime.confirm_before_compute,
+            execution_permission=(
+                not self.config.runtime.confirm_before_compute
+                and not any(
+                    isinstance(item.constraints.get("method_resolution"), Mapping)
+                    and item.constraints["method_resolution"].get("status") == "proposed"
+                    for item in request.requirements
+                )
+            ),
             status="planned",
             budget=self._default_budget(),
             origin_step_map={step.id: step.origin_step_id or step.id for step in plan.steps},
@@ -1377,22 +1489,29 @@ class Agent:
         if not editable_steps:
             return AgentResponse("参数修改与所选要求项没有兼容的参数字段。", run=run)
 
-        if scoped_requirement_id is None:
-            candidate_request = run.request.model_copy(
-                update={
-                    "explicit_parameters": {**run.request.explicit_parameters, **parameters},
-                    "user_modifications": {**run.request.user_modifications, **parameters},
-                }
+        updated_requirements = []
+        for requirement in run.request.requirements:
+            if scoped_requirement_id is not None and requirement.id != scoped_requirement_id:
+                updated_requirements.append(requirement)
+                continue
+            allowed = set(self.registry.get(requirement.capability).request_parameters)
+            patch = {name: value for name, value in parameters.items() if name in allowed}
+            if not patch:
+                updated_requirements.append(requirement)
+                continue
+            constraints = dict(requirement.constraints)
+            sources = dict(constraints.get("parameter_sources", {}))
+            sources.update({name: "user_modification" for name in patch})
+            constraints["parameter_sources"] = sources
+            updated_requirements.append(
+                requirement.model_copy(
+                    update={
+                        "parameters": {**requirement.parameters, **patch},
+                        "constraints": constraints,
+                    }
+                )
             )
-        else:
-            scoped = dict(run.request.user_modifications_by_requirement)
-            scoped[scoped_requirement_id] = {
-                **scoped.get(scoped_requirement_id, {}),
-                **parameters,
-            }
-            candidate_request = run.request.model_copy(
-                update={"user_modifications_by_requirement": scoped}
-            )
+        candidate_request = run.request.model_copy(update={"requirements": updated_requirements})
         try:
             _validate_request_parameter_scope(candidate_request, run.plan, self.registry)
             candidate_steps: list[Step] = []
@@ -1556,8 +1675,16 @@ class Agent:
             kind = "cid"
         try:
             subject_id = step.subject_id
+            if subject_id is None and len(run.request.subjects) == 1:
+                subject_id = next(iter(run.request.subjects))
             subject_record = run.request.subjects.get(subject_id or "")
-            subject_value = dict(subject_record) if isinstance(subject_record, Mapping) else None
+            subject_value = (
+                subject_record.model_dump(mode="python")
+                if isinstance(subject_record, Subject)
+                else dict(subject_record)
+                if isinstance(subject_record, Mapping)
+                else None
+            )
             subject_input_value = (
                 subject_record.get("structure_input", {})
                 if isinstance(subject_record, Mapping)
@@ -1647,14 +1774,15 @@ class Agent:
                         "该分子选择已拒绝（rejected）：" + (reason or "结构身份与原分子式不一致"),
                         run=run,
                     )
-            if subject_value is not None and subject_id is not None:
+            if subject_record is not None and subject_id is not None:
                 subject_value["structure_input"] = structure_input
                 subjects = dict(run.request.subjects)
-                subjects[subject_id] = subject_value
-                updates: dict[str, Any] = {"subjects": subjects}
-                if len(subjects) == 1:
-                    updates["structure_input"] = structure_input
-                candidate_request = run.request.model_copy(update=updates)
+                subjects[subject_id] = (
+                    subject_record.model_copy(update={"structure_input": structure_input})
+                    if isinstance(subject_record, Subject)
+                    else subject_value
+                )
+                candidate_request = run.request.model_copy(update={"subjects": subjects})
             else:
                 candidate_request = run.request.model_copy(
                     update={"structure_input": structure_input}
@@ -1754,7 +1882,7 @@ class Agent:
         if option is None:
             return False
         try:
-            replacement, record = apply_repair_proposal(
+            candidate_plan, record = apply_repair_proposal(
                 proposal,
                 option=option,
                 run=run,
@@ -1766,12 +1894,20 @@ class Agent:
             run.pending_data = {"repair_rejected": str(error)}
             save_run(self.config.data_root_path, run)
             return False
-        candidate_plan = self.registry.validate_plan(_replace_step(run.plan, replacement))
+        patch = record.get("parameter_patch", {})
+        old_parameters = record.get("old_parameters", {})
+        new_parameters = record.get("new_parameters", {})
+        verified_diff = {
+            step.id: {
+                str(name): (old_parameters.get(name), new_parameters.get(name)) for name in patch
+            }
+        }
         apply_plan_change(
             run,
             candidate_plan,
             self.registry,
             changed_step_ids={step.id},
+            allow_verified_repair_diff=verified_diff,
         )
         run.plan_revisions += 1
         record["derived_plan_sha256"] = _plan_fingerprint(run.plan)
@@ -1949,6 +2085,15 @@ class Agent:
             "allowed_repairs": self._allowed_repairs(run, step),
             "repair_scope": self._repair_scope(run),
             "budget": dict(run.budget),
+            "method_resolution_proposals": [
+                {
+                    "requirement_id": requirement.id,
+                    **dict(requirement.constraints["method_resolution"]),
+                }
+                for requirement in run.request.requirements
+                if isinstance(requirement.constraints.get("method_resolution"), Mapping)
+                and requirement.constraints["method_resolution"].get("status") == "proposed"
+            ],
         }
 
     def _preview_plan_steps(self, run: Run) -> list[dict[str, Any]]:
@@ -2024,8 +2169,24 @@ class Agent:
         except ValueError:
             return []
         targets: list[dict[str, str]] = []
+        same_capability_requirements = [
+            item for item in run.request.requirements if item.capability == step.tool
+        ]
         for target in run.plan.requested_results:
-            if target.step_id != step.id:
+            if target.step_id is not None and target.step_id != step.id:
+                continue
+            if target.requirement_id is not None and target.requirement_id != step.requirement_id:
+                continue
+            if (
+                target.requirement_id is None
+                and target.step_id is None
+                and len(same_capability_requirements) > 1
+            ):
+                continue
+            if not any(
+                descriptor["name"] == (target.check or target.port or target.field)
+                for descriptor in tool.public_outputs()
+            ):
                 continue
             name = target.check or target.port or target.field
             if name is None:
@@ -2734,6 +2895,58 @@ class Agent:
             }
         return outputs
 
+    @staticmethod
+    def _answer_goal_context(
+        run: Run, facts: list[Mapping[str, Any]]
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Bind presentation goals to current verified outputs, without planning work."""
+
+        requirements = {item.id: item for item in run.request.requirements}
+        goals: list[dict[str, Any]] = []
+        notes: list[str] = []
+        for goal in run.request.answer_goals:
+            calculations: list[dict[str, Any]] = []
+            for requirement_id in goal.requirement_ids:
+                requirement = requirements.get(requirement_id)
+                fact = next(
+                    (
+                        item
+                        for item in facts
+                        if item.get("requirement_id") == requirement_id
+                        and goal.output
+                        in {str(item.get("name") or ""), str(item.get("result_property") or "")}
+                    ),
+                    None,
+                )
+                if requirement is None or fact is None:
+                    calculations = []
+                    break
+                calculations.append(
+                    {
+                        "capability": requirement.capability,
+                        "method_profile": fact.get("method_profile"),
+                        "output_ref": fact.get("output_ref"),
+                    }
+                )
+            if len(calculations) != len(goal.requirement_ids):
+                continue
+            goals.append(
+                {
+                    "kind": goal.kind,
+                    "mode": goal.mode,
+                    "output": goal.output,
+                    "calculations": calculations,
+                }
+            )
+            if goal.mode == "side_by_side" and all(
+                item["capability"] == "optimize_geometry" for item in calculations
+            ):
+                notes.append(
+                    "以下能量分别来自各自优化后的几何；这些几何可能不同，绝对能量差"
+                    "不能单独用于判断哪种方法更准确。"
+                )
+        return goals, ("\n".join(dict.fromkeys(notes)) or None)
+
     def _render_verified_delivery(
         self,
         run: Run,
@@ -2800,6 +3013,7 @@ class Agent:
                 },
             )
         outputs = self._answer_output_map(renderable, files)
+        answer_goal_context, answer_goal_note = self._answer_goal_context(run, renderable)
         draft: AnswerOutput | None = None
         if not cancelled:
             try:
@@ -2811,6 +3025,7 @@ class Agent:
                     context={
                         "run_status": run.status,
                         "output_preferences": delivery_preferences,
+                        "answer_goals": answer_goal_context,
                     },
                     cancel=cancel,
                 )
@@ -2870,6 +3085,8 @@ class Agent:
                 required_refs=required,
                 preferences=delivery_preferences,
             )
+        if answer_goal_note and not cancelled:
+            text = f"{answer_goal_note}\n{text}"
         if unavailable_targets:
             text = f"{text}\n尚未交付：{'；'.join(unavailable_targets)}；未重新计算。"
         locators: list[dict[str, Any]] = []
@@ -4218,6 +4435,7 @@ def _is_parameter_continuation(
 ) -> bool:
     if intake.intent != "chemistry_compute" or not explicit_parameters:
         return False
+    compatibility_updates = getattr(intake, "__dict__", {})
     if (
         intake.molecule_query
         or intake.subjects
@@ -4225,6 +4443,12 @@ def _is_parameter_continuation(
         or intake.structure_input
         or intake.history_geometry_alias
         or intake.requested_results
+        or compatibility_updates.get("molecule_query")
+        or compatibility_updates.get("subjects")
+        or compatibility_updates.get("requirements")
+        or compatibility_updates.get("structure_input")
+        or compatibility_updates.get("history_geometry_alias")
+        or compatibility_updates.get("requested_results")
     ):
         return False
     if intake.operations and run.request.operations:
@@ -4693,7 +4917,8 @@ def _validate_request_parameter_scope(request: Request, plan: Plan, registry: To
                     f"{source_name} for {requirement.id!r} include fields outside "
                     f"{tool.name}: {unknown}"
                 )
-            tool.validate_parameter_patch(mapping)
+            if mapping:
+                tool.validate_parameter_patch(mapping)
 
 
 def _next_ready_step(

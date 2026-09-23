@@ -6,7 +6,10 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
+
+if TYPE_CHECKING:
+    from bg6022.tools.runtime import ToolCallContext
 
 from pydantic import (
     BaseModel,
@@ -91,6 +94,26 @@ class ResultTarget(StrictModel):
         return self
 
 
+class RequirementInputBinding(StrictModel):
+    """A source for one input port of a Requirement."""
+
+    source_requirement_id: str | None = None
+    source_port: str | None = None
+    artifact_alias: str | None = None
+
+    @model_validator(mode="after")
+    def _one_source(self) -> RequirementInputBinding:
+        if self.artifact_alias is not None:
+            if self.source_requirement_id is not None or self.source_port is not None:
+                raise ValueError("artifact_alias cannot be combined with a Requirement source")
+            return self
+        if (self.source_requirement_id is None) != (self.source_port is None):
+            raise ValueError("Requirement input source needs both requirement id and port")
+        if self.source_requirement_id is None:
+            raise ValueError("Requirement input must reference a Requirement or artifact alias")
+        return self
+
+
 class Requirement(StrictModel):
     """One user-requested capability instance, nested inside Request."""
 
@@ -99,6 +122,7 @@ class Requirement(StrictModel):
     capability: str
     parameters: dict[str, Any] = Field(default_factory=dict)
     outputs: list[str] = Field(default_factory=list)
+    input_bindings: dict[str, RequirementInputBinding] = Field(default_factory=dict)
     constraints: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("id", "subject_id", "capability")
@@ -113,6 +137,34 @@ class Requirement(StrictModel):
     def _unique_outputs(cls, value: list[str]) -> list[str]:
         if len(value) != len(set(value)):
             raise ValueError("requirement outputs must be unique")
+        return value
+
+
+class Subject(StrictModel):
+    """A named scientific subject nested inside Request."""
+
+    key: str
+    molecule_query: str | None = None
+    molecule_input_kind: Literal["name", "cid", "smiles", "formula"] | None = None
+    molecule_name_evidence: str | None = None
+    structure_input: dict[str, Any] = Field(default_factory=dict)
+
+
+class AnswerGoal(StrictModel):
+    """A presentation goal over outputs from requested Requirements."""
+
+    kind: Literal["compare"]
+    requirement_ids: list[str]
+    output: str
+    mode: Literal["side_by_side", "numeric_difference"] = "side_by_side"
+
+    @field_validator("requirement_ids")
+    @classmethod
+    def _distinct_requirements(cls, value: list[str]) -> list[str]:
+        if len(value) < 2:
+            raise ValueError("a comparison needs at least two Requirements")
+        if len(value) != len(set(value)):
+            raise ValueError("AnswerGoal requirement ids must be unique")
         return value
 
 
@@ -182,33 +234,348 @@ _REQUIRED_GEOMETRY_BINDINGS = TypeAdapter(list[RequiredGeometryBinding])
 class Request(StrictModel):
     id: str
     description: str
-    operations: list[Operation] = Field(default_factory=list)
-    requirements: list[Requirement] = Field(default_factory=list)
-    subjects: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    requested_results: list[ResultTarget] = Field(default_factory=list)
-    explicit_parameters: dict[str, Any] = Field(default_factory=dict)
     source: Literal["cli", "chat"] = "cli"
     original_text: str | None = None
-    user_modifications: dict[str, Any] = Field(default_factory=dict)
-    user_modifications_by_requirement: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    structure_input: dict[str, Any] = Field(default_factory=dict)
+    subjects: dict[str, Subject] = Field(default_factory=dict)
+    requirements: list[Requirement] = Field(default_factory=list)
+    answer_goals: list[AnswerGoal] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
     output_preferences: dict[str, str] = Field(
         default_factory=lambda: dict(_OUTPUT_PREFERENCE_DEFAULTS)
     )
 
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Request:
+        """Translate legacy operation updates into canonical Requirements."""
+
+        changes = dict(update or {})
+        legacy_operation = changes.pop("operation", None)
+        legacy_operations = changes.pop("operations", None)
+        if legacy_operation is not None:
+            if legacy_operations is not None and list(legacy_operations) != [legacy_operation]:
+                raise ValueError("legacy operation conflicts with operations")
+            legacy_operations = [legacy_operation]
+        if legacy_operations is not None:
+            from bg6022.tools.registry import build_registry
+
+            registry = build_registry()
+            previous = list(changes.get("requirements", self.requirements))
+            used: set[str] = set()
+            subject_id = next((item.subject_id for item in previous), "subject_1")
+            if not changes.get("subjects", self.subjects):
+                changes["subjects"] = {subject_id: Subject(key=subject_id)}
+            replacements: list[Requirement] = []
+            for index, operation in enumerate(legacy_operations, start=1):
+                matches = [
+                    registry.get(name)
+                    for name in registry.names()
+                    if operation in registry.get(name).operations
+                ]
+                if len(matches) != 1:
+                    raise ValueError(f"legacy operation {operation!r} has no unique Tool")
+                capability = matches[0].name
+                existing = next(
+                    (
+                        item
+                        for item in previous
+                        if item.capability == capability and item.id not in used
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    used.add(existing.id)
+                    replacements.append(existing)
+                else:
+                    replacements.append(
+                        Requirement(
+                            id=f"legacy_req_update_{index}",
+                            subject_id=subject_id,
+                            capability=capability,
+                        )
+                    )
+            changes["requirements"] = replacements
+        return super().model_copy(update=changes, deep=deep)
+
     @model_validator(mode="before")
     @classmethod
-    def _load_legacy_operation(cls, value: Any) -> Any:
-        if not isinstance(value, dict) or "operation" not in value:
+    def _normalize_legacy_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
             return value
         data = dict(value)
-        legacy = data.pop("operation")
-        if legacy is None:
+        legacy_keys = {
+            "operation",
+            "operations",
+            "requested_results",
+            "explicit_parameters",
+            "user_modifications",
+            "user_modifications_by_requirement",
+            "structure_input",
+        }
+        if not legacy_keys.intersection(data):
+            requirements = data.get("requirements")
+            if isinstance(requirements, list):
+                raw_requirements = [
+                    item.model_dump(mode="python")
+                    if isinstance(item, Requirement)
+                    else dict(item)
+                    if isinstance(item, Mapping)
+                    else item
+                    for item in requirements
+                ]
+                if any(
+                    isinstance(item, dict) and item.get("capability") == "energy_difference"
+                    for item in raw_requirements
+                ):
+                    from bg6022.tools.registry import build_registry
+
+                    registry = build_registry()
+                    data["requirements"] = [
+                        {
+                            **item,
+                            "capability": registry.canonical_tool_name(
+                                str(item.get("capability", ""))
+                            ),
+                        }
+                        if isinstance(item, dict)
+                        else item
+                        for item in raw_requirements
+                    ]
             return data
-        if "operations" in data and data["operations"] != [legacy]:
-            raise ValueError("legacy operation conflicts with operations")
-        data["operations"] = [legacy]
+
+        from bg6022.tools.registry import build_registry
+
+        registry = build_registry()
+        legacy_operation = data.pop("operation", None)
+        operations = list(data.pop("operations", []))
+        if legacy_operation is not None:
+            if operations and operations != [legacy_operation]:
+                raise ValueError("legacy operation conflicts with operations")
+            operations = [legacy_operation]
+        raw_targets = list(data.pop("requested_results", []))
+        explicit_parameters = dict(data.pop("explicit_parameters", {}))
+        user_modifications = dict(data.pop("user_modifications", {}))
+        modifications_by_requirement = dict(data.pop("user_modifications_by_requirement", {}))
+        legacy_structure = dict(data.pop("structure_input", {}))
+        legacy_bindings = list(legacy_structure.pop("required_bindings", []))
+
+        raw_subjects = dict(data.get("subjects", {}))
+        subjects: dict[str, dict[str, Any]] = {}
+        for subject_id, raw_subject in raw_subjects.items():
+            if isinstance(raw_subject, Subject):
+                subjects[str(subject_id)] = raw_subject.model_dump(mode="python")
+                continue
+            item = dict(raw_subject)
+            key = str(item.pop("key", subject_id))
+            subject_structure = dict(item.pop("structure_input", {}))
+            subjects[str(subject_id)] = {
+                "key": key,
+                **item,
+                "structure_input": subject_structure,
+            }
+
+        if legacy_structure:
+            if not subjects:
+                subjects["subject_1"] = {"key": "subject_1", "structure_input": {}}
+            if len(subjects) == 1:
+                only_subject = next(iter(subjects.values()))
+                subject_structure = dict(only_subject.get("structure_input", {}))
+                subject_structure.update(legacy_structure)
+                only_subject["structure_input"] = subject_structure
+
+        requirements = [
+            item.model_dump(mode="python") if isinstance(item, Requirement) else dict(item)
+            for item in data.get("requirements", [])
+        ]
+        requirements = [
+            {
+                **item,
+                "capability": registry.canonical_tool_name(str(item.get("capability", ""))),
+            }
+            for item in requirements
+        ]
+        if not requirements:
+            for index, operation in enumerate(operations, start=1):
+                matches = [
+                    tool
+                    for name in registry.names()
+                    if (tool := registry.get(name)).operations and operation in tool.operations
+                ]
+                if len(matches) != 1:
+                    raise ValueError(f"legacy operation {operation!r} has no unique Tool")
+                requirements.append(
+                    {
+                        "id": f"legacy_req_{index}",
+                        "subject_id": next(iter(subjects), "subject_1"),
+                        "capability": matches[0].name,
+                        "parameters": {},
+                        "outputs": [],
+                    }
+                )
+
+        # Resolve legacy result producers before translating legacy input bindings;
+        # an operation-free Tool may be the consumer of such a binding.
+        for raw_target in raw_targets:
+            target = (
+                raw_target.model_dump(mode="python")
+                if isinstance(raw_target, ResultTarget)
+                else {"field": raw_target}
+                if isinstance(raw_target, str)
+                else dict(raw_target)
+            )
+            name = target.get("check") or target.get("port") or target.get("field")
+            if not name:
+                continue
+            try:
+                canonical = registry.resolve_result_target(str(name), operations)
+            except ValueError:
+                continue
+            target_name = canonical.check or canonical.port or canonical.field
+            if not target_name:
+                continue
+            target_kind = "check" if canonical.check else "port" if canonical.port else "field"
+            producers = {
+                str(item["tool"])
+                for item in registry.result_capabilities()
+                if item["name"] == target_name and item["kind"] == target_kind
+            }
+            if len(producers) != 1:
+                continue
+            producer = next(iter(producers))
+            if not any(item.get("capability") == producer for item in requirements):
+                requirements.append(
+                    {
+                        "id": str(
+                            target.get("requirement_id") or f"legacy_req_{len(requirements) + 1}"
+                        ),
+                        "subject_id": next(iter(subjects), "subject_1"),
+                        "capability": producer,
+                        "parameters": {},
+                        "outputs": [],
+                    }
+                )
+
+        for raw_binding in legacy_bindings:
+            binding = RequiredGeometryBinding.model_validate(raw_binding, strict=True)
+            consumers = [
+                item
+                for item in requirements
+                if (
+                    binding.consumer_requirement_id is not None
+                    and item.get("id") == binding.consumer_requirement_id
+                )
+                or (
+                    binding.consumer_tool is not None
+                    and item.get("capability") == binding.consumer_tool
+                )
+                or (
+                    binding.consumer_operation is not None
+                    and binding.consumer_operation
+                    in registry.get(str(item.get("capability"))).operations
+                )
+            ]
+            if len(consumers) != 1:
+                raise ValueError("legacy geometry binding does not identify one Requirement")
+            consumer = consumers[0]
+            inputs = consumer.setdefault("input_bindings", {})
+            if binding.source_requirement_id is not None:
+                inputs[binding.input_port] = {
+                    "source_requirement_id": binding.source_requirement_id,
+                    "source_port": binding.source_port,
+                }
+            elif binding.source_operation is not None:
+                sources = [
+                    item
+                    for item in requirements
+                    if binding.source_operation
+                    in registry.get(str(item.get("capability"))).operations
+                ]
+                if len(sources) != 1:
+                    raise ValueError(
+                        "legacy geometry binding does not identify one source Requirement"
+                    )
+                inputs[binding.input_port] = {
+                    "source_requirement_id": sources[0]["id"],
+                    "source_port": binding.source_port,
+                }
+            elif binding.source_port == "initial_geometry":
+                inputs[binding.input_port] = {"artifact_alias": "initial_geometry"}
+
+        if raw_targets:
+            for raw_target in raw_targets:
+                target = (
+                    raw_target.model_dump(mode="python")
+                    if isinstance(raw_target, ResultTarget)
+                    else {"field": raw_target}
+                    if isinstance(raw_target, str)
+                    else dict(raw_target)
+                )
+                name = target.get("check") or target.get("port") or target.get("field")
+                if not name:
+                    continue
+                try:
+                    canonical = registry.resolve_result_target(str(name), operations)
+                except ValueError:
+                    continue
+                target_name = canonical.check or canonical.port or canonical.field
+                if not target_name:
+                    continue
+                matching_tools = [
+                    str(item["tool"])
+                    for item in registry.result_capabilities()
+                    if item["name"] == target_name
+                    and item["kind"]
+                    == ("check" if canonical.check else "port" if canonical.port else "field")
+                ]
+                producer = matching_tools[0] if len(matching_tools) == 1 else None
+                matches = [item for item in requirements if item.get("capability") == producer]
+                if not matches and producer is not None:
+                    requirement_id = str(
+                        target.get("requirement_id") or f"legacy_req_{len(requirements) + 1}"
+                    )
+                    requirement = {
+                        "id": requirement_id,
+                        "subject_id": next(iter(subjects), "subject_1"),
+                        "capability": producer,
+                        "parameters": {},
+                        "outputs": [],
+                    }
+                    requirements.append(requirement)
+                    matches = [requirement]
+                for requirement in matches:
+                    output = str(target_name)
+                    if output not in requirement.setdefault("outputs", []):
+                        requirement["outputs"].append(output)
+
+        modifications_by_id = modifications_by_requirement
+        for requirement in requirements:
+            capability = str(requirement.get("capability", ""))
+            try:
+                allowed_parameters = set(registry.get(capability).request_parameters)
+            except ValueError:
+                allowed_parameters = set()
+            parameters = dict(requirement.get("parameters", {}))
+            for name, parameter_value in explicit_parameters.items():
+                if name in allowed_parameters:
+                    parameters.setdefault(name, parameter_value)
+            for name, parameter_value in user_modifications.items():
+                if name in allowed_parameters:
+                    parameters[name] = parameter_value
+            for name, parameter_value in dict(
+                modifications_by_id.get(str(requirement.get("id", "")), {})
+            ).items():
+                if name in allowed_parameters:
+                    parameters[name] = parameter_value
+            requirement["parameters"] = parameters
+
+        if requirements and not subjects:
+            subjects["subject_1"] = {"key": "subject_1", "structure_input": {}}
+
+        data["subjects"] = subjects
+        data["requirements"] = requirements
         return data
 
     @field_validator("requirements")
@@ -231,78 +598,21 @@ class Request(StrictModel):
         )
         if missing:
             raise ValueError(f"requirements refer to unknown subject ids: {missing}")
-        unknown_modification_scopes = sorted(
-            set(self.user_modifications_by_requirement) - {item.id for item in self.requirements}
-        )
-        if unknown_modification_scopes:
-            raise ValueError(
-                "user modifications refer to unknown requirement ids: "
-                f"{unknown_modification_scopes}"
-            )
-        unknown_result_scopes = sorted(
-            {
-                target.requirement_id
-                for target in self.requested_results
-                if target.requirement_id is not None
-            }
-            - {item.id for item in self.requirements}
-        )
-        if unknown_result_scopes:
-            raise ValueError(f"results refer to unknown requirement ids: {unknown_result_scopes}")
-        return self
-
-    @field_validator("requested_results", mode="before")
-    @classmethod
-    def _load_legacy_result_targets(cls, value: Any) -> Any:
-        if value is None:
-            return []
-        return [{"field": item} if isinstance(item, str) else item for item in value]
-
-    @model_validator(mode="after")
-    def _validate_required_geometry_bindings(self) -> Request:
-        value = self.structure_input
-        identity = value.get("molecule_identity")
-        if identity is not None:
-            from bg6022.molecule_identity import validate_identity_constraint
-
-            validate_identity_constraint(identity)
-        raw_bindings = value.get("required_bindings")
-        if raw_bindings is None:
-            return self
-        bindings = _REQUIRED_GEOMETRY_BINDINGS.validate_python(raw_bindings, strict=True)
         requirement_ids = {item.id for item in self.requirements}
-        for binding in bindings:
-            if (
-                binding.consumer_requirement_key is not None
-                or binding.source_requirement_key is not None
-            ):
-                raise ValueError("Request geometry bindings must use program requirement ids")
-            for requirement_id in (
-                binding.consumer_requirement_id,
-                binding.source_requirement_id,
-            ):
-                if requirement_id is not None and requirement_id not in requirement_ids:
+        for requirement in self.requirements:
+            for input_name, binding in requirement.input_bindings.items():
+                if (
+                    binding.source_requirement_id is not None
+                    and binding.source_requirement_id not in requirement_ids
+                ):
                     raise ValueError(
-                        f"geometry binding refers to unknown requirement id {requirement_id!r}"
+                        f"requirement {requirement.id!r} input {input_name!r} refers to "
+                        "an unknown source Requirement"
                     )
-        identities = [
-            (
-                "operation",
-                item.consumer_operation,
-                item.input_port,
-            )
-            if item.consumer_operation is not None
-            else ("tool", item.consumer_tool, item.input_port)
-            if item.consumer_tool is not None
-            else (
-                "requirement",
-                item.consumer_requirement_id,
-                item.input_port,
-            )
-            for item in bindings
-        ]
-        if len(identities) != len(set(identities)):
-            raise ValueError("required geometry bindings must be unique per calculation input")
+        for goal in self.answer_goals:
+            unknown = sorted(set(goal.requirement_ids) - requirement_ids)
+            if unknown:
+                raise ValueError(f"AnswerGoal refers to unknown Requirements: {unknown}")
         return self
 
     @field_validator("output_preferences", mode="before")
@@ -311,10 +621,160 @@ class Request(StrictModel):
         return validate_output_preferences(value)
 
     @property
+    def operations(self) -> list[Operation]:
+        """Read-only compatibility derived from canonical Requirements."""
+
+        from bg6022.tools.registry import build_registry
+
+        registry = build_registry()
+        return [
+            operation
+            for requirement in self.requirements
+            for operation in registry.get(requirement.capability).operations
+        ]
+
+    @property
+    def requested_results(self) -> list[ResultTarget]:
+        """Read-only compatibility projection derived from Requirement outputs."""
+
+        from bg6022.tools.registry import build_registry
+
+        registry = build_registry()
+        counts: dict[str, int] = {}
+        for requirement in self.requirements:
+            counts[requirement.capability] = counts.get(requirement.capability, 0) + 1
+        targets: list[ResultTarget] = []
+        for requirement in self.requirements:
+            tool = registry.get(requirement.capability)
+            for output in requirement.outputs:
+                descriptor = next(
+                    (item for item in tool.public_outputs() if item["name"] == output), None
+                )
+                if descriptor is None:
+                    continue
+                identity: dict[str, str] = {str(descriptor["kind"]): output}
+                if counts[requirement.capability] > 1:
+                    identity["requirement_id"] = requirement.id
+                target = ResultTarget(**identity)
+                if target not in targets:
+                    targets.append(target)
+        return sorted(targets, key=lambda target: target.port != "geometry")
+
+    @property
+    def explicit_parameters(self) -> dict[str, Any]:
+        """Compatibility view of unambiguous canonical Requirement parameters."""
+
+        values: dict[str, Any] = {}
+        conflicts: set[str] = set()
+        for requirement in self.requirements:
+            for name, value in requirement.parameters.items():
+                if name in values and values[name] != value:
+                    conflicts.add(name)
+                else:
+                    values[name] = value
+        return {name: value for name, value in values.items() if name not in conflicts}
+
+    @property
+    def user_modifications(self) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        for requirement in self.requirements:
+            sources = requirement.constraints.get("parameter_sources", {})
+            if not isinstance(sources, Mapping):
+                continue
+            for name, source in sources.items():
+                if source == "user_modification" and name in requirement.parameters:
+                    values[name] = requirement.parameters[name]
+        return values
+
+    @property
+    def user_modifications_by_requirement(self) -> dict[str, dict[str, Any]]:
+        result: dict[str, dict[str, Any]] = {}
+        for requirement in self.requirements:
+            sources = requirement.constraints.get("parameter_sources", {})
+            if not isinstance(sources, Mapping):
+                continue
+            updates = {
+                name: requirement.parameters[name]
+                for name, source in sources.items()
+                if source == "user_modification" and name in requirement.parameters
+            }
+            if updates:
+                result[requirement.id] = updates
+        return result
+
+    @property
+    def structure_input(self) -> dict[str, Any]:
+        """Read-only compatibility view for a single-subject legacy caller."""
+
+        if len(self.subjects) != 1:
+            return {}
+        value = dict(next(iter(self.subjects.values())).structure_input)
+        bindings: list[dict[str, Any]] = []
+        from bg6022.tools.registry import build_registry
+
+        registry = build_registry()
+        requirement_counts: dict[str, int] = {}
+        for requirement in self.requirements:
+            requirement_counts[requirement.capability] = (
+                requirement_counts.get(requirement.capability, 0) + 1
+            )
+        requirements_by_id = {item.id: item for item in self.requirements}
+        for requirement in self.requirements:
+            for input_port, binding in requirement.input_bindings.items():
+                consumer_tool = registry.get(requirement.capability)
+                if requirement_counts[requirement.capability] > 1:
+                    consumer = {"consumer_requirement_id": requirement.id}
+                elif len(consumer_tool.operations) == 1:
+                    consumer = {"consumer_operation": consumer_tool.operations[0]}
+                else:
+                    consumer = {"consumer_tool": requirement.capability}
+                if binding.artifact_alias is not None:
+                    source = {
+                        "source_operation": None,
+                        "source_port": binding.artifact_alias,
+                    }
+                else:
+                    source_requirement = requirements_by_id[binding.source_requirement_id]
+                    source_tool = registry.get(source_requirement.capability)
+                    if len(source_tool.operations) == 1:
+                        source = {
+                            "source_operation": source_tool.operations[0],
+                            "source_port": binding.source_port,
+                        }
+                    else:
+                        source = {
+                            "source_requirement_id": binding.source_requirement_id,
+                            "source_port": binding.source_port,
+                        }
+                bindings.append(
+                    {
+                        **consumer,
+                        "input_port": input_port,
+                        **source,
+                    }
+                )
+        if bindings:
+            value["required_bindings"] = bindings
+        elif value.get("history_geometry_alias") is not None:
+            value["required_bindings"] = []
+        return value
+
+    @property
     def operation(self) -> Operation | None:
         """Read-only compatibility for old single-operation callers."""
 
-        return self.operations[0] if len(self.operations) == 1 else None
+        operations = self.operations
+        return operations[0] if len(operations) == 1 else None
+
+    def with_subject_structure_input(
+        self, subject_id: str, structure_input: Mapping[str, Any]
+    ) -> Request:
+        subject = self.subjects.get(subject_id)
+        if subject is None:
+            raise ValueError(f"unknown subject id {subject_id!r}")
+        subjects = dict(self.subjects)
+        subjects[subject_id] = subject.model_copy(update={"structure_input": dict(structure_input)})
+        return self.model_copy(update={"subjects": subjects})
 
 
 class InputReference(StrictModel):
@@ -520,7 +980,7 @@ class Run(StrictModel):
         return self.active_seconds
 
 
-ExecuteFunction = Callable[[Step, Run, Any], Result]
+ExecuteFunction = Callable[[Step, Any], Result]
 ParameterValidationFunction = Callable[[dict[str, Any], Mapping[str, Any]], None]
 ResultValidationFunction = Callable[[Run, Step, Result], bool]
 ResultProperty = StrictStr
@@ -542,8 +1002,8 @@ class RepairOption:
 
     action: str
     failed_step_id: str
-    candidate_artifact_id: str | None
     parameter_patch: dict[str, Any]
+    input_aliases: dict[str, str]
     evidence_refs: tuple[str, ...]
     reason: str
 
@@ -554,12 +1014,6 @@ class RepairOption:
     @property
     def parameters(self) -> Mapping[str, Any]:
         return self.parameter_patch
-
-    @property
-    def input_aliases(self) -> Mapping[str, str]:
-        if self.candidate_artifact_id is None:
-            return {}
-        return {"last_complete_geometry": self.candidate_artifact_id}
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -585,6 +1039,7 @@ class Tool(StrictModel):
     result_properties: dict[str, ResultProperty] = Field(default_factory=dict)
     result_metadata: dict[str, dict[str, str]] = Field(default_factory=dict)
     success_conditions: list[str] = Field(default_factory=list)
+    planning_role: Literal["task", "preparation"] = "task"
     scientific_checks: dict[str, str] = Field(default_factory=dict)
     scientific_check_input_ports: dict[str, str] = Field(default_factory=dict)
     result_check_prerequisites: dict[str, list[str]] = Field(default_factory=dict)
@@ -607,7 +1062,7 @@ class Tool(StrictModel):
         default=None, exclude=True, repr=False
     )
     apply_repair_function: (
-        Callable[[RepairOption, Run, Step, Result, Mapping[str, Any]], tuple[Step, dict[str, Any]]]
+        Callable[[RepairOption, Run, Step, Result, Mapping[str, Any]], tuple[Plan, dict[str, Any]]]
         | None
     ) = Field(default=None, exclude=True, repr=False)
     parameter_validation_function: ParameterValidationFunction | None = Field(
@@ -765,10 +1220,12 @@ class Tool(StrictModel):
         canonical_public_outputs(self)
         return self
 
-    def execute(self, step: Step, run: Run, *, cancel: Any) -> Result:
+    def execute(self, step: Step, context: ToolCallContext) -> Result:
         if self.execute_function is None:
             raise RuntimeError(f"tool {self.name!r} has no executable implementation")
-        return self.execute_function(step, run, cancel)
+        if context.step.id != step.id or context.step.tool != self.name:
+            raise ValueError("ToolCallContext does not match the invoked Step and Tool")
+        return self.execute_function(step, context)
 
     def preflight(self) -> None:
         if self.preflight_function is not None:
@@ -794,7 +1251,7 @@ class Tool(StrictModel):
         step: Step,
         result: Result,
         proposal: Mapping[str, Any],
-    ) -> tuple[Step, dict[str, Any]]:
+    ) -> tuple[Plan, dict[str, Any]]:
         if self.apply_repair_function is None:
             raise ValueError(f"tool {self.name!r} does not support repairs")
         return self.apply_repair_function(option, run, step, result, proposal)
@@ -882,14 +1339,18 @@ class Tool(StrictModel):
 
 __all__ = [
     "Artifact",
+    "AnswerGoal",
     "InputReference",
     "Plan",
     "Request",
+    "Requirement",
+    "RequirementInputBinding",
     "Result",
     "ResultTarget",
     "ResultProperty",
     "Run",
     "RunStatus",
+    "Subject",
     "Step",
     "Tool",
 ]
@@ -931,5 +1392,14 @@ def _validate_partial_model(
     try:
         validated = partial_model.model_validate(parameters, strict=True)
     except Exception as error:
+        errors_method = getattr(error, "errors", None)
+        if callable(errors_method):
+            try:
+                errors = errors_method(include_url=False)
+            except TypeError:
+                errors = errors_method()
+            details = "; ".join(str(item.get("msg") or "invalid parameter") for item in errors)
+            if details:
+                raise ValueError(details) from error
         raise ValueError(str(error)) from error
     return validated.model_dump(mode="python", exclude_none=True)

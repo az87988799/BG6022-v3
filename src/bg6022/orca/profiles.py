@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from bg6022.tools.molecule import SUPPORTED_ELEMENTS
 
@@ -16,6 +17,7 @@ class MethodProfile:
     supported_environments: frozenset[str]
     supported_elements: frozenset[str]
     supported_operations: frozenset[str]
+    family: str = ""
     display_name: str = ""
     aliases: frozenset[str] = frozenset()
     validated_orca_versions: frozenset[str] = frozenset()
@@ -29,12 +31,23 @@ class ParameterResolution:
     missing_fields: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class MethodResolution:
+    """Deterministic resolution of a user-facing method name."""
+
+    status: Literal["resolved", "proposed", "ambiguous", "unsupported"]
+    profile: str | None = None
+    candidates: tuple[str, ...] = ()
+    source: str | None = None
+
+
 R2SCAN3C = MethodProfile(
     name="r2scan3c",
     orca_keyword="r2SCAN-3c",
     supported_environments=frozenset({"gas"}),
     supported_elements=SUPPORTED_ELEMENTS,
     supported_operations=frozenset({"SP", "Opt", "Freq"}),
+    family="r2scan3c",
     display_name="r²SCAN-3c",
     aliases=frozenset({"r2scan3c", "r2scan-3c", "r2scan_3c"}),
     repair_options_by_operation={
@@ -50,6 +63,7 @@ B3LYP_D3BJ_DEF2SVP = MethodProfile(
     supported_environments=frozenset({"gas"}),
     supported_elements=frozenset({"H", "C", "N", "O"}),
     supported_operations=frozenset({"SP", "Opt", "Freq"}),
+    family="b3lyp",
     display_name="B3LYP-D3(BJ)/def2-SVP（RIJCOSX, def2/J）",
     aliases=frozenset({"b3lyp-d3(bj)/def2-svp", "b3lyp-d3bj/def2-svp"}),
     validated_orca_versions=frozenset({"6.1.1"}),
@@ -62,6 +76,7 @@ PBE0_D3BJ_DEF2SVP = MethodProfile(
     supported_environments=frozenset({"gas"}),
     supported_elements=frozenset({"H", "C", "N", "O"}),
     supported_operations=frozenset({"SP", "Opt", "Freq"}),
+    family="pbe0",
     display_name="PBE0-D3(BJ)/def2-SVP（RIJCOSX, def2/J）",
     aliases=frozenset({"pbe0-d3(bj)/def2-svp", "pbe0-d3bj/def2-svp"}),
     repair_options_by_operation={"SP": (), "Opt": (), "Freq": ()},
@@ -88,6 +103,7 @@ def method_capability_catalog() -> list[dict[str, Any]]:
     return [
         {
             "name": profile.name,
+            "family": profile.family,
             "display_name": profile.display_name or profile.name,
             "orca_keyword": profile.orca_keyword,
             "aliases": sorted(profile.aliases),
@@ -102,6 +118,56 @@ def method_capability_catalog() -> list[dict[str, Any]]:
         }
         for profile in list_profiles()
     ]
+
+
+def resolve_method_request(text: str) -> MethodResolution:
+    """Resolve an exact profile or unique method family without guessing."""
+
+    normalized = _normalize_method_request(text)
+    if not normalized:
+        return MethodResolution(status="unsupported")
+    profiles = list_profiles()
+    exact = [
+        profile
+        for profile in profiles
+        if normalized
+        in {
+            _normalize_method_request(profile.name),
+            _normalize_method_request(profile.display_name),
+            *(_normalize_method_request(alias) for alias in profile.aliases),
+        }
+    ]
+    if len(exact) == 1:
+        return MethodResolution(status="resolved", profile=exact[0].name, source="exact_profile")
+    if len(exact) > 1:
+        return MethodResolution(
+            status="ambiguous",
+            candidates=tuple(sorted(profile.name for profile in exact)),
+            source="exact_profile",
+        )
+
+    family = [
+        profile for profile in profiles if _normalize_method_request(profile.family) == normalized
+    ]
+    if len(family) == 1:
+        return MethodResolution(
+            status="proposed",
+            profile=family[0].name,
+            candidates=(family[0].name,),
+            source="unique_family",
+        )
+    if len(family) > 1:
+        return MethodResolution(
+            status="ambiguous",
+            candidates=tuple(sorted(profile.name for profile in family)),
+            source="family",
+        )
+    return MethodResolution(status="unsupported")
+
+
+def _normalize_method_request(value: Any) -> str:
+    text = str(value).strip().casefold().replace("²", "2")
+    return re.sub(r"\s+", "", text)
 
 
 def resolve_parameters(
@@ -252,6 +318,7 @@ def _multiplicity_facts(facts: Mapping[str, Any]) -> Mapping[str, Any]:
 
 __all__ = [
     "MethodProfile",
+    "MethodResolution",
     "PROFILES",
     "ParameterResolution",
     "B3LYP_D3BJ_DEF2SVP",
@@ -260,5 +327,6 @@ __all__ = [
     "list_profiles",
     "method_capability_catalog",
     "normalize_method_profile",
+    "resolve_method_request",
     "resolve_parameters",
 ]

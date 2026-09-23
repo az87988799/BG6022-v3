@@ -64,6 +64,184 @@ environment = 'gas'
     return load_config(config_path)
 
 
+def test_independent_method_optimizations_keep_answer_goal_out_of_plan(tmp_path: Path) -> None:
+    registry = build_registry()
+    intake = IntakeOutput.model_validate(
+        {
+            "intent": "chemistry_compute",
+            "subjects": {
+                "water": {
+                    "key": "water",
+                    "molecule_query": "water",
+                    "molecule_input_kind": "name",
+                    "molecule_name_evidence": "水分子",
+                }
+            },
+            "requirements": [
+                {
+                    "key": "opt_r2scan",
+                    "subject_key": "water",
+                    "capability": "optimize_geometry",
+                    "parameters": {
+                        "method_request": "r²SCAN-3c",
+                        "charge": 0,
+                        "multiplicity": 1,
+                    },
+                    "outputs": ["opt_final_electronic_energy"],
+                },
+                {
+                    "key": "opt_pbe0",
+                    "subject_key": "water",
+                    "capability": "optimize_geometry",
+                    "parameters": {
+                        "method_request": "PBE0",
+                        "charge": 0,
+                        "multiplicity": 1,
+                    },
+                    "outputs": ["opt_final_electronic_energy"],
+                },
+            ],
+            "answer_goals": [
+                {
+                    "kind": "compare",
+                    "requirement_keys": ["opt_r2scan", "opt_pbe0"],
+                    "output": "opt_final_electronic_energy",
+                    "mode": "side_by_side",
+                }
+            ],
+        },
+        strict=True,
+    )
+    request = request_from_intake(
+        "分别用 r²SCAN-3c 与 PBE0 方法优化水分子，并比较它们的能量",
+        intake,
+        request_id="request_method_opt_comparison",
+        registry=registry,
+    )
+    requirements = request.requirements
+    plan_proposal = PlanProposal(
+        steps=[
+            PlanStepProposal(
+                key="resolve_water",
+                tool="resolve_molecule",
+                subject_id=next(iter(request.subjects)),
+                parameters={"query": "water", "input_kind": "name"},
+            ),
+            PlanStepProposal(
+                key="generate_water_geometry",
+                tool="generate_geometry",
+                subject_id=next(iter(request.subjects)),
+                inputs={
+                    "molecule": InputBindingProposal(step_key="resolve_water", port="molecule")
+                },
+            ),
+            *[
+                PlanStepProposal(
+                    key=f"step_{item.id}",
+                    tool=item.capability,
+                    requirement_id=item.id,
+                    subject_id=item.subject_id,
+                    parameters=dict(item.parameters),
+                    inputs={
+                        "geometry": InputBindingProposal(
+                            step_key="generate_water_geometry", port="geometry"
+                        )
+                    },
+                )
+                for item in requirements
+            ],
+        ],
+        requested_results=[
+            PlanTargetProposal(step_key=f"step_{item.id}", field="opt_final_electronic_energy")
+            for item in requirements
+        ],
+    )
+    plan = proposal_to_plan(
+        request,
+        plan_proposal,
+        registry,
+        plan_id="plan_method_opt_comparison",
+        artifact_aliases={},
+    )
+
+    assert len(request.subjects) == 1
+    assert len(requirements) == 2
+    assert [item.capability for item in requirements] == [
+        "optimize_geometry",
+        "optimize_geometry",
+    ]
+    assert len(request.answer_goals) == 1
+    assert request.answer_goals[0].mode == "side_by_side"
+    assert all(item.capability != "same_geometry_method_energy_difference" for item in requirements)
+    optimization_steps = [step for step in plan.steps if step.tool == "optimize_geometry"]
+    assert len({step.requirement_id for step in optimization_steps}) == 2
+    assert optimization_steps[0].inputs["geometry"] == optimization_steps[1].inputs["geometry"]
+    assert [step.parameters["method_profile"] for step in optimization_steps] == [
+        "r2scan3c",
+        "pbe0_d3bj_def2svp",
+    ]
+    assert requirements[1].constraints["method_resolution"]["status"] == "proposed"
+
+    registry = build_registry()
+    with pytest.raises(ValueError, match="must provide requirement_id"):
+        proposal_to_plan(
+            request,
+            PlanProposal(
+                steps=[
+                    PlanStepProposal(
+                        key="first",
+                        tool="optimize_geometry",
+                        parameters=dict(requirements[0].parameters),
+                        inputs={
+                            "geometry": InputBindingProposal(
+                                step_key="generate_water_geometry", port="geometry"
+                            )
+                        },
+                    ),
+                    PlanStepProposal(
+                        key="second",
+                        tool="optimize_geometry",
+                        parameters=dict(requirements[1].parameters),
+                        inputs={
+                            "geometry": InputBindingProposal(
+                                step_key="generate_water_geometry", port="geometry"
+                            )
+                        },
+                    ),
+                ],
+                requested_results=plan_proposal.requested_results,
+            ),
+            registry,
+            plan_id="plan_missing_requirement_ids",
+            artifact_aliases={},
+        )
+
+    config = _config(tmp_path)
+    config.runtime.confirm_before_compute = False
+    agent = Agent(config, build_registry(config))
+    run = agent._create_chat_run(request, plan)
+    assert run.execution_permission is False
+    answer_facts = [
+        {
+            "requirement_id": requirement.id,
+            "name": "opt_final_electronic_energy",
+            "result_property": "electronic_energy",
+            "output_ref": f"out_{index}",
+            "method_profile": plan_step.parameters["method_profile"],
+        }
+        for index, (requirement, plan_step) in enumerate(
+            zip(requirements, optimization_steps, strict=True), 1
+        )
+    ]
+    answer_goals, comparison_note = Agent._answer_goal_context(run, answer_facts)
+    assert answer_goals[0]["mode"] == "side_by_side"
+    assert [item["output_ref"] for item in answer_goals[0]["calculations"]] == [
+        "out_1",
+        "out_2",
+    ]
+    assert comparison_note is not None and "绝对能量差" in comparison_note
+
+
 def test_distance_parameters_and_exact_measurement() -> None:
     geometry = parse_xyz_bytes(M3_XYZ)
     assert measure_distance(geometry, GeometryDistanceParameters(atom_i=1, atom_j=2)) == 1.0

@@ -1,4 +1,4 @@
-"""Compare two verified electronic-energy Artifacts on the same structure."""
+"""Compare two verified energies from the same geometry and electronic state."""
 
 from __future__ import annotations
 
@@ -6,32 +6,33 @@ import hashlib
 import json
 import math
 import re
-from threading import Event
 from typing import Any
 
 from bg6022.config import AppConfig
 from bg6022.models import Result, Run, Step, Tool
 from bg6022.orca.profiles import get_profile
 from bg6022.output_contracts import is_compatible_value
-from bg6022.session import artifact_path, find_artifact, run_directory, save_run
+from bg6022.session import artifact_path, find_artifact, run_directory
 from bg6022.tools.molecule import resolve_artifact_reference
+from bg6022.tools.runtime import ToolCallContext
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def make_energy_difference_tool(config: AppConfig | None = None) -> Tool:
-    def execute(step: Step, run: Run, cancel: Event) -> Result:
+    def execute(step: Step, context: ToolCallContext) -> Result:
         if config is None:
-            raise RuntimeError("tool 'energy_difference' is a description-only Tool")
-        return execute_energy_difference(config, step=step, run=run, cancel=cancel)
+            raise RuntimeError("tool 'same_geometry_method_energy_difference' is description-only")
+        return execute_energy_difference(config, step=step, context=context)
 
     return Tool(
-        name="energy_difference",
+        name="same_geometry_method_energy_difference",
         display_name="方法间电子能差",
         description=(
-            "Subtract two verified electronic-energy Artifacts on the same molecular "
-            "geometry and electronic state. The result is method-dependent and does not "
-            "identify which method is more accurate."
+            "Calculate method B minus method A from two verified energy_data Artifacts "
+            "with the same molecular geometry, charge, and multiplicity, but different "
+            "registered method profiles. This Tool does not compare separately optimized "
+            "geometries and does not identify which method is more accurate."
         ),
         input_ports={"energy_a": "energy_data", "energy_b": "energy_data"},
         results={"method_energy_difference": "Eh"},
@@ -55,16 +56,13 @@ def make_energy_difference_tool(config: AppConfig | None = None) -> Tool:
     )
 
 
-def execute_energy_difference(config: AppConfig, *, step: Step, run: Run, cancel: Event) -> Result:
-    attempt = _next_attempt(run, step.id)
-    relative = f"{step.id}/attempt-{attempt:02d}"
-    (run_directory(config.data_root_path, run.id) / relative).mkdir(parents=True, exist_ok=True)
+def execute_energy_difference(config: AppConfig, *, step: Step, context: ToolCallContext) -> Result:
     input_bindings: dict[str, str] = {}
     status = "failed"
     values: dict[str, Any] = {}
     diagnostics: dict[str, Any] = {}
     try:
-        if cancel.is_set():
+        if context.cancel.is_set():
             status = "cancelled"
             diagnostics = {
                 "category": "cancelled",
@@ -75,28 +73,29 @@ def execute_energy_difference(config: AppConfig, *, step: Step, run: Run, cancel
             for input_name in ("energy_a", "energy_b"):
                 reference = step.inputs.get(input_name)
                 if reference is None:
-                    raise ValueError(f"energy_difference requires {input_name!r} input")
+                    raise ValueError(
+                        f"same_geometry_method_energy_difference requires {input_name!r} input"
+                    )
                 if reference.step_id is None or reference.port != "energy_data":
                     raise ValueError(
                         f"{input_name} must reference a current successful energy_data output port"
                     )
                 artifact = resolve_artifact_reference(
-                    config, run, reference, expected_type="energy_data"
+                    config, context.run, reference, expected_type="energy_data"
                 )
                 input_bindings[input_name] = artifact.id
                 energy_artifacts[input_name] = artifact
             energy_records = []
             for input_name in ("energy_a", "energy_b"):
                 artifact = energy_artifacts[input_name]
-                path = artifact_path(config.data_root_path, run, artifact)
-                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload = json.loads(context.read_input(input_name))
                 energy = _validated_energy_data(payload, artifact)
-                _validate_current_energy_source(config, run, artifact, energy)
+                _validate_current_energy_source(config, context.run, artifact, energy)
                 energy_records.append(energy)
 
             energy_a, energy_b = energy_records
             _validate_pair(energy_a, energy_b)
-            if cancel.is_set():
+            if context.cancel.is_set():
                 status = "cancelled"
                 diagnostics = {
                     "category": "cancelled",
@@ -134,28 +133,12 @@ def execute_energy_difference(config: AppConfig, *, step: Step, run: Run, cancel
         status = "failed"
         diagnostics = {"category": "energy_comparison_failed", "reason": str(error)}
 
-    run.attempts.append(
-        {
-            "step_id": step.id,
-            "attempt": attempt,
-            "phase": "finished",
-            "status": status,
-            "artifact_ids": [],
-            "output_ports": {},
-            "input_artifact_ids": list(input_bindings.values()),
-        }
-    )
-    save_run(config.data_root_path, run)
-    return Result(
-        run_id=run.id,
-        step_id=step.id,
-        attempt=attempt,
+    return context.make_result(
         status=status,  # type: ignore[arg-type]
         values=values,
         diagnostics=diagnostics,
         input_bindings=input_bindings,
         input_artifact_ids=list(input_bindings.values()),
-        attempt_relative_path=relative,
     )
 
 
@@ -317,13 +300,6 @@ def _validate_pair(energy_a: dict[str, Any], energy_b: dict[str, Any]) -> None:
             raise ValueError(
                 f"energy inputs differ in {name}; a controlled method comparison is invalid"
             )
-
-
-def _next_attempt(run: Run, step_id: str) -> int:
-    attempts = [
-        int(item.get("attempt", 0)) for item in run.attempts if item.get("step_id") == step_id
-    ]
-    return max(attempts, default=0) + 1
 
 
 __all__ = ["execute_energy_difference", "make_energy_difference_tool"]

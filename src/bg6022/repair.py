@@ -7,7 +7,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 
 from bg6022.llm import LlmClient
-from bg6022.models import RepairOption, Result, Run, Step, Tool
+from bg6022.models import Plan, RepairOption, Result, Run, Step, Tool
 from bg6022.planner import load_prompt
 
 
@@ -105,7 +105,7 @@ def apply_repair_proposal(
     step: Step,
     result: Result,
     tool: Tool,
-) -> tuple[Step, dict[str, Any]]:
+) -> tuple[Plan, dict[str, Any]]:
     if proposal.failed_step_key != step.id:
         raise ValueError("repair proposal targets a different step")
     if proposal.selected_option_id != option.option_id:
@@ -192,10 +192,10 @@ def _context(
                     name: original_request.get(name)
                     for name in (
                         "description",
-                        "operations",
-                        "requested_results",
-                        "explicit_parameters",
-                        "user_modifications",
+                        "subjects",
+                        "requirements",
+                        "answer_goals",
+                        "missing_fields",
                     )
                     if name in original_request
                 },

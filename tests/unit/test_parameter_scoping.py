@@ -332,13 +332,16 @@ def test_preparation_error_fails_run_and_closes_active_interval(
                         "environment": "gas",
                         "charge": 0,
                         "multiplicity": 1,
-                        "geom_maxiter": 2,
                     },
                     inputs={"geometry": InputReference(artifact_id="missing_geometry")},
                 )
             ],
         ),
     )
+    invalid_step = run.plan.steps[0].model_copy(
+        update={"parameters": {**run.plan.steps[0].parameters, "geom_maxiter": 2}}
+    )
+    run.plan = run.plan.model_copy(update={"steps": [invalid_step]})
 
     agent.advance(run)
 
@@ -683,7 +686,8 @@ def test_repeated_unknown_intake_parameter_stops_before_planner_or_run(
     try:
         response = agent.handle_message("几何优化迭代上限为100")
 
-        assert "请求解析阶段未获得有效模型响应（schema_error）" in response.text
+        assert "未注册的 Tool 参数字段" in response.text
+        assert "max_iterations" in response.text
         assert response.run is None
         assert agent._coerce_run(None) is None
         assert [call.purpose for call in llm.calls] == ["intake", "intake"]

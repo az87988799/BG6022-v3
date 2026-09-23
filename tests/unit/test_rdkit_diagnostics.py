@@ -5,6 +5,8 @@ import logging
 from pathlib import Path
 from threading import Event
 
+from tool_context import make_tool_context
+
 from bg6022.config import load_config
 from bg6022.diagnostics import configure_rdkit_logging
 from bg6022.models import InputReference, Plan, Request, Run, Step
@@ -109,7 +111,9 @@ def test_rdkit_helper_preserves_stderr_and_geometry_tool_writes_raw_diagnostic(
     )
     step.inputs["molecule"] = InputReference(artifact_id=molecule.id)
 
-    result = execute_generate_geometry(config, step=step, run=run, cancel=Event())
+    result = execute_generate_geometry(
+        config, step=step, context=make_tool_context(config, run, step)
+    )
 
     assert result.status == "succeeded"
     raw_path = Path(result.diagnostics["raw_paths"]["rdkit_stderr"])

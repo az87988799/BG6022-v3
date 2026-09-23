@@ -16,8 +16,11 @@ def test_registered_tools_are_public() -> None:
         "frequency",
         "geometry_distance",
         "geometry_angle",
-        "energy_difference",
+        "same_geometry_method_energy_difference",
     }
+    registry = build_registry()
+    assert "energy_difference" not in registry.names()
+    assert registry.get("energy_difference").name == "same_geometry_method_energy_difference"
 
 
 def test_orca_result_properties_are_declared_as_machine_readable_contracts() -> None:

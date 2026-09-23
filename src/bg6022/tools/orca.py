@@ -6,7 +6,6 @@ import json
 import math
 import time
 from pathlib import Path
-from threading import Event
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator
@@ -35,20 +34,17 @@ from bg6022.output_contracts import is_compatible_value
 from bg6022.session import (
     RuntimeLock,
     artifact_path,
-    attempt_directory,
     execution_fingerprint,
     find_artifact,
     new_id,
-    register_bytes_artifact,
-    register_file_artifact,
     run_directory,
-    save_run,
     sha256_bytes,
     sha256_file,
     utc_now,
     write_execution_guard,
 )
 from bg6022.tools.molecule import ParsedGeometry, parse_xyz_bytes, validate_electronic_state
+from bg6022.tools.runtime import ToolCallContext
 
 
 class OrcaParameters(BaseModel):
@@ -259,14 +255,13 @@ def _make_tool(
     result_check_prerequisites: dict[str, list[str]] | None = None,
     request_parameters: list[str],
 ) -> Tool:
-    def execute(step: Step, run: Run, cancel: Event) -> Result:
+    def execute(step: Step, context: ToolCallContext) -> Result:
         if config is None:
             raise RuntimeError(f"tool {name!r} is a description-only Tool")
         return execute_orca_step(
             config,
             step=step,
-            run=run,
-            cancel=cancel,
+            context=context,
             operation=operation,
             parameter_model=parameter_model,
         )
@@ -297,27 +292,25 @@ def _make_tool(
                     dict(pending.get("parameter_sources", {})) if isinstance(pending, dict) else {}
                 ),
             )
+        requirement = next(
+            (item for item in request.requirements if item.id == step.requirement_id), None
+        )
+        request_parameters = (
+            dict(requirement.parameters)
+            if requirement is not None
+            else dict(request.explicit_parameters)
+        )
+        user_modifications = (
+            dict(request.user_modifications_by_requirement.get(requirement.id, {}))
+            if requirement is not None
+            else dict(request.user_modifications)
+        )
         resolution = resolve_parameters(
-            {
-                **request.explicit_parameters,
-                **(
-                    next(
-                        (
-                            item.parameters
-                            for item in request.requirements
-                            if item.id == step.requirement_id
-                        ),
-                        {},
-                    )
-                ),
-            },
+            request_parameters,
             dict(context.get("structure_facts", {})),
             supplied,
             dict(context.get("defaults", {})),
-            user_modifications={
-                **request.user_modifications,
-                **request.user_modifications_by_requirement.get(step.requirement_id or "", {}),
-            },
+            user_modifications=user_modifications,
             parameter_fields=tuple(parameter_model.model_fields),
         )
         if resolution.missing_fields:
@@ -347,24 +340,31 @@ def _make_tool(
         step: Step,
         result: Result,
         proposal: Any,
-    ) -> tuple[Step, dict[str, Any]]:
+    ) -> tuple[Plan, dict[str, Any]]:
         aliases = dict(option.input_aliases)
         selected_aliases = list(proposal.get("input_aliases", []))
         if any(alias not in aliases for alias in selected_aliases):
             raise ValueError("repair proposal selected an input alias not offered by the Tool")
-        candidate_id = aliases[selected_aliases[0]] if selected_aliases else None
         from bg6022.orca.repair_rules import validate_repair_option
 
-        return validate_repair_option(
+        replacement, record = validate_repair_option(
             option,
             run=run,
             step=step,
             result=result,
             requested_action=str(proposal.get("option_id", "")),
             requested_patch=dict(proposal.get("parameters", {})),
-            requested_candidate_id=candidate_id,
+            requested_input_aliases=selected_aliases,
             evidence_refs=list(proposal.get("evidence_refs", [])),
         )
+        candidate_plan = Plan.model_validate(
+            {
+                **run.plan.model_dump(mode="python"),
+                "steps": [replacement if item.id == step.id else item for item in run.plan.steps],
+            },
+            strict=True,
+        )
+        return candidate_plan, record
 
     tool = Tool(
         name=name,
@@ -660,11 +660,11 @@ def execute_orca_step(
     config: AppConfig,
     *,
     step: Step,
-    run: Run,
-    cancel: Event,
+    context: ToolCallContext,
     operation: str,
     parameter_model: type[OrcaParameters],
 ) -> Result:
+    run = context.run
     _check_execution_contract(config, run, step)
     parameters = parameter_model.model_validate(step.parameters, strict=True)
     profile = get_profile(parameters.method_profile)
@@ -677,14 +677,18 @@ def execute_orca_step(
     reference = step.inputs.get("geometry")
     if reference is None:
         raise ValueError("ORCA Tool requires a geometry input reference")
-    geometry_artifact = _resolve_geometry_reference(
+    geometry_artifact = context.frozen_inputs.get("geometry")
+    if geometry_artifact is None:
+        raise ValueError("ORCA geometry input was not frozen for this invocation")
+    resolved_geometry = _resolve_geometry_reference(
         config,
         run,
         reference,
         allow_restart_candidate=_authorized_restart_candidate(run, step, reference),
     )
-    geometry_source = artifact_path(config.data_root_path, run, geometry_artifact)
-    geometry_bytes = geometry_source.read_bytes()
+    if resolved_geometry.id != geometry_artifact.id:
+        raise ValueError("ORCA geometry reference differs from its frozen input")
+    geometry_bytes = context.read_input("geometry")
     geometry = parse_xyz_bytes(geometry_bytes, supported_elements=profile.supported_elements)
     validate_electronic_state(
         geometry, charge=parameters.charge, multiplicity=parameters.multiplicity
@@ -698,9 +702,7 @@ def execute_orca_step(
     try:
         return _execute_prepared_attempt(
             config,
-            step=step,
-            run=run,
-            cancel=cancel,
+            context=context,
             operation=operation,
             parameters=parameters,
             geometry_artifact=geometry_artifact,
@@ -716,9 +718,7 @@ def execute_orca_step(
 def _execute_prepared_attempt(
     config: AppConfig,
     *,
-    step: Step,
-    run: Run,
-    cancel: Event,
+    context: ToolCallContext,
     operation: str,
     parameters: OrcaParameters,
     geometry_artifact: Any,
@@ -726,9 +726,12 @@ def _execute_prepared_attempt(
     geometry_bytes: bytes,
     owns_active_interval: bool,
 ) -> Result:
-    attempt = _next_attempt(run, step.id)
-    attempt_dir = attempt_directory(config.data_root_path, run.id, step.id, attempt)
-    attempt_dir.mkdir(parents=True, exist_ok=False)
+    run = context.run
+    step = context.step
+    cancel = context.cancel
+    attempt = context.attempt
+    attempt_dir = context.workdir
+    attempt_record = context.attempt_record
     (attempt_dir / "geometry.xyz").write_bytes(geometry_bytes)
     expected_geometry_sha = geometry_artifact.sha256
     if sha256_file(attempt_dir / "geometry.xyz") != expected_geometry_sha:
@@ -747,20 +750,15 @@ def _execute_prepared_attempt(
     )
     input_bytes = render_input(input_spec)
     (attempt_dir / "input.inp").write_bytes(input_bytes)
-    attempt_record = {
-        "step_id": step.id,
-        "attempt": attempt,
-        "relative_path": attempt_dir.relative_to(Path(config.data_root_path).resolve()).as_posix(),
-        "operation": operation,
-        "phase": "prepared",
-        "input_geometry_artifact_id": geometry_artifact.id,
-        "input_sha256": sha256_bytes(input_bytes),
-        "geometry_sha256": sha256_bytes(geometry_bytes),
-    }
-    run.step_status[step.id] = "running"
-    run.attempts.append(attempt_record)
+    context.update_attempt(
+        checkpoint=False,
+        operation=operation,
+        input_geometry_artifact_id=geometry_artifact.id,
+        input_sha256=sha256_bytes(input_bytes),
+        geometry_sha256=sha256_bytes(geometry_bytes),
+    )
     # A prepared attempt is durable before any process can be created.
-    save_run(config.data_root_path, run)
+    context.checkpoint()
 
     runner_resources = RunnerResources(
         cores=int(run.resources["cores"]),
@@ -793,12 +791,10 @@ def _execute_prepared_attempt(
                 write_execution_guard(config.data_root_path, guard)
 
                 def on_started(started: ProcessFacts) -> None:
-                    attempt_record.update(
-                        {
-                            "phase": "started",
-                            "pid": started.pid,
-                            "process_created_at": started.process_created_at,
-                        }
+                    context.update_attempt(
+                        phase="started",
+                        pid=started.pid,
+                        process_created_at=started.process_created_at,
                     )
                     write_execution_guard(
                         config.data_root_path,
@@ -809,7 +805,6 @@ def _execute_prepared_attempt(
                             "process_created_at": started.process_created_at,
                         },
                     )
-                    save_run(config.data_root_path, run)
 
                 deadline = time.monotonic() + allowed_seconds
                 process_facts = run_orca(
@@ -877,29 +872,21 @@ def _execute_prepared_attempt(
         (stdout_path, "orca_output", "stdout"),
         (stderr_path, "orca_output", "stderr"),
     ):
-        artifact = register_file_artifact(
-            config.data_root_path,
-            run,
+        artifact = context.register_file(
             path,
             artifact_type=artifact_type,
             role=role,
             source=f"{step.id}/attempt-{attempt:02d}/{path.name}",
-            step_id=step.id,
-            attempt=attempt,
         )
         artifact_ids.append(artifact.id)
 
     hessian_artifact = None
     if operation == "Freq" and hessian_path_present:
-        hessian_artifact = register_file_artifact(
-            config.data_root_path,
-            run,
+        hessian_artifact = context.register_file(
             hessian_path,
             artifact_type="orca_hessian",
             role="verified_hessian" if outcome.success else "raw_hessian",
             source=f"{step.id}/attempt-{attempt:02d}/input.hess",
-            step_id=step.id,
-            attempt=attempt,
             metadata={
                 "validated_for_input_geometry_sha256": (
                     expected_geometry_sha if facts.hessian_valid is True else None
@@ -920,15 +907,11 @@ def _execute_prepared_attempt(
             and facts.stdout_geometry is not None
             and facts.geometry_consistent is True
         ):
-            artifact = register_file_artifact(
-                config.data_root_path,
-                run,
+            artifact = context.register_file(
                 output_xyz_path,
                 artifact_type="molecular_geometry",
                 role="optimized_geometry",
                 source=f"{step.id}/attempt-{attempt:02d}/input.xyz",
-                step_id=step.id,
-                attempt=attempt,
             )
             artifact_ids.append(artifact.id)
             output_ports["optimized_geometry"] = artifact.id
@@ -940,15 +923,11 @@ def _execute_prepared_attempt(
             and facts.stdout_geometry is not None
             and facts.geometry_consistent is True
         ):
-            candidate = register_file_artifact(
-                config.data_root_path,
-                run,
+            candidate = context.register_file(
                 output_xyz_path,
                 artifact_type="molecular_geometry",
                 role="restart_candidate",
                 source=f"{step.id}/attempt-{attempt:02d}/input.xyz",
-                step_id=step.id,
-                attempt=attempt,
                 metadata={
                     "eligible_for": "optimization_restart_only",
                     "source_locations": facts.source_locations,
@@ -962,16 +941,12 @@ def _execute_prepared_attempt(
             and facts.stdout_geometry_bytes is not None
             and facts.stdout_geometry is not None
         ):
-            candidate = register_bytes_artifact(
-                config.data_root_path,
-                run,
+            candidate = context.register_bytes(
                 facts.stdout_geometry_bytes,
                 artifact_type="molecular_geometry",
                 role="restart_candidate",
                 source=f"{step.id}/attempt-{attempt:02d}/stdout_final_geometry",
                 extension=".xyz",
-                step_id=step.id,
-                attempt=attempt,
                 metadata={
                     "eligible_for": "optimization_restart_only",
                     "source_locations": facts.source_locations,
@@ -1036,9 +1011,7 @@ def _execute_prepared_attempt(
                 step=step,
                 attempt=attempt,
             )
-            energy_artifact = register_bytes_artifact(
-                config.data_root_path,
-                run,
+            energy_artifact = context.register_bytes(
                 json.dumps(
                     energy_data,
                     ensure_ascii=False,
@@ -1051,8 +1024,6 @@ def _execute_prepared_attempt(
                 role="verified_energy_data",
                 source=f"{step.id}/attempt-{attempt:02d}/energy_data.json",
                 extension=".json",
-                step_id=step.id,
-                attempt=attempt,
                 metadata={
                     "property": "electronic_energy",
                     "unit": "Eh",
@@ -1116,31 +1087,20 @@ def _execute_prepared_attempt(
             outcome.success,
             expected_geometry_sha,
         )
-    attempt_record.update(
-        {
-            "phase": "finished",
-            "status": status,
-            "result_category": outcome.failure_category,
-            "artifact_ids": artifact_ids,
-            "output_ports": output_ports,
-        }
+    context.update_attempt(
+        checkpoint=False,
+        result_category=outcome.failure_category,
     )
     if owns_active_interval:
         run.checkpoint_active()
-    return Result(
-        run_id=run.id,
-        step_id=step.id,
-        attempt=attempt,
-        status=status,
+    return context.make_result(
+        status,
         values=values,
         checks=outcome.checks,
         scientific_checks=scientific_checks,
         diagnostics=diagnostics,
         artifact_ids=artifact_ids,
         output_ports=output_ports,
-        input_bindings={"geometry": geometry_artifact.id},
-        input_artifact_ids=[geometry_artifact.id],
-        attempt_relative_path=f"{step.id}/attempt-{attempt:02d}",
     )
 
 
@@ -1239,7 +1199,8 @@ def _reconstruct_repair_plan(config: AppConfig, run: Run, accepted_plan: Plan) -
         if (
             matching is None
             or matching.parameter_patch != patch
-            or matching.candidate_artifact_id != record.get("candidate_artifact_id")
+            or matching.input_aliases.get("last_complete_geometry")
+            != record.get("candidate_artifact_id")
             or set(matching.evidence_refs) != set(record.get("evidence_refs", []))
         ):
             raise ValueError("repair chain is not reproducible from the failed Result facts")
@@ -1288,7 +1249,9 @@ def _reconstruct_repair_plan(config: AppConfig, run: Run, accepted_plan: Plan) -
         # The repair removes the failed Step's dependency on its previous
         # geometry producer. Reproduce the Agent's canonical topological order
         # before checking the recorded derived-Plan fingerprint.
-        plan = registry.validate_plan(plan)
+        from bg6022.planner import _drop_orphan_preparation_steps
+
+        plan = registry.validate_plan(_drop_orphan_preparation_steps(plan, run.request, registry))
         plan = Plan.model_validate(
             {**plan.model_dump(mode="python"), "revision": plan.revision + 1},
             strict=True,
@@ -1349,11 +1312,6 @@ def _allowed_seconds(run: Run) -> float:
         float(run.resources["run_active_timeout_seconds"]) - run.current_active_seconds()
     )
     return min(float(run.resources["attempt_timeout_seconds"]), run_remaining)
-
-
-def _next_attempt(run: Run, step_id: str) -> int:
-    attempts = [item.get("attempt", 0) for item in run.attempts if item.get("step_id") == step_id]
-    return max(attempts, default=0) + 1
 
 
 def _check_input_hashes(

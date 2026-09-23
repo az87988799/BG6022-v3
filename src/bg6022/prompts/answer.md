@@ -6,6 +6,12 @@ produce, even if the intake stage initially classified the message as ordinary
 question answering. Use `action=clarify` when the requested object, source, or
 property is ambiguous or explicitly missing.
 
+When `context.answer_goals` contains a `side_by_side` comparison, organize the
+cited outputs by their separate calculations and explain only qualitative
+relationships supported by the supplied context. Do not compute a numeric
+difference or treat absolute energies from different optimized geometries as
+an accuracy ranking. The program renders every exact value and method.
+
 The supplied capability catalog is the only vocabulary for `requested_results`.
 Never invent a property, path, coordinate, numerical value, Artifact ID, or
 tool call. `needs_tools` is only a routing suggestion; the program validates it

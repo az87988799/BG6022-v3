@@ -45,6 +45,7 @@ from bg6022.session import (
 from bg6022.tools.molecule import parse_xyz_bytes
 from bg6022.tools.orca import FrequencyParameters, _local_minimum_check
 from bg6022.tools.registry import ToolRegistry, build_registry
+from bg6022.tools.runtime import ToolCallContext
 
 WATER_XYZ = (
     b"3\nwater\n"
@@ -655,7 +656,9 @@ def test_repair_context_includes_prior_attempts_remaining_limits_and_original_co
         "remaining": 2,
     }
     assert context["run_budget"]["remaining_active_seconds"] == 321.5
-    assert context["original_scientific_constraints"]["request"]["operations"] == ["Opt"]
+    original_request = context["original_scientific_constraints"]["request"]
+    assert original_request["requirements"][0]["capability"] == "optimize_geometry"
+    assert not {"operations", "requested_results", "explicit_parameters"} & set(original_request)
     assert context["original_scientific_constraints"]["step"]["parameters"]["multiplicity"] == 1
 
 
@@ -757,9 +760,7 @@ def test_recovered_opt_geometry_flows_to_frequency_and_sp_without_repeating_prep
     )
 
     def result(
-        run: Run,
-        step: Step,
-        attempt: int,
+        context: ToolCallContext,
         *,
         status: str = "succeeded",
         values: dict[str, Any] | None = None,
@@ -769,113 +770,65 @@ def test_recovered_opt_geometry_flows_to_frequency_and_sp_without_repeating_prep
         scientific_checks: dict[str, ScientificCheckResult] | None = None,
     ) -> Result:
         output_artifacts = artifacts_out or []
-        input_bindings: dict[str, str] = {}
-        for input_name, reference in step.inputs.items():
-            if reference.artifact_id is not None:
-                input_bindings[input_name] = reference.artifact_id
-            elif reference.step_id is not None:
-                relative = run.current_results.get(reference.step_id)
-                if relative is not None:
-                    payload = json.loads(
-                        (Path(config.data_root_path) / "runs" / run.id / relative).read_text(
-                            encoding="utf-8"
-                        )
-                    )
-                    artifact_id = payload.get("output_ports", {}).get(reference.port)
-                    if isinstance(artifact_id, str):
-                        input_bindings[input_name] = artifact_id
-        run.attempts.append(
-            {
-                "step_id": step.id,
-                "attempt": attempt,
-                "phase": "finished",
-                "status": status,
-                "artifact_ids": [item.id for item in output_artifacts],
-            }
-        )
-        return Result(
-            run_id=run.id,
-            step_id=step.id,
-            attempt=attempt,
-            status=status,  # type: ignore[arg-type]
+        return context.make_result(
+            status,
             values=values or {},
             artifact_ids=[item.id for item in output_artifacts],
             output_ports=output_ports or {},
-            input_bindings=input_bindings,
-            input_artifact_ids=list(input_bindings.values()),
             diagnostics=diagnostics or {},
             scientific_checks=scientific_checks or {},
-            attempt_relative_path=f"{step.id}/attempt-{attempt:02d}",
         )
 
-    def resolve_molecule(step: Step, run: Run, _cancel: Any) -> Result:
+    def resolve_molecule(step: Step, context: ToolCallContext) -> Result:
         calls.append(step.tool)
-        molecule = register_bytes_artifact(
-            config.data_root_path,
-            run,
+        molecule = context.register_bytes(
             b'{"formula":"H2O","charge":0}',
             artifact_type="molecule",
             role="resolved_molecule",
             source="test:offline_molecule",
             extension=".json",
-            step_id=step.id,
-            attempt=1,
         )
         artifacts["molecule"] = molecule
         return result(
-            run,
-            step,
-            1,
+            context,
             values={"molecule_formula": "H2O", "formal_charge": 0},
             artifacts_out=[molecule],
             output_ports={"molecule": molecule.id},
         )
 
-    def generate_geometry(step: Step, run: Run, _cancel: Any) -> Result:
+    def generate_geometry(step: Step, context: ToolCallContext) -> Result:
         calls.append(step.tool)
-        geometry = register_bytes_artifact(
-            config.data_root_path,
-            run,
+        geometry = context.register_bytes(
             initial_geometry,
             artifact_type="molecular_geometry",
             role="initial_geometry",
             source="test:offline_initial_geometry",
             extension=".xyz",
-            step_id=step.id,
-            attempt=1,
             metadata={"initial_guess_only": True},
         )
         artifacts["initial"] = geometry
         return result(
-            run,
-            step,
-            1,
+            context,
             values={"geometry_atom_count": 3},
             artifacts_out=[geometry],
             output_ports={"geometry": geometry.id},
         )
 
-    def optimize_geometry(step: Step, run: Run, _cancel: Any) -> Result:
-        attempt = run.attempt_counts[step.id]
+    def optimize_geometry(step: Step, context: ToolCallContext) -> Result:
+        attempt = context.attempt
         calls.append(f"{step.tool}:{attempt}")
         if attempt == 1:
-            candidate = register_bytes_artifact(
-                config.data_root_path,
-                run,
+            candidate = context.register_bytes(
                 restart_geometry,
                 artifact_type="molecular_geometry",
                 role="restart_candidate",
                 source="test:offline_failed_opt",
                 extension=".xyz",
-                step_id=step.id,
-                attempt=attempt,
                 metadata={"eligible_for": "optimization_restart_only"},
             )
             artifacts["candidate"] = candidate
             return result(
-                run,
-                step,
-                attempt,
+                context,
                 status="failed",
                 artifacts_out=[candidate],
                 diagnostics={
@@ -895,35 +848,27 @@ def test_recovered_opt_geometry_flows_to_frequency_and_sp_without_repeating_prep
             )
         assert attempt == 2
         assert step.inputs["geometry"].artifact_id == artifacts["candidate"].id
-        optimized = register_bytes_artifact(
-            config.data_root_path,
-            run,
+        optimized = context.register_bytes(
             retry_geometry,
             artifact_type="molecular_geometry",
             role="optimized_geometry",
             source="test:offline_recovered_opt",
             extension=".xyz",
-            step_id=step.id,
-            attempt=attempt,
         )
         artifacts["retry"] = optimized
         return result(
-            run,
-            step,
-            attempt,
+            context,
             values={"opt_final_electronic_energy": {"value": -76.0, "unit": "Eh"}},
             artifacts_out=[optimized],
             output_ports={"optimized_geometry": optimized.id},
         )
 
-    def frequency(step: Step, run: Run, _cancel: Any) -> Result:
-        calls.append(f"{step.tool}:{run.attempt_counts[step.id]}")
+    def frequency(step: Step, context: ToolCallContext) -> Result:
+        calls.append(f"{step.tool}:{context.attempt}")
         assert step.inputs["geometry"].step_id == "opt"
         optimized = artifacts["retry"]
         return result(
-            run,
-            step,
-            run.attempt_counts[step.id],
+            context,
             values={
                 "vibrational_frequencies": {
                     "modes": [{"index": 0, "value": 120.0, "unit": "cm^-1"}],
@@ -942,13 +887,11 @@ def test_recovered_opt_geometry_flows_to_frequency_and_sp_without_repeating_prep
             },
         )
 
-    def single_point(step: Step, run: Run, _cancel: Any) -> Result:
-        calls.append(f"{step.tool}:{run.attempt_counts[step.id]}")
+    def single_point(step: Step, context: ToolCallContext) -> Result:
+        calls.append(f"{step.tool}:{context.attempt}")
         assert step.inputs["geometry"].step_id == "opt"
         return result(
-            run,
-            step,
-            run.attempt_counts[step.id],
+            context,
             values={"sp_electronic_energy": {"value": -76.0, "unit": "Eh"}},
         )
 
@@ -1080,8 +1023,10 @@ def test_recovered_opt_geometry_flows_to_frequency_and_sp_without_repeating_prep
     assert len(run.repair_records) == 1
     assert run.repair_records[0]["candidate_artifact_id"] == artifacts["candidate"].id
     assert run.attempt_counts == {"opt": 2, "freq": 1, "sp": 1}
-    assert run.current_results["molecule"].endswith("attempt-01/result.json")
-    assert run.current_results["geometry"].endswith("attempt-01/result.json")
+    assert "molecule" not in run.current_results
+    assert "geometry" not in run.current_results
+    assert any(path.startswith("molecule/") for path in run.result_index)
+    assert any(path.startswith("geometry/") for path in run.result_index)
     assert (
         artifact_path(config.data_root_path, run, artifacts["initial"]).read_bytes()
         == initial_geometry
@@ -1118,56 +1063,38 @@ def test_chat_freq_only_request_runs_on_supplied_xyz_without_preparation(
     calls: list[str] = []
     agent: Agent | None = None
 
-    def unexpected_tool(step: Step, _run: Run, _cancel: Any) -> Result:
+    def unexpected_tool(step: Step, _context: ToolCallContext) -> Result:
         calls.append(step.tool)
         raise AssertionError(f"Freq-only request unexpectedly ran {step.tool}")
 
-    def execute_frequency(step: Step, run: Run, _cancel: Any) -> Result:
+    def execute_frequency(step: Step, context: ToolCallContext) -> Result:
+        run = context.run
         calls.append(step.tool)
         assert agent is not None
         assert [item.tool for item in run.plan.steps] == ["frequency"]
         assert step.parameters["charge"] == 0
         assert step.parameters["multiplicity"] == 1
-        geometry = agent._artifact_from_reference(run, step.inputs["geometry"])
-        assert geometry is not None
+        geometry = context.frozen_inputs["geometry"]
         assert geometry.role == "input_geometry"
         assert geometry.source == "chat:inline_xyz"
         assert artifact_path(config.data_root_path, run, geometry).read_bytes() == WATER_XYZ
 
-        attempt = run.attempt_counts[step.id]
-        hessian = register_bytes_artifact(
-            config.data_root_path,
-            run,
+        hessian = context.register_bytes(
             b"offline verified Hessian",
             artifact_type="orca_hessian",
             role="verified_hessian",
             source="test:offline_frequency",
-            step_id=step.id,
-            attempt=attempt,
             metadata={
                 "validated_for_input_geometry_sha256": geometry.sha256,
                 "dimension": 9,
             },
         )
-        run.attempts.append(
-            {
-                "step_id": step.id,
-                "attempt": attempt,
-                "phase": "finished",
-                "status": "succeeded",
-                "artifact_ids": [hessian.id],
-                "output_ports": {"hessian": hessian.id},
-            }
-        )
         modes = [
             {"index": index, "value": 0.0 if index < 6 else 100.0 + index, "unit": "cm^-1"}
             for index in range(9)
         ]
-        return Result(
-            run_id=run.id,
-            step_id=step.id,
-            attempt=attempt,
-            status="succeeded",
+        return context.make_result(
+            "succeeded",
             values={
                 "vibrational_frequencies": {
                     "modes": modes,
@@ -1210,9 +1137,6 @@ def test_chat_freq_only_request_runs_on_supplied_xyz_without_preparation(
             },
             artifact_ids=[hessian.id],
             output_ports={"hessian": hessian.id},
-            input_bindings={"geometry": geometry.id},
-            input_artifact_ids=[geometry.id],
-            attempt_relative_path=f"{step.id}/attempt-{attempt:02d}",
         )
 
     registry = ToolRegistry(
@@ -1280,7 +1204,7 @@ def test_chat_freq_only_request_runs_on_supplied_xyz_without_preparation(
     completed = agent.confirm(waiting.run)
 
     assert completed.run is not None
-    assert completed.run.status == "succeeded"
+    assert completed.run.status == "succeeded", completed.run.pending_data
     assert [item.tool for item in completed.run.plan.steps] == ["frequency"]
     assert calls == ["frequency"]
     frequency_step = completed.run.plan.steps[0]

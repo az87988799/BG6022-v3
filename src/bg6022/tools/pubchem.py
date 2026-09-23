@@ -26,11 +26,7 @@ from bg6022.molecule_identity import (
     parse_formula_counts,
     validate_resolve_binding,
 )
-from bg6022.session import (
-    register_bytes_artifact,
-    run_directory,
-    save_run,
-)
+from bg6022.tools.runtime import ToolCallContext
 
 PUBCHEM_BASE_URL = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -74,13 +70,14 @@ class PubChemError(ValueError):
 
 
 def make_resolve_molecule_tool(config: AppConfig | None = None) -> Tool:
-    def execute(step: Step, run: Run, cancel: Event) -> Result:
+    def execute(step: Step, context: ToolCallContext) -> Result:
         if config is None:
             raise RuntimeError("tool 'resolve_molecule' is a description-only Tool")
-        return execute_resolve_molecule(config, step=step, run=run, cancel=cancel)
+        return execute_resolve_molecule(config, step=step, context=context)
 
     return Tool(
         name="resolve_molecule",
+        planning_role="preparation",
         display_name="解析分子",
         description=(
             "Resolve a name, CAS, CID, formula, or explicit SMILES into a verified "
@@ -117,11 +114,10 @@ def make_resolve_molecule_tool(config: AppConfig | None = None) -> Tool:
     )
 
 
-def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel: Event) -> Result:
+def execute_resolve_molecule(config: AppConfig, *, step: Step, context: ToolCallContext) -> Result:
+    run = context.run
+    cancel = context.cancel
     parameters = ResolveMoleculeParameters.model_validate(step.parameters, strict=True)
-    attempt = _next_attempt(run, step.id)
-    relative = f"{step.id}/attempt-{attempt:02d}"
-    (run_directory(config.data_root_path, run.id) / relative).mkdir(parents=True, exist_ok=True)
     identity = run.request.structure_input.get("molecule_identity")
     identity = identity if isinstance(identity, Mapping) else None
     source_responses: tuple[dict[str, Any], ...] = ()
@@ -132,12 +128,9 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
     try:
         if cancel.is_set():
             return _result(
-                run,
-                step,
-                attempt,
+                context,
                 "cancelled",
                 diagnostics={"category": "cancelled", "reason": "cancelled before molecule lookup"},
-                relative=relative,
             )
         try:
             validate_resolve_binding(
@@ -145,21 +138,10 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                 parameters.model_dump(mode="python"),
             )
         except ValueError as error:
-            _record_attempt(
-                run,
-                step,
-                attempt,
-                "failed",
-                artifact_ids=source_artifact_ids,
-            )
-            save_run(config.data_root_path, run)
             return _result(
-                run,
-                step,
-                attempt,
+                context,
                 "failed",
                 diagnostics={"category": "identity_binding", "reason": str(error)},
-                relative=relative,
             )
         if parameters.input_kind == "smiles":
             source_url = "explicit:smiles"
@@ -181,23 +163,11 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
             ).encode("utf-8")
             source_responses = ({"url": source_url, "raw_bytes": raw_bytes},)
             lookup_attempts = 0
-            source_artifact_ids = _register_source_responses(
-                config, run, step, attempt, source_responses
-            )
+            source_artifact_ids = _register_source_responses(context, source_responses)
             matches, reason = identity_matches_facts(identity, facts)
             if not matches:
-                _record_attempt(
-                    run,
-                    step,
-                    attempt,
-                    "failed",
-                    artifact_ids=source_artifact_ids,
-                )
-                save_run(config.data_root_path, run)
                 return _result(
-                    run,
-                    step,
-                    attempt,
+                    context,
                     "failed",
                     diagnostics={
                         "category": "identity_mismatch",
@@ -206,7 +176,6 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                         "calculated_formula": facts.get("formula"),
                     },
                     artifact_ids=source_artifact_ids,
-                    relative=relative,
                 )
         else:
             lookup = fetch_pubchem(
@@ -219,29 +188,16 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
             source_responses = lookup.source_responses or (
                 {"url": lookup.url, "raw_bytes": lookup.raw_bytes},
             )
-            source_artifact_ids = _register_source_responses(
-                config, run, step, attempt, source_responses
-            )
+            source_artifact_ids = _register_source_responses(context, source_responses)
             if cancel.is_set():
-                _record_attempt(
-                    run,
-                    step,
-                    attempt,
-                    "cancelled",
-                    artifact_ids=source_artifact_ids,
-                )
-                save_run(config.data_root_path, run)
                 return _result(
-                    run,
-                    step,
-                    attempt,
+                    context,
                     "cancelled",
                     diagnostics={
                         "category": "cancelled",
                         "reason": "cancelled after molecule lookup",
                     },
                     artifact_ids=source_artifact_ids,
-                    relative=relative,
                 )
             accepted: list[tuple[dict[str, Any], dict[str, Any]]] = []
             excluded: list[dict[str, Any]] = []
@@ -350,18 +306,8 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
             }
 
             def pause_for_identity(category: str, reason: str) -> Result:
-                _record_attempt(
-                    run,
-                    step,
-                    attempt,
-                    "needs_input",
-                    artifact_ids=source_artifact_ids,
-                )
-                save_run(config.data_root_path, run)
                 return _result(
-                    run,
-                    step,
-                    attempt,
+                    context,
                     "needs_input",
                     diagnostics={
                         **resolution_diagnostics,
@@ -387,7 +333,6 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                         "input_requirement": "molecule_identity",
                     },
                     artifact_ids=source_artifact_ids,
-                    relative=relative,
                 )
 
             if len(groups) > 1:
@@ -418,18 +363,8 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                         category,
                         "no verified structure satisfies the requested molecule identity",
                     )
-                _record_attempt(
-                    run,
-                    step,
-                    attempt,
-                    "failed",
-                    artifact_ids=source_artifact_ids,
-                )
-                save_run(config.data_root_path, run)
                 return _result(
-                    run,
-                    step,
-                    attempt,
+                    context,
                     "failed",
                     diagnostics={
                         **resolution_diagnostics,
@@ -439,7 +374,6 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                         "candidates": candidate_views,
                     },
                     artifact_ids=source_artifact_ids,
-                    relative=relative,
                 )
             raw_bytes = lookup.raw_bytes
             source_url = lookup.url
@@ -447,13 +381,10 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
 
         if cancel.is_set():
             return _result(
-                run,
-                step,
-                attempt,
+                context,
                 "cancelled",
                 diagnostics={"category": "cancelled", "reason": "cancelled before artifact write"},
                 artifact_ids=source_artifact_ids,
-                relative=relative,
             )
         molecule_bytes = json.dumps(
             {
@@ -469,16 +400,12 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
             sort_keys=True,
             indent=2,
         ).encode("utf-8")
-        molecule_artifact = register_bytes_artifact(
-            config.data_root_path,
-            run,
+        molecule_artifact = context.register_bytes(
             molecule_bytes,
             artifact_type="molecule",
             role="resolved_molecule",
             source=source_url,
             extension=".json",
-            step_id=step.id,
-            attempt=attempt,
             metadata={
                 "canonical_smiles": facts["canonical_smiles"],
                 "source": source_url,
@@ -486,47 +413,25 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
             },
         )
         raw_artifact_ids = source_artifact_ids or _register_source_responses(
-            config,
-            run,
-            step,
-            attempt,
-            ({"url": source_url, "raw_bytes": raw_bytes},),
+            context, ({"url": source_url, "raw_bytes": raw_bytes},)
         )
         artifact_ids = [molecule_artifact.id, *raw_artifact_ids]
         values = {
             "molecule_formula": facts["formula"],
             "formal_charge": facts["formal_charge"],
         }
-        run.attempts.append(
-            {
-                "step_id": step.id,
-                "attempt": attempt,
-                "phase": "finished",
-                "status": "succeeded",
-                "artifact_ids": artifact_ids,
-                "output_ports": {"molecule": molecule_artifact.id},
-            }
-        )
-        save_run(config.data_root_path, run)
         return _result(
-            run,
-            step,
-            attempt,
+            context,
             "succeeded",
             values=values,
             diagnostics=resolution_diagnostics if parameters.input_kind != "smiles" else {},
             artifact_ids=artifact_ids,
             output_ports={"molecule": molecule_artifact.id},
             parameter_sources={"structure": source_url},
-            relative=relative,
         )
     except PubChemError as error:
         source_artifact_ids = _register_source_responses(
-            config,
-            run,
-            step,
-            attempt,
-            error.source_responses or source_responses,
+            context, error.source_responses or source_responses
         )
         status = "cancelled" if error.category == "cancelled" else "failed"
         if error.category == "not_found" and parameters.input_kind in {"name", "cas", "formula"}:
@@ -549,18 +454,8 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                     "raw_query": raw_query,
                 }
             )
-        _record_attempt(
-            run,
-            step,
-            attempt,
-            status,
-            artifact_ids=source_artifact_ids,
-        )
-        save_run(config.data_root_path, run)
         return _result(
-            run,
-            step,
-            attempt,
+            context,
             status,
             diagnostics=diagnostics,
             clarification=(
@@ -578,25 +473,13 @@ def execute_resolve_molecule(config: AppConfig, *, step: Step, run: Run, cancel:
                 else None
             ),
             artifact_ids=source_artifact_ids,
-            relative=relative,
         )
     except (OSError, ValueError) as error:
-        _record_attempt(
-            run,
-            step,
-            attempt,
-            "failed",
-            artifact_ids=source_artifact_ids,
-        )
-        save_run(config.data_root_path, run)
         return _result(
-            run,
-            step,
-            attempt,
+            context,
             "failed",
             diagnostics={"category": "invalid_molecule", "reason": str(error)},
             artifact_ids=source_artifact_ids,
-            relative=relative,
         )
 
 
@@ -1116,10 +999,7 @@ def _extract_cids(payload: Any) -> list[int]:
 
 
 def _register_source_responses(
-    config: AppConfig,
-    run: Run,
-    step: Step,
-    attempt: int,
+    context: ToolCallContext,
     responses: tuple[dict[str, Any], ...],
 ) -> list[str]:
     artifact_ids: list[str] = []
@@ -1128,46 +1008,20 @@ def _register_source_responses(
         url = response.get("url")
         if not isinstance(raw, bytes) or not isinstance(url, str) or not url:
             continue
-        artifact = register_bytes_artifact(
-            config.data_root_path,
-            run,
+        artifact = context.register_bytes(
             raw,
             artifact_type="molecule_source",
             role="source_response",
             source=url,
             extension=".json",
-            step_id=step.id,
-            attempt=attempt,
             metadata={"source_sequence": index},
         )
         artifact_ids.append(artifact.id)
     return artifact_ids
 
 
-def _record_attempt(
-    run: Run,
-    step: Step,
-    attempt: int,
-    status: str,
-    *,
-    artifact_ids: list[str] | None = None,
-) -> None:
-    run.attempts.append(
-        {
-            "step_id": step.id,
-            "attempt": attempt,
-            "phase": "finished",
-            "status": status,
-            "artifact_ids": list(artifact_ids or []),
-            "output_ports": {},
-        }
-    )
-
-
 def _result(
-    run: Run,
-    step: Step,
-    attempt: int,
+    context: ToolCallContext,
     status: str,
     *,
     values: dict[str, Any] | None = None,
@@ -1176,28 +1030,16 @@ def _result(
     artifact_ids: list[str] | None = None,
     output_ports: dict[str, str] | None = None,
     parameter_sources: dict[str, str] | None = None,
-    relative: str,
 ) -> Result:
-    return Result(
-        run_id=run.id,
-        step_id=step.id,
-        attempt=attempt,
-        status=status,  # type: ignore[arg-type]
+    return context.make_result(
+        status,
         values=values or {},
         diagnostics=diagnostics or {},
         clarification=clarification or {},
         artifact_ids=artifact_ids or [],
         output_ports=output_ports or {},
         parameter_sources=parameter_sources or {},
-        attempt_relative_path=relative,
     )
-
-
-def _next_attempt(run: Run, step_id: str) -> int:
-    attempts = [
-        int(item.get("attempt", 0)) for item in run.attempts if item.get("step_id") == step_id
-    ]
-    return max(attempts, default=0) + 1
 
 
 __all__ = [

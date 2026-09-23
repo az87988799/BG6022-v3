@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from threading import Event
 
 import pytest
+from tool_context import make_tool_context
 
 from bg6022.agent import _requested_results_satisfied
 from bg6022.config import load_config
@@ -177,7 +177,7 @@ def _comparison_run(config, *, geometry_b_bytes: bytes | None = None):
     ]
     difference = Step(
         id="difference",
-        tool="energy_difference",
+        tool="same_geometry_method_energy_difference",
         inputs={
             "energy_a": InputReference(step_id="sp_a", port="energy_data"),
             "energy_b": InputReference(step_id="sp_b", port="energy_data"),
@@ -252,7 +252,11 @@ def test_method_difference_consumes_two_verified_energy_ports(tmp_path: Path) ->
     config = _config(tmp_path)
     run, step, energy_artifacts = _comparison_run(config)
 
-    result = build_registry(config).get("energy_difference").execute(step, run, cancel=Event())
+    result = (
+        build_registry(config)
+        .get("energy_difference")
+        .execute(step, make_tool_context(config, run, step))
+    )
 
     assert result.status == "succeeded"
     value = result.values["method_energy_difference"]
@@ -271,7 +275,7 @@ def test_requirement_scoped_outputs_complete_for_repeated_tool_instances(tmp_pat
     config = _config(tmp_path)
     registry = build_registry(config)
     run, step, energy_artifacts = _comparison_run(config)
-    result = registry.get("energy_difference").execute(step, run, cancel=Event())
+    result = registry.get("energy_difference").execute(step, make_tool_context(config, run, step))
     assert result.status == "succeeded"
 
     publish_step_result(
@@ -293,7 +297,11 @@ def test_method_difference_rejects_mismatched_geometry(tmp_path: Path) -> None:
         config, geometry_b_bytes=b"3\nother water geometry\nO 0 0 0\nH 0 0.8 0.6\nH 0 -0.7 0.6\n"
     )
 
-    result = build_registry(config).get("energy_difference").execute(step, run, cancel=Event())
+    result = (
+        build_registry(config)
+        .get("energy_difference")
+        .execute(step, make_tool_context(config, run, step))
+    )
 
     assert result.status == "failed"
     assert "geometry_sha256" in result.diagnostics["reason"]
@@ -316,7 +324,7 @@ def test_method_difference_rejects_artifact_id_instead_of_current_output_port(
     result = (
         build_registry(config)
         .get("energy_difference")
-        .execute(direct_reference_step, run, cancel=Event())
+        .execute(direct_reference_step, make_tool_context(config, run, direct_reference_step))
     )
 
     assert result.status == "failed"
@@ -409,7 +417,7 @@ def test_plan_wires_energy_data_ports_without_copying_scalar_parameters() -> Non
             ),
             Step(
                 id="delta",
-                tool="energy_difference",
+                tool="same_geometry_method_energy_difference",
                 inputs={
                     "energy_a": InputReference(step_id="sp_a", port="energy_data"),
                     "energy_b": InputReference(step_id="sp_b", port="energy_data"),

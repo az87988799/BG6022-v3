@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from threading import Event
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 from bg6022.config import AppConfig
-from bg6022.models import Result, Run, Step, Tool
-from bg6022.session import artifact_path, run_directory, save_run
+from bg6022.models import Result, Step, Tool
 from bg6022.tools.molecule import parse_xyz_bytes, resolve_artifact_reference
+from bg6022.tools.runtime import ToolCallContext
 
 
 class GeometryDistanceParameters(BaseModel):
@@ -59,10 +58,10 @@ def measure_distance(geometry: Any, parameters: GeometryDistanceParameters) -> f
 
 
 def make_geometry_distance_tool(config: AppConfig | None = None) -> Tool:
-    def execute(step: Step, run: Run, cancel: Event) -> Result:
+    def execute(step: Step, context: ToolCallContext) -> Result:
         if config is None:
             raise RuntimeError("tool 'geometry_distance' is a description-only Tool")
-        return execute_geometry_distance(config, step=step, run=run, cancel=cancel)
+        return execute_geometry_distance(config, step=step, context=context)
 
     return Tool(
         name="geometry_distance",
@@ -98,20 +97,16 @@ def make_geometry_distance_tool(config: AppConfig | None = None) -> Tool:
     )
 
 
-def execute_geometry_distance(config: AppConfig, *, step: Step, run: Run, cancel: Event) -> Result:
+def execute_geometry_distance(config: AppConfig, *, step: Step, context: ToolCallContext) -> Result:
     """Read, verify, and measure one geometry without changing its bytes."""
 
     parameters = GeometryDistanceParameters.model_validate(step.parameters, strict=True)
-    attempt = _next_attempt(run, step.id)
-    relative = f"{step.id}/attempt-{attempt:02d}"
-    (run_directory(config.data_root_path, run.id) / relative).mkdir(parents=True, exist_ok=True)
-
     status = "failed"
     values: dict[str, Any] = {}
     diagnostics: dict[str, Any] = {}
     input_artifact_id: str | None = None
     try:
-        if cancel.is_set():
+        if context.cancel.is_set():
             status = "cancelled"
             diagnostics = {
                 "category": "cancelled",
@@ -122,14 +117,13 @@ def execute_geometry_distance(config: AppConfig, *, step: Step, run: Run, cancel
             if reference is None:
                 raise ValueError("geometry_distance requires a geometry input reference")
             geometry_artifact = resolve_artifact_reference(
-                config, run, reference, expected_type="molecular_geometry"
+                config, context.run, reference, expected_type="molecular_geometry"
             )
             input_artifact_id = geometry_artifact.id
-            geometry_file = artifact_path(config.data_root_path, run, geometry_artifact)
-            geometry_bytes = geometry_file.read_bytes()
+            geometry_bytes = context.read_input("geometry")
             geometry = parse_xyz_bytes(geometry_bytes)
             value = measure_distance(geometry, parameters)
-            if cancel.is_set():
+            if context.cancel.is_set():
                 status = "cancelled"
                 diagnostics = {
                     "category": "cancelled",
@@ -166,36 +160,13 @@ def execute_geometry_distance(config: AppConfig, *, step: Step, run: Run, cancel
             "geometry_artifact_id": input_artifact_id,
         }
 
-    run.attempts.append(
-        {
-            "step_id": step.id,
-            "attempt": attempt,
-            "phase": "finished",
-            "status": status,
-            "artifact_ids": [],
-            "output_ports": {},
-            "input_artifact_ids": [input_artifact_id] if input_artifact_id else [],
-        }
-    )
-    save_run(config.data_root_path, run)
-    return Result(
-        run_id=run.id,
-        step_id=step.id,
-        attempt=attempt,
+    return context.make_result(
         status=status,  # type: ignore[arg-type]
         values=values,
         diagnostics=diagnostics,
         input_bindings={"geometry": input_artifact_id} if input_artifact_id else {},
         input_artifact_ids=[input_artifact_id] if input_artifact_id else [],
-        attempt_relative_path=relative,
     )
-
-
-def _next_attempt(run: Run, step_id: str) -> int:
-    attempts = [
-        int(item.get("attempt", 0)) for item in run.attempts if item.get("step_id") == step_id
-    ]
-    return max(attempts, default=0) + 1
 
 
 __all__ = [

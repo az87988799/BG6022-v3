@@ -13,14 +13,14 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictStr,
-    ValidationInfo,
     create_model,
     field_validator,
     model_validator,
 )
 
-from bg6022.llm import LlmClient
+from bg6022.llm import LlmClient, LlmError
 from bg6022.models import (
+    AnswerGoal,
     GoalCheckRequirement,
     InputReference,
     Operation,
@@ -28,9 +28,11 @@ from bg6022.models import (
     Request,
     RequiredGeometryBinding,
     Requirement,
+    RequirementInputBinding,
     ResultProperty,
     ResultTarget,
     Step,
+    Subject,
     validate_output_preferences,
 )
 from bg6022.molecule_identity import (
@@ -40,9 +42,10 @@ from bg6022.molecule_identity import (
     normalize_identity_for_storage,
     validate_resolve_binding,
 )
+from bg6022.orca.profiles import resolve_method_request
 from bg6022.output_contracts import property_evidence_matches
 from bg6022.tools.molecule import parse_xyz_bytes
-from bg6022.tools.registry import ToolRegistry, merge_explicit_step_parameters
+from bg6022.tools.registry import ToolRegistry, build_registry, merge_explicit_step_parameters
 
 Intent = Literal["chemistry_compute", "chemistry_qa", "daily_qa", "context_query"]
 PendingAction = Literal["none", "supplement_identity", "replace_identity", "clarify"]
@@ -117,10 +120,40 @@ class IntakeSubjectProposal(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
+    key: StrictStr
     molecule_query: StrictStr | None = None
     molecule_input_kind: MoleculeInputKind | None = None
     molecule_name_evidence: StrictStr | None = None
-    structure_input: dict[str, Any] = Field(default_factory=dict)
+    inline_xyz: StrictStr | None = None
+    history_geometry_alias: StrictStr | None = None
+
+    @model_validator(mode="after")
+    def _one_structure_source(self) -> IntakeSubjectProposal:
+        if self.inline_xyz is not None and self.history_geometry_alias is not None:
+            raise ValueError("a subject cannot use inline XYZ and historical geometry together")
+        if not self.key.strip():
+            raise ValueError("subject key must not be blank")
+        return self
+
+
+class RequirementInputBindingProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    requirement_key: StrictStr | None = None
+    port: StrictStr | None = None
+    artifact_alias: StrictStr | None = None
+
+    @model_validator(mode="after")
+    def _one_source(self) -> RequirementInputBindingProposal:
+        if self.artifact_alias is not None:
+            if self.requirement_key is not None or self.port is not None:
+                raise ValueError("artifact_alias cannot be combined with a Requirement source")
+            return self
+        if (self.requirement_key is None) != (self.port is None):
+            raise ValueError("Requirement input needs both requirement_key and port")
+        if self.requirement_key is None:
+            raise ValueError("Requirement input needs a source Requirement or artifact alias")
+        return self
 
 
 class RequirementProposal(BaseModel):
@@ -133,6 +166,8 @@ class RequirementProposal(BaseModel):
     capability: StrictStr
     parameters: dict[str, Any] = Field(default_factory=dict)
     outputs: list[StrictStr] = Field(default_factory=list)
+    input_bindings: dict[str, RequirementInputBindingProposal] = Field(default_factory=dict)
+    parameter_evidence: list[ElectronicStateCandidate] = Field(default_factory=list)
     constraints: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("key", "subject_key", "capability")
@@ -154,6 +189,24 @@ class RequirementProposal(BaseModel):
     def _unique_outputs(cls, value: list[str]) -> list[str]:
         if len(value) != len(set(value)):
             raise ValueError("requirement outputs must be unique")
+        return value
+
+
+class AnswerGoalProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    kind: Literal["compare"]
+    requirement_keys: list[StrictStr]
+    output: StrictStr
+    mode: Literal["side_by_side", "numeric_difference"] = "side_by_side"
+
+    @field_validator("requirement_keys")
+    @classmethod
+    def _distinct_requirement_keys(cls, value: list[str]) -> list[str]:
+        if len(value) < 2:
+            raise ValueError("a comparison needs at least two requirement keys")
+        if len(value) != len(set(value)):
+            raise ValueError("AnswerGoal requirement keys must be unique")
         return value
 
 
@@ -183,47 +236,282 @@ class IntakeOutput(BaseModel):
 
     intent: Intent
     answer: StrictStr | None = None
-    operations: list[Operation] = Field(default_factory=list)
     requirements: list[RequirementProposal] = Field(default_factory=list)
     subjects: dict[StrictStr, IntakeSubjectProposal] = Field(default_factory=dict)
-    parameter_target_requirement_id: StrictStr | None = None
-    molecule_query: StrictStr | None = None
-    molecule_input_kind: MoleculeInputKind | None = None
-    molecule_name_evidence: StrictStr | None = None
+    answer_goals: list[AnswerGoalProposal] = Field(default_factory=list)
+    unresolved_requirements: list[StrictStr] = Field(default_factory=list)
+    parameter_target_requirement_key: StrictStr | None = None
+    parameter_patch: dict[str, Any] = Field(default_factory=dict)
     pending_action: PendingAction = "none"
     pending_action_evidence: StrictStr | None = Field(default=None, max_length=512)
-    history_geometry_alias: StrictStr | None = None
-    explicit_parameters: dict[str, Any] = Field(default_factory=dict)
-    electronic_state_candidates: list[ElectronicStateCandidate] = Field(default_factory=list)
-    structure_input: dict[str, Any] = Field(default_factory=dict)
-    requested_results: list[str] = Field(default_factory=list)
-    unresolved_results: list[StrictStr] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
     query_selection: QuerySelection | None = None
     output_preferences: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
-    def _load_legacy_operation(cls, value: Any) -> Any:
-        if not isinstance(value, dict) or "operation" not in value:
+    def _normalize_legacy_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
             return value
         data = dict(value)
-        legacy = data.pop("operation")
-        if legacy is not None:
-            if "operations" in data and data["operations"] != [legacy]:
+        legacy_names = {
+            "operation",
+            "operations",
+            "requested_results",
+            "explicit_parameters",
+            "electronic_state_candidates",
+            "unresolved_results",
+            "molecule_query",
+            "molecule_input_kind",
+            "molecule_name_evidence",
+            "history_geometry_alias",
+            "structure_input",
+            "parameter_target_requirement_id",
+        }
+        if not legacy_names.intersection(data):
+            return data
+
+        registry = _intake_registry()
+        legacy_operation = data.pop("operation", None)
+        operations = list(data.pop("operations", []))
+        if legacy_operation is not None:
+            if operations and operations != [legacy_operation]:
                 raise ValueError("legacy operation conflicts with operations")
-            data["operations"] = [legacy]
+            operations = [legacy_operation]
+        legacy_targets = list(data.pop("requested_results", []))
+        global_parameters = dict(data.pop("explicit_parameters", {}))
+        global_evidence = list(data.pop("electronic_state_candidates", []))
+        unresolved = list(data.pop("unresolved_results", []))
+        structure = dict(data.pop("structure_input", {}))
+        if structure.get("required_bindings") == [] and len(structure) == 1:
+            structure = {}
+        legacy_query = data.pop("molecule_query", None)
+        legacy_kind = data.pop("molecule_input_kind", None)
+        legacy_evidence = data.pop("molecule_name_evidence", None)
+        legacy_history = data.pop("history_geometry_alias", None)
+        legacy_target_key = data.pop("parameter_target_requirement_id", None)
+        if (
+            global_parameters
+            and not legacy_targets
+            and (not operations or legacy_target_key is not None)
+        ):
+            operations = []
+            data["parameter_patch"] = global_parameters
+            global_parameters = {}
+
+        subjects = {
+            str(key): (
+                item.model_dump(mode="python")
+                if isinstance(item, IntakeSubjectProposal)
+                else dict(item)
+            )
+            for key, item in dict(data.get("subjects", {})).items()
+        }
+        if not subjects and (
+            any(
+                item is not None
+                for item in (legacy_query, legacy_kind, legacy_evidence, legacy_history)
+            )
+            or structure
+        ):
+            key = "subject_1"
+            subject: dict[str, Any] = {
+                "key": key,
+                "molecule_query": legacy_query,
+                "molecule_input_kind": legacy_kind,
+                "molecule_name_evidence": legacy_evidence,
+                "inline_xyz": structure.get("xyz_text") or structure.get("xyz"),
+                "history_geometry_alias": legacy_history or structure.get("history_geometry_alias"),
+            }
+            if "path" in structure or "local_path" in structure or "file" in structure:
+                subject["untrusted_path"] = structure.get(
+                    "path", structure.get("local_path", structure.get("file"))
+                )
+            subjects[key] = subject
+
+        if subjects:
+            for key, subject in subjects.items():
+                subject.setdefault("key", key)
+
+        requirements = [
+            item.model_dump(mode="python") if isinstance(item, RequirementProposal) else dict(item)
+            for item in data.get("requirements", [])
+        ]
+        if not requirements:
+            for index, operation in enumerate(operations, start=1):
+                tool = _tool_for_operation(registry, str(operation))
+                requirements.append(
+                    {
+                        "key": f"requirement_{index}",
+                        "subject_key": "subject_1",
+                        "capability": tool.name,
+                        "parameters": {},
+                        "outputs": [],
+                    }
+                )
+
+        for requirement in requirements:
+            try:
+                tool = registry.get(str(requirement.get("capability", "")))
+            except ValueError:
+                continue
+            parameters = dict(requirement.get("parameters", {}))
+            for name, parameter_value in global_parameters.items():
+                if name in tool.request_parameters:
+                    parameters.setdefault(name, parameter_value)
+            requirement["parameters"] = parameters
+            evidence = list(requirement.get("parameter_evidence", []))
+            evidence.extend(global_evidence)
+            requirement["parameter_evidence"] = evidence
+
+        if global_parameters and requirements:
+            catalog_parameters = {
+                name
+                for tool_name in registry.names()
+                for name in registry.get(tool_name).request_parameters
+            }
+            unknown_parameters = sorted(set(global_parameters) - catalog_parameters)
+            if unknown_parameters:
+                raise ValueError(f"parameters are outside the Tool catalog: {unknown_parameters}")
+            supported_parameters = {
+                name
+                for requirement in requirements
+                for name in registry.get(str(requirement.get("capability", ""))).request_parameters
+            }
+            unsupported_parameters = sorted(set(global_parameters) - supported_parameters)
+            if unsupported_parameters:
+                missing = list(data.get("missing_fields", []))
+                missing.extend(
+                    f"{name} has no compatible calculation step in the requested Requirements"
+                    for name in unsupported_parameters
+                )
+                data["missing_fields"] = list(dict.fromkeys(missing))
+
+        for raw_target in legacy_targets:
+            target = {"field": raw_target} if isinstance(raw_target, str) else dict(raw_target)
+            name = target.get("check") or target.get("port") or target.get("field")
+            if not name:
+                continue
+            try:
+                canonical = registry.resolve_result_target(
+                    str(name), operations, canonical_only=True
+                )
+            except ValueError as error:
+                raise ValueError(
+                    f"requested result {name!r} is not a canonical registered output"
+                ) from error
+            target_name = canonical.check or canonical.port or canonical.field
+            if target_name is None:
+                continue
+            target_kind = "check" if canonical.check else "port" if canonical.port else "field"
+            producer_names = {
+                str(item["tool"])
+                for item in registry.result_capabilities()
+                if item["name"] == target_name and item["kind"] == target_kind
+            }
+            matches = [
+                requirement
+                for requirement in requirements
+                if str(requirement.get("capability")) in producer_names
+            ]
+            if not matches and len(producer_names) == 1:
+                producer = next(iter(producer_names))
+                requirement = {
+                    "key": f"requirement_{len(requirements) + 1}",
+                    "subject_key": next(iter(subjects), "subject_1"),
+                    "capability": producer,
+                    "parameters": {},
+                    "outputs": [],
+                }
+                requirements.append(requirement)
+                matches = [requirement]
+            for requirement in matches:
+                outputs = requirement.setdefault("outputs", [])
+                if target_name not in outputs:
+                    outputs.append(target_name)
+
+        for requirement in requirements:
+            tool = registry.get(str(requirement.get("capability", "")))
+            parameters = dict(requirement.get("parameters", {}))
+            for name, parameter_value in global_parameters.items():
+                if name in tool.request_parameters:
+                    parameters.setdefault(name, parameter_value)
+            requirement["parameters"] = parameters
+
+        for raw_binding in structure.get("required_bindings", []):
+            binding = RequiredGeometryBinding.model_validate(raw_binding, strict=True)
+            consumer_candidates = [
+                requirement
+                for requirement in requirements
+                if (
+                    binding.consumer_requirement_key is not None
+                    and requirement.get("key") == binding.consumer_requirement_key
+                )
+                or (
+                    binding.consumer_tool is not None
+                    and requirement.get("capability") == binding.consumer_tool
+                )
+                or (
+                    binding.consumer_operation is not None
+                    and binding.consumer_operation
+                    in registry.get(str(requirement.get("capability"))).operations
+                )
+            ]
+            if len(consumer_candidates) != 1:
+                raise ValueError("legacy geometry binding does not identify one Requirement")
+            consumer = consumer_candidates[0]
+            input_bindings = consumer.setdefault("input_bindings", {})
+            if binding.source_requirement_key is not None:
+                source = binding.source_requirement_key
+                source_requirement = next(
+                    (item for item in requirements if item.get("key") == source), None
+                )
+                if source_requirement is None:
+                    raise ValueError(f"geometry binding refers to unknown source key {source!r}")
+                input_bindings[binding.input_port] = {
+                    "requirement_key": source,
+                    "port": binding.source_port,
+                }
+            elif binding.source_operation is not None:
+                source_candidates = [
+                    item
+                    for item in requirements
+                    if binding.source_operation
+                    in registry.get(str(item.get("capability"))).operations
+                ]
+                if len(source_candidates) != 1:
+                    raise ValueError(
+                        "legacy geometry binding does not identify one source Requirement"
+                    )
+                input_bindings[binding.input_port] = {
+                    "requirement_key": source_candidates[0]["key"],
+                    "port": binding.source_port,
+                }
+            elif binding.source_port == "initial_geometry":
+                input_bindings[binding.input_port] = {"artifact_alias": "initial_geometry"}
+
+        data.pop("parameter_target_requirement_id", None)
+        data["parameter_target_requirement_key"] = data.get(
+            "parameter_target_requirement_key", legacy_target_key
+        )
+        data["requirements"] = requirements
+        data["subjects"] = subjects
+        if not data.get("subjects") and requirements:
+            data["subjects"] = {"subject_1": {"key": "subject_1", "molecule_query": None}}
+        if unresolved:
+            data["unresolved_requirements"] = [
+                *data.get("unresolved_requirements", []),
+                *unresolved,
+            ]
         return data
 
     @model_validator(mode="after")
     def _intent_fields(self) -> IntakeOutput:
         if self.intent == "context_query" and (
-            self.explicit_parameters
-            or self.electronic_state_candidates
-            or self.history_geometry_alias
-            or self.requirements
+            self.requirements
             or self.subjects
-            or self.parameter_target_requirement_id
+            or self.answer_goals
+            or self.parameter_target_requirement_key
         ):
             raise ValueError("context_query cannot contain a parameter patch")
         if self.intent == "context_query" and self.query_selection is None:
@@ -244,6 +532,11 @@ class IntakeOutput(BaseModel):
         )
         if unknown_subject_keys:
             raise ValueError(f"requirements refer to unknown subject keys: {unknown_subject_keys}")
+        unknown_goal_keys = sorted(
+            {key for goal in self.answer_goals for key in goal.requirement_keys} - set(keys)
+        )
+        if unknown_goal_keys:
+            raise ValueError(f"AnswerGoals refer to unknown requirement keys: {unknown_goal_keys}")
         return self
 
     @field_validator("output_preferences", mode="before")
@@ -253,9 +546,104 @@ class IntakeOutput(BaseModel):
 
     @property
     def operation(self) -> Operation | None:
-        """Read-only compatibility with pre-M2 intake handlers."""
+        operations = self.operations
+        return operations[0] if len(operations) == 1 else None
 
-        return self.operations[0] if len(self.operations) == 1 else None
+    @property
+    def operations(self) -> list[Operation]:
+        registry = _intake_registry()
+        return [
+            operation
+            for requirement in self.requirements
+            for operation in registry.get(requirement.capability).operations
+        ]
+
+    @property
+    def requested_results(self) -> list[str]:
+        return list(dict.fromkeys(output for item in self.requirements for output in item.outputs))
+
+    @property
+    def explicit_parameters(self) -> dict[str, Any]:
+        if not self.requirements:
+            return dict(self.parameter_patch)
+        values: dict[str, Any] = {}
+        conflicts: set[str] = set()
+        for requirement in self.requirements:
+            for name, item in requirement.parameters.items():
+                if name in values and values[name] != item:
+                    conflicts.add(name)
+                else:
+                    values[name] = item
+        return {name: item for name, item in values.items() if name not in conflicts}
+
+    @property
+    def electronic_state_candidates(self) -> list[ElectronicStateCandidate]:
+        return [
+            item for requirement in self.requirements for item in requirement.parameter_evidence
+        ]
+
+    @property
+    def unresolved_results(self) -> list[str]:
+        return list(self.unresolved_requirements)
+
+    @property
+    def parameter_target_requirement_id(self) -> str | None:
+        return self.parameter_target_requirement_key
+
+    @property
+    def molecule_query(self) -> str | None:
+        return next(
+            (item.molecule_query for item in self.subjects.values() if item.molecule_query), None
+        )
+
+    @property
+    def molecule_input_kind(self) -> MoleculeInputKind | None:
+        return next(
+            (
+                item.molecule_input_kind
+                for item in self.subjects.values()
+                if item.molecule_input_kind
+            ),
+            None,
+        )
+
+    @property
+    def molecule_name_evidence(self) -> str | None:
+        return next(
+            (
+                item.molecule_name_evidence
+                for item in self.subjects.values()
+                if item.molecule_name_evidence
+            ),
+            None,
+        )
+
+    @property
+    def history_geometry_alias(self) -> str | None:
+        return next(
+            (
+                item.history_geometry_alias
+                for item in self.subjects.values()
+                if item.history_geometry_alias
+            ),
+            None,
+        )
+
+    @property
+    def structure_input(self) -> dict[str, Any]:
+        if len(self.subjects) != 1:
+            return {}
+        subject = next(iter(self.subjects.values()))
+        result: dict[str, Any] = {}
+        if subject.inline_xyz is not None:
+            result["xyz_text"] = subject.inline_xyz
+        if subject.history_geometry_alias is not None:
+            result["history_geometry_alias"] = subject.history_geometry_alias
+        return result
+
+
+def _intake_registry() -> ToolRegistry:
+    return build_registry()
 
 
 class IntakeStructureInput(BaseModel):
@@ -418,19 +806,37 @@ def intake_message(
         purpose="intake",
         example={
             "intent": "chemistry_compute",
-            "operations": ["Opt"],
-            "molecule_query": "water",
-            "molecule_input_kind": "name",
-            "molecule_name_evidence": "water",
+            "subjects": {
+                "subject_1": {
+                    "key": "subject_1",
+                    "molecule_query": "water",
+                    "molecule_input_kind": "name",
+                    "molecule_name_evidence": "water",
+                    "inline_xyz": None,
+                    "history_geometry_alias": None,
+                }
+            },
+            "requirements": [
+                {
+                    "key": "opt_water",
+                    "subject_key": "subject_1",
+                    "capability": "optimize_geometry",
+                    "parameters": {},
+                    "outputs": ["opt_final_electronic_energy"],
+                    "input_bindings": {},
+                    "parameter_evidence": [],
+                    "constraints": {},
+                }
+            ],
+            "answer_goals": [],
+            "unresolved_requirements": [],
+            "parameter_target_requirement_key": None,
+            "parameter_patch": {},
             "pending_action": "none",
             "pending_action_evidence": None,
-            "history_geometry_alias": None,
-            "structure_input": {},
-            "explicit_parameters": {},
-            "electronic_state_candidates": [],
-            "requested_results": ["opt_final_electronic_energy"],
             "missing_fields": [],
-            "unresolved_results": [],
+            "query_selection": None,
+            "output_preferences": {},
         },
         cancel=cancel,
     )
@@ -444,16 +850,29 @@ def intake_message(
     )
     if inline_xyz is not None and output.intent == "chemistry_compute":
         xyz_text, _atom_count = inline_xyz
-        structure = dict(output.structure_input)
-        if output.history_geometry_alias is not None or structure.get("history_geometry_alias"):
+        if any(subject.history_geometry_alias is not None for subject in output.subjects.values()):
             raise ValueError("inline XYZ cannot be combined with a historical geometry selection")
-        structure["xyz_text"] = xyz_text
+        if len(output.subjects) > 1:
+            raise ValueError("inline XYZ must identify exactly one calculation subject")
+        subjects = dict(output.subjects)
+        if not subjects:
+            subjects["subject_1"] = IntakeSubjectProposal(
+                key="subject_1",
+                inline_xyz=xyz_text,
+            )
+        else:
+            subject_key, subject = next(iter(subjects.items()))
+            subjects[subject_key] = subject.model_copy(
+                update={
+                    "molecule_query": None,
+                    "molecule_input_kind": None,
+                    "molecule_name_evidence": None,
+                    "inline_xyz": xyz_text,
+                }
+            )
         output = output.model_copy(
             update={
-                "molecule_query": None,
-                "molecule_input_kind": None,
-                "molecule_name_evidence": None,
-                "structure_input": structure,
+                "subjects": subjects,
             }
         )
     return output
@@ -571,6 +990,7 @@ def proposal_to_plan(
     assigned_requirements: set[str] = set()
     requirement_for_key: dict[str, Requirement] = {}
     for item in proposal.steps:
+        tool_name = registry.canonical_tool_name(item.tool)
         selected: Requirement | None = None
         if item.requirement_id is not None:
             selected = requirements_by_id.get(item.requirement_id)
@@ -581,21 +1001,24 @@ def proposal_to_plan(
                 )
             if selected.id in assigned_requirements:
                 raise ValueError(f"requirement {selected.id!r} is mapped to more than one Step")
-            if selected.capability != item.tool:
+            if selected.capability != tool_name:
                 raise ValueError(
                     f"requirement {selected.id!r} needs capability {selected.capability!r}, "
-                    f"not {item.tool!r}"
+                    f"not {tool_name!r}"
                 )
         else:
-            selected = next(
-                (
-                    candidate
-                    for candidate in request.requirements
-                    if candidate.capability == item.tool
-                    and candidate.id not in assigned_requirements
-                ),
-                None,
-            )
+            matching = [
+                candidate for candidate in request.requirements if candidate.capability == tool_name
+            ]
+            if len(matching) > 1:
+                raise ValueError(
+                    f"Plan step {item.key!r} must provide requirement_id because Tool "
+                    f"{tool_name!r} matches multiple Requirements"
+                )
+            if matching:
+                selected = matching[0]
+                if selected.id in assigned_requirements:
+                    raise ValueError(f"requirement {selected.id!r} is mapped to more than one Step")
         if selected is not None:
             if item.subject_id is not None and item.subject_id != selected.subject_id:
                 raise ValueError(f"Step {item.key!r} changes requirement {selected.id!r}'s subject")
@@ -633,7 +1056,7 @@ def proposal_to_plan(
             Step(
                 id=step_ids[item.key],
                 origin_step_id=step_ids[item.key],
-                tool=item.tool,
+                tool=registry.canonical_tool_name(item.tool),
                 parameters=dict(item.parameters),
                 inputs=inputs,
                 requirement_id=(
@@ -680,8 +1103,41 @@ def proposal_to_plan(
     return validate_request_plan(request, plan, registry)
 
 
+def materialize_request_parameters(request: Request, plan: Plan, registry: ToolRegistry) -> Plan:
+    """Fill declared Request parameters into a proposed Plan exactly once."""
+
+    plan = _canonicalize_plan_tools(plan, registry)
+    associated = _associate_plan_steps_with_requirements(request, plan, registry)
+    return Plan.model_validate(
+        {
+            **associated.model_dump(mode="python"),
+            "steps": [
+                merge_explicit_step_parameters(registry.get(step.tool), step, request)
+                for step in associated.steps
+            ],
+        },
+        strict=True,
+    )
+
+
 def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) -> Plan:
-    """Validate a model Plan against the user's original semantic request.
+    """Materialize a new Plan from its Request, then validate the result."""
+
+    return validate_plan_against_request(
+        request,
+        materialize_request_parameters(request, plan, registry),
+        registry,
+    )
+
+
+def validate_plan_against_request(
+    request: Request,
+    plan: Plan,
+    registry: ToolRegistry,
+    *,
+    allow_verified_repair_diff: Mapping[str, Mapping[str, tuple[Any, Any]]] | None = None,
+) -> Plan:
+    """Purely validate a materialized Plan against the user's semantic Request.
 
     ``ToolRegistry`` can prove that a Plan is internally well-formed, but it
     cannot know whether the model silently dropped the requested scientific
@@ -689,15 +1145,8 @@ def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) 
     that check at the boundary where both Request and Plan are available.
     """
 
-    plan = Plan.model_validate(
-        {
-            **plan.model_dump(mode="python"),
-            "steps": [
-                merge_explicit_step_parameters(registry.get(step.tool), step, request)
-                for step in plan.steps
-            ],
-        },
-        strict=True,
+    plan = _associate_plan_steps_with_requirements(
+        request, _canonicalize_plan_tools(plan, registry), registry
     )
     plan = registry.validate_plan(plan)
     known_subject_ids = set(request.subjects)
@@ -740,6 +1189,26 @@ def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) 
         for requirement in request.requirements:
             matches = steps_by_requirement.get(requirement.id, [])
             if len(matches) != 1:
+                if not matches:
+                    unassigned = [
+                        step
+                        for step in plan.steps
+                        if step.requirement_id is None and step.tool == requirement.capability
+                    ]
+                    requested_operations = registry.get(requirement.capability).operations
+                    if not unassigned and requested_operations:
+                        missing = next(
+                            (
+                                operation
+                                for operation in requested_operations
+                                if operation in request.operations
+                            ),
+                            requested_operations[0],
+                        )
+                        label = {"SP": "SP", "Opt": "Opt", "Freq": "frequency"}.get(
+                            missing, missing
+                        )
+                        raise ValueError(f"Plan does not cover the requested {label} calculation")
                 raise ValueError(
                     f"Plan must map requirement {requirement.id!r} to exactly one Step"
                 )
@@ -752,9 +1221,9 @@ def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) 
             if step.subject_id != requirement.subject_id:
                 raise ValueError(f"Plan changes requirement {requirement.id!r} subject")
             expected_parameters = {
-                **request.explicit_parameters,
+                **({} if request.requirements else request.explicit_parameters),
                 **requirement.parameters,
-                **request.user_modifications,
+                **({} if request.requirements else request.user_modifications),
                 **request.user_modifications_by_requirement.get(requirement.id, {}),
             }
             for name, value in expected_parameters.items():
@@ -762,36 +1231,11 @@ def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) 
                     name in registry.get(requirement.capability).request_parameters
                     and step.parameters.get(name) != value
                 ):
-                    raise ValueError(
-                        f"Plan changes parameter {name!r} for requirement {requirement.id!r}"
-                    )
-            for output in requirement.outputs:
-                scoped = [
-                    target
-                    for target in plan.requested_results
-                    if target.requirement_id in {None, requirement.id}
-                    and (target.port or target.field or target.check) == output
-                ]
-                if len(scoped) > 1:
-                    scoped = [
-                        target for target in scoped if target.requirement_id == requirement.id
-                    ]
-                if (
-                    len(scoped) != 1
-                    or scoped[0].step_id not in {None, step.id}
-                    or (
-                        scoped[0].requirement_id is None
-                        and sum(
-                            item.capability == requirement.capability
-                            for item in request.requirements
+                    declared_diff = (allow_verified_repair_diff or {}).get(step.id, {}).get(name)
+                    if declared_diff != (value, step.parameters.get(name)):
+                        raise ValueError(
+                            f"Plan changes parameter {name!r} for requirement {requirement.id!r}"
                         )
-                        > 1
-                    )
-                ):
-                    raise ValueError(
-                        f"Plan does not return required output {output!r} "
-                        f"for requirement {requirement.id!r}"
-                    )
         unknown = sorted(set(steps_by_requirement) - set(requirements_by_id))
         if unknown:
             raise ValueError(f"Plan maps unknown requirement ids: {unknown}")
@@ -807,7 +1251,36 @@ def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) 
                     f"requirement {requirement.id!r} contains parameters not accepted by "
                     f"{capability.name}: {unknown_parameters}"
                 )
-            capability.validate_parameter_patch(requirement.parameters)
+            if requirement.parameters:
+                capability.validate_parameter_patch(requirement.parameters)
+        unrequested_operations = [
+            operation
+            for step in plan.steps
+            if step.requirement_id is None
+            for operation in registry.get(step.tool).operations
+        ]
+        if unrequested_operations:
+            extras = list(dict.fromkeys(unrequested_operations))
+            raise ValueError(f"Plan adds unrequested operation(s): {', '.join(extras)}")
+        task_steps = {step.id for step in plan.steps if step.requirement_id is not None}
+        dependencies: dict[str, set[str]] = {step.id: set() for step in plan.steps}
+        for step in plan.steps:
+            dependencies[step.id].update(
+                reference.step_id
+                for reference in step.inputs.values()
+                if reference.step_id is not None
+            )
+            dependencies[step.id].update(check.source_step_id for check in step.goal_checks)
+        for step in plan.steps:
+            tool = registry.get(step.tool)
+            if step.requirement_id is not None:
+                continue
+            if tool.planning_role != "preparation":
+                raise ValueError(f"Plan adds unrequested Step {step.id!r} using Tool {tool.name!r}")
+            if not _is_ancestor_of_any(step.id, task_steps, dependencies):
+                raise ValueError(
+                    f"preparation Step {step.id!r} is not required by a requested task"
+                )
 
     plan_targets = plan.requested_results
     for request_target in request.requested_results:
@@ -827,6 +1300,89 @@ def validate_request_plan(request: Request, plan: Plan, registry: ToolRegistry) 
 
     _validate_requested_check_prerequisites(request, plan, registry)
     return plan
+
+
+def _is_ancestor_of_any(
+    candidate: str,
+    task_steps: set[str],
+    dependencies: Mapping[str, set[str]],
+) -> bool:
+    """Return whether a preparation Step is in a requested task's dependency chain."""
+
+    for task_step in task_steps:
+        pending = list(dependencies.get(task_step, ()))
+        seen: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current == candidate:
+                return True
+            if current in seen:
+                continue
+            seen.add(current)
+            pending.extend(dependencies.get(current, ()))
+    return False
+
+
+def _canonicalize_plan_tools(plan: Plan, registry: ToolRegistry) -> Plan:
+    steps = [
+        step.model_copy(update={"tool": registry.canonical_tool_name(step.tool)})
+        if registry.canonical_tool_name(step.tool) != step.tool
+        else step
+        for step in plan.steps
+    ]
+    return plan.model_copy(update={"steps": steps}) if steps != plan.steps else plan
+
+
+def _associate_plan_steps_with_requirements(
+    request: Request, plan: Plan, registry: ToolRegistry
+) -> Plan:
+    """Fill only unambiguous one-to-one Tool matches for older Plan payloads.
+
+    Repeated capabilities need an explicit requirement_id in the Plan proposal;
+    capability equality alone cannot safely distinguish their parameters or outputs.
+    """
+
+    if not request.requirements:
+        return plan
+    steps = list(plan.steps)
+    requirement_ids = {item.id for item in request.requirements}
+    assigned: dict[str, list[int]] = {}
+    for index, step in enumerate(steps):
+        if step.requirement_id is None:
+            continue
+        if step.requirement_id not in requirement_ids:
+            continue
+        assigned.setdefault(step.requirement_id, []).append(index)
+
+    unmatched_requirements = [item for item in request.requirements if item.id not in assigned]
+    for requirement in unmatched_requirements:
+        matching_requirements = [
+            item for item in unmatched_requirements if item.capability == requirement.capability
+        ]
+        matching_steps = [
+            index
+            for index, step in enumerate(steps)
+            if step.requirement_id is None
+            and step.tool == requirement.capability
+            and (step.subject_id is None or step.subject_id == requirement.subject_id)
+        ]
+        if len(matching_requirements) != 1 or len(matching_steps) != 1:
+            continue
+        index = matching_steps[0]
+        step = steps[index]
+        steps[index] = step.model_copy(
+            update={
+                "requirement_id": requirement.id,
+                "subject_id": requirement.subject_id,
+            }
+        )
+        assigned.setdefault(requirement.id, []).append(index)
+        unmatched_requirements = [
+            item for item in unmatched_requirements if item.id != requirement.id
+        ]
+    if steps == list(plan.steps):
+        return plan
+    return Plan.model_validate({**plan.model_dump(mode="python"), "steps": steps}, strict=True)
 
 
 def _validate_requested_check_prerequisites(
@@ -965,6 +1521,7 @@ def apply_plan_change(
     *,
     candidate_request: Request | None = None,
     changed_step_ids: set[str] | None = None,
+    allow_verified_repair_diff: Mapping[str, Mapping[str, tuple[Any, Any]]] | None = None,
 ) -> set[str]:
     """Validate and install one bounded Plan revision, invalidating its dependents."""
 
@@ -976,7 +1533,16 @@ def apply_plan_change(
         },
         strict=True,
     )
-    candidate = validate_request_plan(request, candidate, registry)
+    if allow_verified_repair_diff is None:
+        candidate = validate_request_plan(request, candidate, registry)
+    else:
+        candidate = _drop_orphan_preparation_steps(candidate, request, registry)
+        candidate = validate_plan_against_request(
+            request,
+            candidate,
+            registry,
+            allow_verified_repair_diff=allow_verified_repair_diff,
+        )
     old_by_id = {step.id: step for step in run.plan.steps}
     new_by_id = {step.id: step for step in candidate.steps}
     roots = set(changed_step_ids or ())
@@ -1016,6 +1582,39 @@ def apply_plan_change(
         else:
             run.step_status.pop(step_id, None)
     return invalidated
+
+
+def _drop_orphan_preparation_steps(plan: Plan, request: Request, registry: ToolRegistry) -> Plan:
+    """Prune prep Steps made unnecessary by a verified repair input alias."""
+
+    task_steps = {
+        step.id
+        for step in plan.steps
+        if step.requirement_id is not None
+        or (not request.requirements and bool(registry.get(step.tool).operations))
+    }
+    dependencies: dict[str, set[str]] = {step.id: set() for step in plan.steps}
+    for step in plan.steps:
+        dependencies[step.id].update(
+            reference.step_id for reference in step.inputs.values() if reference.step_id is not None
+        )
+        dependencies[step.id].update(check.source_step_id for check in step.goal_checks)
+    needed: set[str] = set()
+    pending = [parent for step_id in task_steps for parent in dependencies.get(step_id, ())]
+    while pending:
+        current = pending.pop()
+        if current in needed:
+            continue
+        needed.add(current)
+        pending.extend(dependencies.get(current, ()))
+    kept = [
+        step
+        for step in plan.steps
+        if step.id in task_steps
+        or registry.get(step.tool).planning_role != "preparation"
+        or step.id in needed
+    ]
+    return plan.model_copy(update={"steps": kept}) if kept != plan.steps else plan
 
 
 def _validate_molecule_identity_contract(
@@ -1076,64 +1675,24 @@ def request_from_intake(
     registry: ToolRegistry,
     normalized_parameters: ParameterNormalization | None = None,
 ) -> Request:
-    blocking = intake_blocking_requirements(intake, registry)
-    if blocking:
-        raise ValueError(
-            "本次请求还有尚未支持或尚未明确的要求："
-            + "；".join(blocking)
-            + "。请明确这些要求，或重新指定只计算已支持的部分。"
-        )
-    if intake.intent == "chemistry_compute" and not intake.operations and not intake.requirements:
-        if not intake.requested_results:
-            raise ValueError(
-                "an operation-free request must name a registered operation-free result"
-            )
-        operation_free_tools = registry.tools_for_request([], intake.requested_results)
-        if not operation_free_tools or any(tool.operations for tool in operation_free_tools):
-            raise ValueError(
-                "an operation-free request must target a registered operation-free Tool"
-            )
-    if any(key in intake.structure_input for key in {"path", "local_path", "file"}):
-        raise ValueError("model intake cannot authorize a local file path")
-    if "molecule_identity" in intake.structure_input:
-        raise ValueError("model intake cannot provide program-owned molecule identity facts")
-    all_operations = _intake_operations(intake, registry)
-    normalized = normalized_parameters or normalize_user_explicit_parameters(
-        message,
-        intake.explicit_parameters,
-        intake.electronic_state_candidates,
-        parameter_names=tuple(
-            registry.request_index_parameter_fields(all_operations, intake.requested_results)
-        ),
-    )
-    if normalized.clarification_fields:
-        raise ValueError(
-            "electronic-state parameters need clarification: "
-            + ", ".join(normalized.clarification_fields)
-        )
     from hashlib import sha256
 
-    subject_proposals = dict(intake.subjects)
-    if not subject_proposals:
-        subject_proposals = {
-            "subject_1": IntakeSubjectProposal(
-                molecule_query=intake.molecule_query,
-                molecule_input_kind=intake.molecule_input_kind,
-                molecule_name_evidence=intake.molecule_name_evidence,
-                structure_input=dict(intake.structure_input),
-            )
-        }
+    subject_proposals = dict(intake.subjects) or {
+        "subject_1": IntakeSubjectProposal(key="subject_1")
+    }
+    if any(not key or subject.key != key for key, subject in subject_proposals.items()):
+        raise ValueError("Subject map keys must match the declared Subject keys")
     subject_ids = {
         key: "sub_" + sha256(f"{request_id}|{key}".encode()).hexdigest()[:16]
         for key in subject_proposals
     }
-    request_subjects: dict[str, dict[str, Any]] = {}
+    request_subjects: dict[str, Subject] = {}
     for key, subject_proposal in subject_proposals.items():
-        subject_input = dict(subject_proposal.structure_input)
-        if any(name in subject_input for name in {"path", "local_path", "file"}):
-            raise ValueError("model intake cannot authorize a subject-local file path")
-        if "molecule_identity" in subject_input:
-            raise ValueError("model intake cannot provide program-owned subject identity facts")
+        subject_input: dict[str, Any] = {}
+        if subject_proposal.inline_xyz is not None:
+            subject_input["xyz_text"] = subject_proposal.inline_xyz
+        if subject_proposal.history_geometry_alias is not None:
+            subject_input["history_geometry_alias"] = subject_proposal.history_geometry_alias
         identity = build_identity_constraint(
             message=message,
             query=subject_proposal.molecule_query,
@@ -1142,136 +1701,134 @@ def request_from_intake(
         )
         if identity is not None:
             subject_input["molecule_identity"] = normalize_identity_for_storage(identity)
-        request_subjects[subject_ids[key]] = {
-            "key": key,
-            "structure_input": subject_input,
-        }
+        request_subjects[subject_ids[key]] = Subject(
+            key=key,
+            molecule_query=subject_proposal.molecule_query,
+            molecule_input_kind=subject_proposal.molecule_input_kind,
+            molecule_name_evidence=subject_proposal.molecule_name_evidence,
+            structure_input=subject_input,
+        )
 
-    # Retain the original single-subject structure contract for existing tools;
-    # multi-subject identity and constraints stay under Request.subjects.
-    structure_input = dict(intake.structure_input)
-    if len(subject_proposals) == 1:
-        structure_input = dict(next(iter(request_subjects.values()))["structure_input"])
-    raw_bindings = structure_input.get("required_bindings")
-    requirement_specs = _intake_requirement_specs(
-        intake,
-        registry,
-        request_id=request_id,
-        subject_ids=subject_ids,
-        global_parameters=dict(normalized.explicit_parameters),
-    )
-    requirement_ids_by_key = {key: item.id for key, item in requirement_specs}
-    if raw_bindings is not None:
-        normalized_bindings = []
-        for raw_binding in raw_bindings:
-            binding = RequiredGeometryBinding.model_validate(raw_binding, strict=True)
-            normalized_binding = {
-                "input_port": binding.input_port,
-                "source_operation": binding.source_operation,
-                "source_port": binding.source_port,
-            }
-            for selector in ("consumer_operation", "consumer_tool"):
-                value = getattr(binding, selector)
-                if value is not None:
-                    normalized_binding[selector] = value
-            for key_name, id_name in (
-                ("consumer_requirement_key", "consumer_requirement_id"),
-                ("source_requirement_key", "source_requirement_id"),
-            ):
-                key = getattr(binding, key_name)
-                if key is not None:
-                    if key not in requirement_ids_by_key:
-                        raise ValueError(
-                            f"geometry binding refers to unknown requirement key {key!r}"
-                        )
-                    normalized_binding[id_name] = requirement_ids_by_key[key]
-            if binding.source_requirement_id is not None:
-                normalized_binding["source_requirement_id"] = binding.source_requirement_id
-            normalized_bindings.append(normalized_binding)
-        structure_input["required_bindings"] = normalized_bindings
-    scoped_targets: list[ResultTarget] = []
-    requested_names = list(intake.requested_results)
-    # A capability output requested globally applies to every matching instance.
-    # This is how two requested SP methods can both return their own energy.
-    for value in requested_names:
-        resolved = registry.resolve_result_target(value, all_operations, canonical_only=True)
-        kind, name = _target_identity(resolved)
-        capabilities = [
-            item
-            for item in registry.result_capabilities()
-            if item["kind"] == kind and item["name"] == name
-        ]
-        if len(capabilities) != 1:
-            raise ValueError(f"requested output {value!r} has no unique registered producer")
-        producer = str(capabilities[0]["tool"])
-        matches = [item for _key, item in requirement_specs if item.capability == producer]
-        if not matches:
-            raise ValueError(f"requested output {value!r} has no matching requirement")
-        for requirement in matches:
-            if name not in requirement.outputs:
-                requirement = requirement.model_copy(
-                    update={"outputs": [*requirement.outputs, name]}
+    requirement_ids = {
+        item.key: "req_" + sha256(f"{request_id}|{item.key}".encode()).hexdigest()[:16]
+        for item in intake.requirements
+    }
+    requirements: list[Requirement] = []
+    missing_fields = list(intake.missing_fields)
+    unresolved = list(intake.unresolved_requirements)
+    for proposal in intake.requirements:
+        tool = registry.get(proposal.capability)
+        if proposal.subject_key not in subject_ids:
+            raise ValueError(
+                f"requirement {proposal.key!r} refers to unknown subject {proposal.subject_key!r}"
+            )
+        parameters = dict(proposal.parameters)
+        method_request = parameters.pop("method_request", None)
+        if method_request is None and "method_profile" in parameters:
+            method_request = parameters["method_profile"]
+        constraints = dict(proposal.constraints)
+        if method_request is not None:
+            resolution = resolve_method_request(str(method_request))
+            if resolution.status in {"resolved", "proposed"} and resolution.profile is not None:
+                parameters["method_profile"] = resolution.profile
+                constraints["method_resolution"] = {
+                    "request": str(method_request),
+                    "profile": resolution.profile,
+                    "status": resolution.status,
+                    "source": resolution.source,
+                }
+            elif resolution.status == "ambiguous":
+                missing_fields.append(
+                    "方法‘{}’对应多个已注册配置：{}；请指定完整配置。".format(
+                        method_request,
+                        ", ".join(resolution.candidates),
+                    )
                 )
-                requirement_specs = [
-                    (key, requirement if item.id == requirement.id else item)
-                    for key, item in requirement_specs
-                ]
-            scoped_targets.append(
-                ResultTarget(
-                    **{kind: name},
-                    requirement_id=(
-                        requirement.id if intake.requirements or len(matches) > 1 else None
-                    ),
+                parameters.pop("method_profile", None)
+            else:
+                unresolved.append(f"未注册的方法或配置：{method_request}")
+                parameters.pop("method_profile", None)
+
+        normalized = normalize_user_explicit_parameters(
+            message,
+            parameters,
+            proposal.parameter_evidence,
+            parameter_names=tuple(tool.request_parameters),
+        )
+        if normalized.clarification_fields:
+            missing_fields.append(
+                "电子态参数需要澄清：" + ", ".join(normalized.clarification_fields)
+            )
+        params = dict(normalized.explicit_parameters)
+        if normalized_parameters is not None and len(intake.requirements) == 1:
+            for name, value in normalized_parameters.explicit_parameters.items():
+                if name not in tool.request_parameters:
+                    continue
+                if name in {"charge", "multiplicity"}:
+                    state = normalized_parameters.states.get(name)
+                    if state is None or state.status != "set":
+                        continue
+                params[name] = value
+        unknown_parameters = sorted(set(params) - set(tool.request_parameters))
+        if unknown_parameters:
+            raise ValueError(
+                f"requirement {proposal.key!r} contains unsupported parameters: "
+                f"{unknown_parameters}"
+            )
+        if params:
+            tool.validate_parameter_patch(params)
+
+        bindings: dict[str, RequirementInputBinding] = {}
+        for input_port, binding in proposal.input_bindings.items():
+            if binding.requirement_key is not None:
+                source_id = requirement_ids.get(binding.requirement_key)
+                if source_id is None:
+                    raise ValueError(
+                        f"requirement {proposal.key!r} refers to unknown source "
+                        f"{binding.requirement_key!r}"
+                    )
+                bindings[input_port] = RequirementInputBinding(
+                    source_requirement_id=source_id,
+                    source_port=binding.port,
                 )
+            else:
+                if binding.artifact_alias != "initial_geometry":
+                    raise ValueError(f"unregistered artifact alias {binding.artifact_alias!r}")
+                bindings[input_port] = RequirementInputBinding(
+                    artifact_alias=binding.artifact_alias
+                )
+        requirements.append(
+            Requirement(
+                id=requirement_ids[proposal.key],
+                subject_id=subject_ids[proposal.subject_key],
+                capability=tool.name,
+                parameters=params,
+                outputs=list(proposal.outputs),
+                input_bindings=bindings,
+                constraints=constraints,
             )
-    for requirement in (item for _key, item in requirement_specs):
-        for output in requirement.outputs:
-            kind = _requirement_output_kind(registry.get(requirement.capability), output)
-            same_producer_count = sum(
-                item.capability == requirement.capability for _key, item in requirement_specs
-            )
-            target = ResultTarget(
-                **{kind: output},
-                requirement_id=(
-                    requirement.id if intake.requirements or same_producer_count > 1 else None
-                ),
-            )
-            if target not in scoped_targets:
-                scoped_targets.append(target)
-    if (
-        intake.parameter_target_requirement_id is not None
-        and intake.parameter_target_requirement_id
-        not in {item.id for _key, item in requirement_specs}
-    ):
-        raise ValueError("parameter update references an unknown requirement id")
-    operations = [
-        operation
-        for _key, requirement in requirement_specs
-        for operation in registry.get(requirement.capability).operations
+        )
+
+    answer_goals = [
+        AnswerGoal(
+            kind=goal.kind,
+            requirement_ids=[requirement_ids[key] for key in goal.requirement_keys],
+            output=goal.output,
+            mode=goal.mode,
+        )
+        for goal in intake.answer_goals
     ]
+    if unresolved:
+        raise ValueError("本次请求包含尚未支持的方法要求：" + "；".join(dict.fromkeys(unresolved)))
     request = Request(
         id=request_id,
         description=message,
         original_text=message,
-        requested_results=scoped_targets,
-        explicit_parameters=(
-            dict(normalized.explicit_parameters)
-            if not intake.requirements or len(requirement_specs) == 1
-            else {}
-        ),
-        structure_input={
-            **structure_input,
-            **(
-                {"history_geometry_alias": intake.history_geometry_alias}
-                if intake.history_geometry_alias is not None
-                else {}
-            ),
-        },
         source="chat",
-        operations=operations,
-        requirements=[item for _key, item in requirement_specs],
         subjects=request_subjects,
-        missing_fields=list(intake.missing_fields),
+        requirements=requirements,
+        answer_goals=answer_goals,
+        missing_fields=list(dict.fromkeys(missing_fields)),
         output_preferences=_request_output_preferences(message, intake.output_preferences),
     )
     _validate_required_geometry_contract(request, registry)
@@ -1963,6 +2520,8 @@ def _validate_required_geometry_bindings(
             for step in steps_by_operation.get("Opt", [])
             if consumer.subject_id is None or step.subject_id in {None, consumer.subject_id}
         ]
+        if consumer in optimizers:
+            optimizers = [consumer]
         if optimizers:
             if len(optimizers) != 1:
                 raise ValueError("initial geometry binding cannot identify one Opt Step")
@@ -2452,11 +3011,15 @@ def _intake_schema(
     message: str | None = None,
     pending_context: Mapping[str, Any] | None = None,
 ) -> type[BaseModel]:
-    """Constrain query subjects and calculation targets for one intake round."""
+    """Build one strict canonical Intake schema from the registered Tool directory."""
 
     allowed_subjects = frozenset(candidate_refs)
     capabilities = [dict(item) for item in capability_catalog]
-    allowed_targets = tuple(sorted({str(item["name"]) for item in capabilities}))
+    capability_names = (
+        tuple(sorted(registry.names()))
+        if registry is not None
+        else tuple(sorted({str(item.get("tool")) for item in capabilities if item.get("tool")}))
+    )
     allowed_query_pairs = _allowed_query_pairs(result_catalog)
 
     def _targets_are_candidates(value: list[QueryTarget]) -> list[QueryTarget]:
@@ -2477,221 +3040,197 @@ def _intake_schema(
                 )
         return value
 
-    def _requested_results_are_available(value: list[str], info: ValidationInfo) -> list[str]:
-        unknown = sorted(set(value) - set(allowed_targets))
-        if unknown:
-            raise ValueError(
-                f"requested results are outside the Tool capability catalog: {unknown}"
-            )
-        intent = info.data.get("intent")
-        if value and intent != "chemistry_compute":
-            raise ValueError("only chemistry_compute may request calculation results")
-        operations = set(info.data.get("operations", []))
-        for requirement in info.data.get("requirements", []):
-            capability = next(
-                (item for item in capabilities if item.get("tool") == requirement.capability),
-                None,
-            )
-            if capability is not None:
-                operations.update(capability.get("operations", []))
-        for target in value:
-            candidates = [item for item in capabilities if item["name"] == target]
-            if not any(
-                not item.get("operations") or bool(set(item["operations"]) & operations)
-                for item in candidates
-            ):
-                raise ValueError(
-                    f"requested result {target!r} is not produced by the requested operation(s)"
-                )
-        return value
-
     def _request_contract(value: IntakeOutput) -> IntakeOutput:
-        if value.intent != "chemistry_compute":
+        if value.intent != "chemistry_compute" or registry is None:
             return value
-        if value.parameter_target_requirement_id is not None:
-            pending_requirements = {
-                str(item.get("requirement_id"))
+        if value.parameter_patch and value.parameter_target_requirement_key is None:
+            pending_requirements = [
+                item
                 for item in (pending_context or {}).get("requirements", [])
                 if isinstance(item, Mapping)
-            }
-            if (pending_context or {}).get("waiting_for") not in {
+            ]
+            compatible = []
+            if (pending_context or {}).get("waiting_for") in {
                 "clarification",
                 "confirmation",
-            } or value.parameter_target_requirement_id not in pending_requirements:
+            }:
+                for item in pending_requirements:
+                    try:
+                        candidate_tool = registry.get(str(item.get("capability", "")))
+                    except ValueError:
+                        continue
+                    if set(value.parameter_patch) <= set(candidate_tool.request_parameters):
+                        compatible.append(item)
+            if len(compatible) == 1:
+                value.parameter_target_requirement_key = str(
+                    compatible[0].get("requirement_key") or compatible[0].get("requirement_id")
+                )
+            else:
                 raise ValueError(
-                    "parameter_target_requirement_id must select a requirement "
-                    "in the current waiting task"
+                    "parameter_patch must identify one compatible Requirement in the waiting task"
                 )
-        if registry is None:
-            if value.explicit_parameters or not value.operations:
-                raise ValueError("parameter capability catalog is required")
-            return value
-        if value.requirements:
-            declared_operations = [
-                operation
-                for requirement in value.requirements
-                for operation in registry.get(requirement.capability).operations
-            ]
-            if value.operations and sorted(value.operations) != sorted(declared_operations):
-                raise ValueError("operations must agree with the listed capability requirements")
-            for requirement in value.requirements:
-                tool = registry.get(requirement.capability)
-                if not tool.available:
-                    raise ValueError(f"requirement capability is unavailable: {tool.name}")
-                unknown_parameters = sorted(
-                    set(requirement.parameters) - set(tool.request_parameters)
-                )
-                if unknown_parameters:
-                    raise ValueError(
-                        f"requirement {requirement.key!r} has unsupported parameters: "
-                        f"{unknown_parameters}"
-                    )
-                tool.validate_parameter_patch(requirement.parameters)
-                declared_outputs = {str(item["name"]) for item in tool.public_outputs()}
-                unknown_outputs = sorted(set(requirement.outputs) - declared_outputs)
-                if unknown_outputs:
-                    raise ValueError(
-                        f"requirement {requirement.key!r} has undeclared outputs: {unknown_outputs}"
-                    )
-            operations = declared_operations
-            involved = [
-                registry.get(name)
-                for name in sorted({item.capability for item in value.requirements})
-            ]
-        else:
-            operations = value.operations
-            involved = registry.tools_for_request(operations, value.requested_results)
-        allowed = {name for tool in involved for name in tool.request_parameters}
-        if not operations and not value.requested_results and not value.requirements:
-            # A parameter-only continuation is intentionally parsed before the
-            # Agent decides whether a waiting Run can consume it.  It is not a
-            # standalone operation-free Request; request_from_intake rejects
-            # that case unless a real operation-free result is named.
-            allowed = {
-                name
-                for item in registry.request_parameter_capabilities()
-                for name in item["request_parameters"]
+        if value.parameter_target_requirement_key is not None:
+            waiting = (pending_context or {}).get("waiting_for") in {
+                "clarification",
+                "confirmation",
             }
-        unknown = sorted(set(value.explicit_parameters) - allowed)
-        if unknown:
-            raise ValueError(
-                "explicit parameter names are outside the Tool catalog: "
-                f"{unknown}; allowed names: {sorted(allowed)}"
+            pending_keys = {
+                str(item.get("requirement_key"))
+                for item in (pending_context or {}).get("requirements", [])
+                if isinstance(item, Mapping) and item.get("requirement_key") is not None
+            }
+            pending_ids = {
+                str(item.get("requirement_id"))
+                for item in (pending_context or {}).get("requirements", [])
+                if isinstance(item, Mapping) and item.get("requirement_id") is not None
+            }
+            if not waiting or value.parameter_target_requirement_key not in (
+                pending_keys | pending_ids
+            ):
+                raise ValueError(
+                    "parameter_target_requirement_key must select a Requirement in the waiting task"
+                )
+        if value.parameter_patch:
+            if value.parameter_target_requirement_key is None:
+                raise ValueError("parameter_patch needs one waiting Requirement target")
+            pending_requirements = [
+                item
+                for item in (pending_context or {}).get("requirements", [])
+                if isinstance(item, Mapping)
+            ]
+            selected = next(
+                (
+                    item
+                    for item in pending_requirements
+                    if str(item.get("requirement_key", ""))
+                    == value.parameter_target_requirement_key
+                    or str(item.get("requirement_id", "")) == value.parameter_target_requirement_key
+                ),
+                None,
             )
-        if not operations and not value.requested_results and not value.requirements:
-            return value
-        if not operations:
-            if not value.requested_results or not involved:
+            if selected is None:
+                raise ValueError("parameter_patch target is not present in the waiting task")
+            tool = registry.get(str(selected.get("capability", "")))
+            unknown = sorted(set(value.parameter_patch) - set(tool.request_parameters))
+            if unknown:
                 raise ValueError(
-                    "an operation-free chemistry request must target an available result Tool"
+                    f"parameter_patch fields are outside the target Tool catalog: {unknown}"
                 )
-            if any(tool.operations for tool in involved):
-                raise ValueError(
-                    "an operation-free chemistry request cannot target an operation-based Tool"
-                )
-        return value
+            tool.validate_parameter_patch(value.parameter_patch)
 
-    def _required_geometry_bindings_are_valid(value: IntakeOutput) -> IntakeOutput:
-        if value.intent != "chemistry_compute":
-            return value
-        structure_input = value.structure_input
-        if isinstance(structure_input, IntakeStructureInput):
-            structure_value = structure_input.model_dump(mode="python", exclude_unset=True)
-        else:
-            structure_value = structure_input
-        bindings = [
-            RequiredGeometryBinding.model_validate(item, strict=True)
-            for item in structure_value.get("required_bindings", [])
-        ]
-        operations = (
-            set(_intake_operations(value, registry))
-            if registry is not None
-            else set(value.operations)
-        )
         requirements_by_key = {item.key: item for item in value.requirements}
-        for binding in bindings:
-            if (
-                binding.consumer_operation is not None
-                and binding.consumer_operation not in operations
-            ):
-                raise ValueError(
-                    f"geometry binding consumer {binding.consumer_operation!r} "
-                    "is not a requested operation"
-                )
-            if (
-                binding.consumer_requirement_key is not None
-                and binding.consumer_requirement_key not in requirements_by_key
-            ):
-                raise ValueError("geometry binding consumer requirement key is unknown")
-            if (
-                binding.source_requirement_key is not None
-                and binding.source_requirement_key not in requirements_by_key
-            ):
-                raise ValueError("geometry binding source requirement key is unknown")
-            if binding.source_operation is not None and binding.source_operation not in operations:
-                raise ValueError(
-                    f"geometry binding source {binding.source_operation!r} "
-                    "is not a requested operation"
-                )
-        if registry is not None:
-            for binding in bindings:
-                consumer_tool = None
-                if binding.consumer_requirement_key is not None:
-                    consumer_tool = registry.get(
-                        requirements_by_key[binding.consumer_requirement_key].capability
-                    )
-                elif binding.consumer_tool is not None:
-                    consumer_tool = registry.get(binding.consumer_tool)
-                elif binding.consumer_operation is not None:
-                    consumer_tool = _tool_for_operation(registry, binding.consumer_operation)
-                if consumer_tool is None:
-                    raise ValueError("geometry binding has no valid consumer Tool")
-                if consumer_tool.input_ports.get(binding.input_port) != "molecular_geometry":
-                    raise ValueError("geometry binding consumer input is not molecular geometry")
-                if binding.source_requirement_key is not None:
-                    source_tool = registry.get(
-                        requirements_by_key[binding.source_requirement_key].capability
-                    )
-                    source_type = source_tool.output_ports.get(binding.source_port)
-                    if source_type != "molecular_geometry":
-                        raise ValueError("geometry binding source is not a molecular geometry port")
-                elif binding.source_operation is not None:
-                    source_type = _tool_for_operation(
-                        registry, binding.source_operation
-                    ).output_ports.get(binding.source_port)
-                    if source_type != "molecular_geometry":
-                        raise ValueError("geometry binding source is not a molecular geometry port")
-        return value
+        subject_keys = {subject.key for subject in value.subjects.values()}
+        if len(subject_keys) != len(value.subjects):
+            raise ValueError("Subject keys must be unique")
+        if value.subjects and set(value.subjects) != subject_keys:
+            raise ValueError("Subject map keys must match each Subject key")
+        if value.requirements and not value.subjects:
+            if {item.subject_key for item in value.requirements} != {"subject_1"}:
+                raise ValueError("Requirements must identify a declared Subject")
+        elif value.subjects:
+            unknown_subjects = sorted(
+                {item.subject_key for item in value.requirements} - subject_keys
+            )
+            if unknown_subjects:
+                raise ValueError(f"Requirements refer to unknown Subjects: {unknown_subjects}")
 
-    query_selection_type: Any = QuerySelection | None
-    validators: dict[str, Any] = {
-        "_requested_results_are_available": field_validator("requested_results")(
-            _requested_results_are_available
-        ),
-        "_request_contract": model_validator(mode="after")(_request_contract),
-        "_required_geometry_bindings_are_valid": model_validator(mode="after")(
-            _required_geometry_bindings_are_valid
-        ),
-    }
+        if (
+            not value.requirements
+            and not value.missing_fields
+            and not value.unresolved_requirements
+            and value.parameter_target_requirement_key is None
+        ):
+            raise ValueError("chemistry_compute must contain at least one Requirement")
+
+        for requirement in value.requirements:
+            tool = registry.get(requirement.capability)
+            if not tool.available:
+                raise ValueError(f"Requirement capability is unavailable: {tool.name}")
+            allowed_parameters = set(tool.request_parameters)
+            raw_parameters = dict(requirement.parameters)
+            method_request = raw_parameters.pop("method_request", None)
+            if method_request is not None:
+                if "method_profile" not in allowed_parameters:
+                    raise ValueError(
+                        f"Requirement {requirement.key!r} does not accept a method request"
+                    )
+                if not isinstance(method_request, str) or not method_request.strip():
+                    raise ValueError("method_request must be a non-empty string")
+            unknown_parameters = sorted(set(raw_parameters) - allowed_parameters)
+            if unknown_parameters:
+                raise ValueError(
+                    f"Requirement {requirement.key!r} has unsupported parameters: "
+                    f"{unknown_parameters}"
+                )
+            for name in ("charge", "multiplicity"):
+                if name in raw_parameters and type(raw_parameters[name]) is not int:
+                    raise ValueError(
+                        f"electronic_state_parameter_invalid: {name} must be a strict integer"
+                    )
+            if raw_parameters:
+                tool.validate_parameter_patch(raw_parameters)
+            public_outputs = {str(item["name"]): item for item in tool.public_outputs()}
+            unknown_outputs = sorted(set(requirement.outputs) - set(public_outputs))
+            if unknown_outputs:
+                raise ValueError(
+                    f"Requirement {requirement.key!r} has undeclared outputs: {unknown_outputs}"
+                )
+            for input_name, binding in requirement.input_bindings.items():
+                expected_type = tool.input_ports.get(input_name)
+                if expected_type is None:
+                    raise ValueError(
+                        f"Requirement {requirement.key!r} has undeclared input {input_name!r}"
+                    )
+                if binding.requirement_key is not None:
+                    source = requirements_by_key.get(binding.requirement_key)
+                    if source is None:
+                        raise ValueError(
+                            f"Requirement input {input_name!r} references unknown key "
+                            f"{binding.requirement_key!r}"
+                        )
+                    source_tool = registry.get(source.capability)
+                    source_type = source_tool.output_ports.get(str(binding.port))
+                    if source_type != expected_type:
+                        raise ValueError(
+                            f"Requirement input {input_name!r} expects {expected_type!r}, "
+                            f"but source output is {source_type!r}"
+                        )
+                elif binding.artifact_alias == "initial_geometry":
+                    if expected_type != "molecular_geometry":
+                        raise ValueError(f"initial_geometry cannot bind input {input_name!r}")
+                else:
+                    raise ValueError(f"unregistered artifact alias {binding.artifact_alias!r}")
+
+        for goal in value.answer_goals:
+            selected = [requirements_by_key[key] for key in goal.requirement_keys]
+            if any(goal.output not in requirement.outputs for requirement in selected):
+                raise ValueError(
+                    f"AnswerGoal output {goal.output!r} must be requested from each Requirement"
+                )
+        return value
 
     def _dialogue_contract(value: IntakeOutput) -> IntakeOutput:
         if message is None:
             return value
-        _validate_pending_action(
-            value,
-            message=message,
-            pending_context=pending_context,
-        )
+        _validate_pending_action(value, message=message, pending_context=pending_context)
         _validate_lookup_name(value, message=message)
         return value
 
-    validators["_dialogue_contract"] = model_validator(mode="after")(_dialogue_contract)
-    if allowed_targets:
-        target_literal = Literal.__getitem__(allowed_targets)
-        requested_results_type: Any = list[target_literal]
+    query_selection_type: Any = QuerySelection | None
+    validators: dict[str, Any] = {
+        "_request_contract": model_validator(mode="after")(_request_contract),
+        "_dialogue_contract": model_validator(mode="after")(_dialogue_contract),
+    }
+
+    if capability_names:
+        capability_type: Any = Literal.__getitem__(capability_names)
+        requirement_type = create_model(
+            "RequirementProposalForCatalog",
+            __base__=RequirementProposal,
+            capability=(capability_type, ...),
+        )
     else:
-        # An absent registry cannot authorize arbitrary result strings.
-        requested_results_type = list[StrictStr]
+        requirement_type = RequirementProposal
 
     if allowed_subjects:
         targets_validator = field_validator("targets")(_targets_are_candidates)
@@ -2702,17 +3241,11 @@ def _intake_schema(
         )
         query_selection_type = selection_type | None
 
-    structure_input_type = create_model(
-        "IntakeStructureInputForCatalog",
-        __base__=IntakeStructureInput,
-    )
-
     return create_model(
         "IntakeOutputForCatalog",
         __base__=IntakeOutput,
         __validators__=validators,
-        requested_results=(requested_results_type, Field(default_factory=list)),
-        structure_input=(structure_input_type, Field(default_factory=structure_input_type)),
+        requirements=(list[requirement_type], Field(default_factory=list)),
         query_selection=(query_selection_type, None),
     )
 
@@ -2748,9 +3281,22 @@ def _coerce_intake_output(
                 ),
             )
         else:
-            raise ValueError(f"intake output failed local validation: {error}") from error
+            diagnostics = _intake_schema_diagnostics(error)
+            detail = "; ".join(f"{item['path']}: {item['message']}" for item in diagnostics)
+            raise LlmError(
+                f"intake output failed local validation: {detail}",
+                category="schema_error",
+                purpose="intake",
+                diagnostics=diagnostics,
+            ) from error
     except TypeError as error:
-        raise ValueError(f"intake output failed local validation: {error}") from error
+        diagnostics = ({"path": "$", "message": str(error)[:512]},)
+        raise LlmError(
+            f"intake output failed local validation: {diagnostics[0]['message']}",
+            category="schema_error",
+            purpose="intake",
+            diagnostics=diagnostics,
+        ) from error
     if not isinstance(output, IntakeOutput):
         raise ValueError("intake output has an unexpected model type")
     if isinstance(output.structure_input, IntakeStructureInput):
@@ -2765,6 +3311,30 @@ def _coerce_intake_output(
         result_catalog=result_catalog,
         capability_catalog=capability_catalog,
     )
+
+
+def _intake_schema_diagnostics(error: BaseException) -> tuple[dict[str, str], ...]:
+    """Extract bounded local schema facts without retaining submitted values."""
+
+    errors_method = getattr(error, "errors", None)
+    if callable(errors_method):
+        try:
+            items = errors_method(include_input=False, include_url=False)
+        except TypeError:
+            try:
+                items = errors_method(include_url=False)
+            except TypeError:
+                items = errors_method()
+        diagnostics = []
+        for item in items[:12]:
+            path = ".".join(str(part) for part in item.get("loc", ())) or "$"
+            diagnostics.append(
+                {"path": path, "message": str(item.get("msg") or "invalid value")[:512]}
+            )
+        if diagnostics:
+            return tuple(diagnostics)
+    message = str(error)
+    return ({"path": "$", "message": message[:512]},)
 
 
 def _validate_query_selection(

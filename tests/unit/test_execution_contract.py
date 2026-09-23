@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from threading import Event
 
 import pytest
+from tool_context import make_tool_context
 
 from bg6022.agent import Agent
 from bg6022.config import load_config
@@ -90,12 +90,13 @@ def test_tool_requires_explicit_permission_and_accepted_content(
         execute_orca_step(
             config,
             step=step,
-            run=run,
-            cancel=Event(),
+            context=make_tool_context(config, run, step),
             operation="SP",
             parameter_model=SinglePointParameters,
         )
-    assert not (run_directory(config.data_root_path, run.id) / "compute").exists()
+    assert not (
+        run_directory(config.data_root_path, run.id) / "compute" / "attempt-01" / "input.inp"
+    ).exists()
 
     run.execution_permission = True
     changed = step.model_copy(update={"parameters": {"charge": 1, "multiplicity": 1}})
@@ -103,8 +104,7 @@ def test_tool_requires_explicit_permission_and_accepted_content(
         execute_orca_step(
             config,
             step=changed,
-            run=run,
-            cancel=Event(),
+            context=make_tool_context(config, run, changed),
             operation="SP",
             parameter_model=SinglePointParameters,
         )
@@ -176,8 +176,7 @@ def test_failed_opt_with_missing_xyz_can_publish_only_restart_candidate(
     result = execute_orca_step(
         config,
         step=step,
-        run=run,
-        cancel=Event(),
+        context=make_tool_context(config, run, step),
         operation="Opt",
         parameter_model=OptimizeParameters,
     )

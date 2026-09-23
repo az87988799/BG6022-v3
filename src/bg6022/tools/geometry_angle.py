@@ -6,20 +6,14 @@ import csv
 import io
 import math
 from collections.abc import Mapping
-from threading import Event
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 from bg6022.config import AppConfig
-from bg6022.models import Result, Run, Step, Tool
-from bg6022.session import (
-    artifact_path,
-    register_bytes_artifact,
-    run_directory,
-    save_run,
-)
+from bg6022.models import Result, Step, Tool
 from bg6022.tools.molecule import parse_xyz_bytes, resolve_artifact_reference
+from bg6022.tools.runtime import ToolCallContext
 
 
 class GeometryAngleParameters(BaseModel):
@@ -50,10 +44,10 @@ def validate_angle_parameters(parameters: dict[str, Any], context: Mapping[str, 
 
 
 def make_geometry_angle_tool(config: AppConfig | None = None) -> Tool:
-    def execute(step: Step, run: Run, cancel: Event) -> Result:
+    def execute(step: Step, context: ToolCallContext) -> Result:
         if config is None:
             raise RuntimeError("tool 'geometry_angle' is a description-only Tool")
-        return execute_geometry_angle(config, step=step, run=run, cancel=cancel)
+        return execute_geometry_angle(config, step=step, context=context)
 
     return Tool(
         name="geometry_angle",
@@ -101,11 +95,8 @@ def make_geometry_angle_tool(config: AppConfig | None = None) -> Tool:
     )
 
 
-def execute_geometry_angle(config: AppConfig, *, step: Step, run: Run, cancel: Event) -> Result:
+def execute_geometry_angle(config: AppConfig, *, step: Step, context: ToolCallContext) -> Result:
     parameters = GeometryAngleParameters.model_validate(step.parameters, strict=True)
-    attempt = _next_attempt(run, step.id)
-    relative = f"{step.id}/attempt-{attempt:02d}"
-    (run_directory(config.data_root_path, run.id) / relative).mkdir(parents=True, exist_ok=True)
     status = "failed"
     values: dict[str, Any] = {}
     diagnostics: dict[str, Any] = {}
@@ -113,7 +104,7 @@ def execute_geometry_angle(config: AppConfig, *, step: Step, run: Run, cancel: E
     output_ports: dict[str, str] = {}
     input_artifact_id: str | None = None
     try:
-        if cancel.is_set():
+        if context.cancel.is_set():
             status = "cancelled"
             diagnostics = {"category": "cancelled", "reason": "cancelled before angle measurement"}
         else:
@@ -121,12 +112,10 @@ def execute_geometry_angle(config: AppConfig, *, step: Step, run: Run, cancel: E
             if reference is None:
                 raise ValueError("geometry_angle requires a geometry input reference")
             geometry_artifact = resolve_artifact_reference(
-                config, run, reference, expected_type="molecular_geometry"
+                config, context.run, reference, expected_type="molecular_geometry"
             )
             input_artifact_id = geometry_artifact.id
-            geometry_bytes = artifact_path(
-                config.data_root_path, run, geometry_artifact
-            ).read_bytes()
+            geometry_bytes = context.read_input("geometry")
             geometry = parse_xyz_bytes(geometry_bytes)
             indices = (parameters.atom_i, parameters.atom_j, parameters.atom_k)
             if max(indices) > geometry.atom_count:
@@ -148,20 +137,16 @@ def execute_geometry_angle(config: AppConfig, *, step: Step, run: Run, cancel: E
             angle = math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
             if not math.isfinite(angle) or not 0.0 <= angle <= 180.0:
                 raise ValueError("angle is outside the physical 0-180 degree range")
-            if cancel.is_set():
+            if context.cancel.is_set():
                 status = "cancelled"
                 diagnostics = {"category": "cancelled", "reason": "cancelled before CSV export"}
             else:
-                report = register_bytes_artifact(
-                    config.data_root_path,
-                    run,
+                report = context.register_bytes(
                     _records_csv(selected),
                     artifact_type="text_file",
                     role="angle_atom_report",
                     source=f"geometry_angle:{geometry_artifact.id}:{geometry_artifact.sha256}",
                     extension=".csv",
-                    step_id=step.id,
-                    attempt=attempt,
                     metadata={
                         "geometry_artifact_id": geometry_artifact.id,
                         "geometry_sha256": geometry_artifact.sha256,
@@ -198,22 +183,7 @@ def execute_geometry_angle(config: AppConfig, *, step: Step, run: Run, cancel: E
             "geometry_artifact_id": input_artifact_id,
         }
 
-    run.attempts.append(
-        {
-            "step_id": step.id,
-            "attempt": attempt,
-            "phase": "finished",
-            "status": status,
-            "artifact_ids": artifact_ids,
-            "output_ports": output_ports,
-            "input_artifact_ids": [input_artifact_id] if input_artifact_id else [],
-        }
-    )
-    save_run(config.data_root_path, run)
-    return Result(
-        run_id=run.id,
-        step_id=step.id,
-        attempt=attempt,
+    return context.make_result(
         status=status,  # type: ignore[arg-type]
         values=values,
         artifact_ids=artifact_ids,
@@ -221,7 +191,6 @@ def execute_geometry_angle(config: AppConfig, *, step: Step, run: Run, cancel: E
         diagnostics=diagnostics,
         input_bindings={"geometry": input_artifact_id} if input_artifact_id else {},
         input_artifact_ids=[input_artifact_id] if input_artifact_id else [],
-        attempt_relative_path=relative,
     )
 
 
@@ -257,13 +226,6 @@ def _vector(
     point: tuple[float, float, float], vertex: tuple[float, float, float]
 ) -> tuple[float, float, float]:
     return tuple(float(left - right) for left, right in zip(point, vertex, strict=True))
-
-
-def _next_attempt(run: Run, step_id: str) -> int:
-    attempts = [
-        int(item.get("attempt", 0)) for item in run.attempts if item.get("step_id") == step_id
-    ]
-    return max(attempts, default=0) + 1
 
 
 __all__ = ["GeometryAngleParameters", "execute_geometry_angle", "make_geometry_angle_tool"]

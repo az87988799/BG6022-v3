@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from threading import Event
+
+from tool_context import make_tool_context
 
 from bg6022.agent import Agent
 from bg6022.config import load_config
@@ -176,7 +177,7 @@ def test_registered_geometry_angle_rejects_missing_and_out_of_range_inputs(tmp_p
     )
     create_run(config.data_root_path, run)
 
-    missing = tool.execute(step, run, cancel=Event())
+    missing = tool.execute(step, make_tool_context(config, run, step))
     assert missing.status == "failed"
     assert missing.diagnostics["category"] == "angle_measurement_failed"
     assert "requires a geometry input" in missing.diagnostics["reason"]
@@ -198,7 +199,7 @@ def test_registered_geometry_angle_rejects_missing_and_out_of_range_inputs(tmp_p
     )
     run.plan = plan.model_copy(update={"steps": [invalid_step]})
     save_run(config.data_root_path, run)
-    invalid = tool.execute(invalid_step, run, cancel=Event())
+    invalid = tool.execute(invalid_step, make_tool_context(config, run, invalid_step))
     assert invalid.status == "failed"
     assert invalid.diagnostics["category"] == "angle_measurement_failed"
     assert "2 atoms" in invalid.diagnostics["reason"]
