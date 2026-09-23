@@ -720,8 +720,12 @@ class Request(StrictModel):
             )
         requirements_by_id = {item.id: item for item in self.requirements}
         for requirement in self.requirements:
+            if not requirement.input_bindings:
+                continue
+            consumer_tool = registry.get(requirement.capability)
             for input_port, binding in requirement.input_bindings.items():
-                consumer_tool = registry.get(requirement.capability)
+                if consumer_tool.input_ports.get(input_port) != "molecular_geometry":
+                    continue
                 if requirement_counts[requirement.capability] > 1:
                     consumer = {"consumer_requirement_id": requirement.id}
                 elif len(consumer_tool.operations) == 1:
