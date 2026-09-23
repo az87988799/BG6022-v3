@@ -8,6 +8,7 @@ from bg6022.benchmark.loader import (
     BenchmarkConfigurationError,
     fixture_path,
     load_cases,
+    load_fixture,
 )
 from bg6022.benchmark.models import BenchmarkCase
 
@@ -19,6 +20,18 @@ def test_case_sets_keep_holdout_separate() -> None:
     assert len(all_cases) == len(cases) + 4
     assert sum(case.mode in {"offline", "replay"} for case in cases) >= 20
     assert sum(case.mode == "live_llm" for case in cases) >= 10
+
+
+def test_live_compute_cases_declare_loadable_fixtures() -> None:
+    cases = load_cases("benchmarks/v1")
+    live_compute_cases = [case for case in cases if case.requires_orca]
+    assert live_compute_cases
+    for case in live_compute_cases:
+        assert case.fixture is not None
+        load_fixture(case, "benchmarks/v1")
+
+    missing_executable = next(case for case in live_compute_cases if case.id.startswith("B032"))
+    assert load_fixture(missing_executable, "benchmarks/v1")["force_missing_executable"] is True
 
 
 def test_loader_rejects_unknown_assertion(tmp_path) -> None:
