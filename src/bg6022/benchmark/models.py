@@ -5,7 +5,16 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 BenchmarkCategory = Literal[
     "intake",
@@ -47,6 +56,7 @@ AssertionType = Literal[
     "same_input_geometry",
     "input_from_requirement",
     "input_from_port",
+    "input_from_tool_port",
     "result_target_present",
     "result_status",
     "scientific_check",
@@ -73,6 +83,8 @@ class BenchmarkAssertion(BenchmarkModel):
     step_id: StrictStr | None = None
     other_step_id: StrictStr | None = None
     requirement_id: StrictStr | None = None
+    tool: StrictStr | None = None
+    other_tool: StrictStr | None = None
     critical: bool = False
 
     @field_validator("critical", mode="before")
@@ -81,6 +93,16 @@ class BenchmarkAssertion(BenchmarkModel):
         if type(value) is not bool:
             raise ValueError("critical must be a boolean")
         return value
+
+    @model_validator(mode="after")
+    def _semantic_tool_selector(self) -> BenchmarkAssertion:
+        if self.type == "input_from_tool_port" and (
+            not self.tool or not self.other_tool or not isinstance(self.value, str)
+        ):
+            raise ValueError(
+                "input_from_tool_port needs tool, other_tool, and a port name in value"
+            )
+        return self
 
 
 class BenchmarkCase(BenchmarkModel):
@@ -118,6 +140,55 @@ class BenchmarkCase(BenchmarkModel):
         return value
 
 
+class LiveSetup(BenchmarkModel):
+    """Finite, data-only initial state for a production Agent live scenario."""
+
+    active_run_fixture: StrictStr | None = None
+    active_run_status: Literal["waiting", "succeeded"] | None = None
+    waiting_for: Literal["clarification", "confirmation"] | None = None
+    pending_data: dict[str, Any] = Field(default_factory=dict)
+    recent_messages: list[dict[StrictStr, StrictStr]] = Field(default_factory=list)
+    recent_results: list[dict[str, Any]] = Field(default_factory=list)
+    last_delivery: list[dict[str, Any]] = Field(default_factory=list)
+    published_result_fixture: StrictStr | None = None
+
+    @model_validator(mode="after")
+    def _consistent_seed_state(self) -> LiveSetup:
+        if self.active_run_status is None:
+            if any(
+                value is not None
+                for value in (
+                    self.active_run_fixture,
+                    self.waiting_for,
+                    self.published_result_fixture,
+                )
+            ):
+                raise ValueError("active Run fields require active_run_status")
+            return self
+        if not self.active_run_fixture:
+            raise ValueError("an active Run state requires active_run_fixture")
+        if self.active_run_status == "waiting":
+            if self.waiting_for is None or self.published_result_fixture is not None:
+                raise ValueError(
+                    "a waiting Run needs waiting_for and cannot seed a published Result"
+                )
+        elif self.waiting_for is not None or not self.published_result_fixture:
+            raise ValueError(
+                "a succeeded Run needs published_result_fixture and cannot be waiting"
+            )
+        return self
+
+
+class LiveResultFixture(BenchmarkModel):
+    """Bounded, previously verified Result evidence used to seed a query case."""
+
+    evidence_class: Literal["real_orca_fixture"]
+    tool: StrictStr
+    output_geometry: StrictStr
+    values: dict[str, Any]
+    checks: dict[StrictStr, StrictBool]
+
+
 class CaseObservation(BenchmarkModel):
     case_id: StrictStr
     run_index: StrictInt = Field(ge=1)
@@ -131,6 +202,7 @@ class CaseObservation(BenchmarkModel):
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
     response_text: StrictStr | None = None
     llm_calls: list[dict[str, Any]] = Field(default_factory=list)
+    llm_structured_outputs: list[dict[str, Any]] = Field(default_factory=list)
     orca_attempts: StrictInt = Field(default=0, ge=0)
     orca_successes: StrictInt = Field(default=0, ge=0)
     orca_failures: StrictInt = Field(default=0, ge=0)
@@ -138,6 +210,7 @@ class CaseObservation(BenchmarkModel):
     elapsed_seconds: float = Field(default=0.0, ge=0)
     error_category: StrictStr | None = None
     error_message: StrictStr | None = None
+    error_diagnostics: list[dict[StrictStr, StrictStr]] = Field(default_factory=list)
     critical_violations: list[StrictStr] = Field(default_factory=list)
     unrequested_compute: bool = False
     unexpected_recomputation: bool = False
@@ -172,4 +245,6 @@ __all__ = [
     "BenchmarkCase",
     "CaseObservation",
     "CaseResult",
+    "LiveResultFixture",
+    "LiveSetup",
 ]

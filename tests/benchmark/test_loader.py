@@ -10,7 +10,7 @@ from bg6022.benchmark.loader import (
     load_cases,
     load_fixture,
 )
-from bg6022.benchmark.models import BenchmarkCase
+from bg6022.benchmark.models import BenchmarkCase, LiveSetup
 
 
 def test_case_sets_keep_holdout_separate() -> None:
@@ -32,6 +32,51 @@ def test_live_compute_cases_declare_loadable_fixtures() -> None:
 
     missing_executable = next(case for case in live_compute_cases if case.id.startswith("B032"))
     assert load_fixture(missing_executable, "benchmarks/v1")["force_missing_executable"] is True
+
+
+def test_live_scenario_fixtures_validate_and_resolve_seed_references() -> None:
+    cases = {item.id: item for item in load_cases("benchmarks/v1")}
+    expected = {
+        "B010_modify_second_requirement": "waiting",
+        "B022_ambiguous_iteration": "waiting",
+        "B028_history_energy_query": "succeeded",
+    }
+    for case_id, status in expected.items():
+        fixture = load_fixture(cases[case_id], "benchmarks/v1")
+        setup = LiveSetup.model_validate(fixture["live_setup"], strict=True)
+        assert setup.active_run_status == status
+        assert setup.active_run_fixture
+
+
+def test_live_setup_references_cannot_escape_benchmark_root(tmp_path) -> None:
+    root = tmp_path / "benchmark"
+    root.mkdir()
+    (root / "case.json").write_text(
+        json.dumps(
+            {
+                "live_setup": {
+                    "active_run_fixture": "../outside.json",
+                    "active_run_status": "waiting",
+                    "waiting_for": "confirmation",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    case = BenchmarkCase.model_validate(
+        {
+            "id": "live_path_case",
+            "category": "planning",
+            "support": "supported",
+            "mode": "live_llm",
+            "prompt": "fixture path containment",
+            "fixture": "case.json",
+            "assertions": [{"type": "step_count", "value": 1}],
+        },
+        strict=True,
+    )
+    with pytest.raises(BenchmarkConfigurationError, match="remain inside"):
+        load_fixture(case, root)
 
 
 def test_loader_rejects_unknown_assertion(tmp_path) -> None:

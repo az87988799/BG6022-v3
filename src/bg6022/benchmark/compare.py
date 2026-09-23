@@ -14,6 +14,10 @@ class BenchmarkReportError(ValueError):
 def compare_reports(baseline_dir: str | Path, candidate_dir: str | Path) -> dict[str, Any]:
     baseline = _read_summary(baseline_dir)
     candidate = _read_summary(candidate_dir)
+    if baseline.get("benchmark_version") != candidate.get("benchmark_version"):
+        raise BenchmarkReportError(
+            "benchmark versions differ; capability pass-rate comparison is not valid"
+        )
     before = _case_map(baseline)
     after = _case_map(candidate)
     improved: list[dict[str, Any]] = []
@@ -50,12 +54,14 @@ def compare_reports(baseline_dir: str | Path, candidate_dir: str | Path) -> dict
     return {
         "baseline": {
             "run_id": baseline.get("run_id"),
+            "benchmark_version": baseline.get("benchmark_version"),
             "commit": baseline.get("commit"),
             "passed_cases": baseline.get("passed_cases"),
             "case_count": baseline.get("case_count"),
         },
         "candidate": {
             "run_id": candidate.get("run_id"),
+            "benchmark_version": candidate.get("benchmark_version"),
             "commit": candidate.get("commit"),
             "passed_cases": candidate.get("passed_cases"),
             "case_count": candidate.get("case_count"),
@@ -82,6 +88,7 @@ def render_comparison_markdown(comparison: dict[str, Any]) -> str:
         "",
         f"Baseline: {baseline.get('commit') or baseline.get('run_id') or 'unknown'}",
         f"Candidate: {candidate.get('commit') or candidate.get('run_id') or 'unknown'}",
+        f"Benchmark version: {baseline.get('benchmark_version') or 'unknown'}",
         "",
         "## Case changes",
         "",

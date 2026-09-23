@@ -24,9 +24,11 @@ def observation_from_runtime(
     results: list[Result] | None = None,
     response_text: str | None = None,
     llm_calls: list[Any] | None = None,
+    llm_structured_outputs: list[dict[str, Any]] | None = None,
     elapsed_seconds: float = 0.0,
     error_category: str | None = None,
     error_message: str | None = None,
+    error_diagnostics: list[dict[str, str]] | None = None,
     registry: ToolRegistry | None = None,
 ) -> CaseObservation:
     run_dump = _dump(run) if run is not None else None
@@ -47,6 +49,7 @@ def observation_from_runtime(
         artifacts=artifacts,
         response_text=response_text,
         llm_calls=[_dump(item) for item in (llm_calls or [])],
+        llm_structured_outputs=[dict(item) for item in (llm_structured_outputs or [])],
         orca_attempts=count,
         orca_successes=successes,
         orca_failures=failures,
@@ -54,6 +57,7 @@ def observation_from_runtime(
         elapsed_seconds=max(0.0, float(elapsed_seconds)),
         error_category=error_category,
         error_message=(error_message[:1000] if error_message else None),
+        error_diagnostics=[dict(item) for item in (error_diagnostics or [])],
     )
 
 

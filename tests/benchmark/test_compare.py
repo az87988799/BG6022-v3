@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import json
 
-from bg6022.benchmark.compare import compare_reports, render_comparison_markdown
+import pytest
+
+from bg6022.benchmark.compare import (
+    BenchmarkReportError,
+    compare_reports,
+    render_comparison_markdown,
+)
 
 
 def _report(path, *, passed, token_count):
@@ -34,3 +40,18 @@ def test_compare_identifies_regression_and_cost_delta(tmp_path) -> None:
     markdown = render_comparison_markdown(result)
     assert "B009 run 1" in markdown
     assert markdown.isascii()
+
+
+def test_compare_rejects_capability_scores_across_versions(tmp_path) -> None:
+    baseline = tmp_path / "baseline"
+    candidate = tmp_path / "candidate"
+    _report(baseline, passed=True, token_count=100)
+    _report(candidate, passed=True, token_count=80)
+    for path, version in ((baseline, "1.0"), (candidate, "1.1")):
+        summary_path = path / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["benchmark_version"] = version
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    with pytest.raises(BenchmarkReportError, match="benchmark versions differ"):
+        compare_reports(baseline, candidate)

@@ -21,6 +21,7 @@ _DIMENSION_BY_ASSERTION = {
     "same_input_geometry": "plan_correct",
     "input_from_requirement": "plan_correct",
     "input_from_port": "plan_correct",
+    "input_from_tool_port": "plan_correct",
     "result_target_present": "plan_correct",
     "result_status": "execution_correct",
     "scientific_check": "scientific_correct",
@@ -194,6 +195,25 @@ def grade_assertion(assertion: BenchmarkAssertion, observation: CaseObservation)
             if ref.get("step_id") == assertion.other_step_id and ref.get("port") == expected
         ]
         passed = bool(observed)
+    elif assertion.type == "input_from_tool_port":
+        consumer, consumer_count = _unique_step_by_tool(plan, assertion.tool)
+        source, source_count = _unique_step_by_tool(plan, assertion.other_tool)
+        if consumer is None or source is None:
+            observed = {
+                "consumer_tool": assertion.tool,
+                "consumer_matches": consumer_count,
+                "source_tool": assertion.other_tool,
+                "source_matches": source_count,
+            }
+            if consumer_count > 1 or source_count > 1:
+                detail = "ambiguous semantic selector"
+        else:
+            observed = [
+                ref
+                for ref in _input_references(consumer)
+                if ref.get("step_id") == source.get("id") and ref.get("port") == expected
+            ]
+            passed = bool(observed)
     elif assertion.type == "result_target_present":
         targets = plan.get("requested_results", [])
         observed = targets
@@ -294,6 +314,15 @@ def _find_step(plan: dict[str, Any], step_id: str | None) -> dict[str, Any] | No
     if step_id is None:
         return None
     return next((item for item in plan.get("steps", []) if item.get("id") == step_id), None)
+
+
+def _unique_step_by_tool(
+    plan: dict[str, Any], tool: str | None
+) -> tuple[dict[str, Any] | None, int]:
+    if tool is None:
+        return None, 0
+    matches = [item for item in plan.get("steps", []) if item.get("tool") == tool]
+    return (matches[0] if len(matches) == 1 else None), len(matches)
 
 
 def _geometry_binding(step: dict[str, Any] | None) -> Any:

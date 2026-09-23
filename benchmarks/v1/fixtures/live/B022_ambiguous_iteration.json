@@ -1,0 +1,7 @@
+{
+  "live_setup": {
+    "active_run_fixture": "fixtures/planner/O003_r2scan_water_opt.json",
+    "active_run_status": "waiting",
+    "waiting_for": "confirmation"
+  }
+}

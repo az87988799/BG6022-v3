@@ -1,0 +1,14 @@
+{
+  "live_setup": {
+    "active_run_fixture": "fixtures/planner/O003_r2scan_water_opt.json",
+    "active_run_status": "succeeded",
+    "published_result_fixture": "fixtures/live/B028_verified_opt_result.json",
+    "recent_messages": [
+      {"role": "user", "content": "请优化水分子。"},
+      {
+        "role": "assistant",
+        "content": "水分子的几何优化已完成，优化后的电子能为 -76.418938720985 Eh。"
+      }
+    ]
+  }
+}

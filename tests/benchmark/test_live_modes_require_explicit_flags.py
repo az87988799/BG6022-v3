@@ -18,7 +18,7 @@ def test_offline_case_uses_production_plan_pipeline_without_live_calls(monkeypat
     def forbidden(*_args, **_kwargs):
         raise AssertionError("offline benchmark must not call a live execution boundary")
 
-    monkeypatch.setattr(runner, "intake_message", forbidden)
+    monkeypatch.setattr(runner, "_run_live_llm", forbidden)
     monkeypatch.setattr(runner.Agent, "execute_plan", forbidden)
     case = next(item for item in load_cases("benchmarks/v1") if item.id == "B002_single_sp")
     observations = run_case(case, config=None, benchmark_dir="benchmarks/v1")

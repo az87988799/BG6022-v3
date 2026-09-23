@@ -130,3 +130,90 @@ def test_method_profile_assertion_checks_resolution_status() -> None:
         strict=True,
     )
     assert grade_case(case, observation).passed is True
+
+
+def test_live_port_assertion_uses_unique_tool_selectors_not_step_ids() -> None:
+    case = BenchmarkCase.model_validate(
+        {
+            "id": "semantic_port_case",
+            "category": "planning",
+            "support": "supported",
+            "mode": "live_llm",
+            "prompt": "optimize then calculate frequencies",
+            "assertions": [
+                {
+                    "type": "input_from_tool_port",
+                    "value": "optimized_geometry",
+                    "tool": "frequency",
+                    "other_tool": "optimize_geometry",
+                }
+            ],
+        },
+        strict=True,
+    )
+    observation = CaseObservation.model_validate(
+        {
+            "case_id": case.id,
+            "run_index": 1,
+            "status": "completed",
+            "stage": "complete",
+            "plan": {
+                "steps": [
+                    {"id": "llm_opt_step", "tool": "optimize_geometry", "inputs": {}},
+                    {
+                        "id": "llm_frequency_step",
+                        "tool": "frequency",
+                        "inputs": {
+                            "geometry": {
+                                "step_id": "llm_opt_step",
+                                "port": "optimized_geometry",
+                            }
+                        },
+                    },
+                ]
+            },
+        },
+        strict=True,
+    )
+    result = grade_case(case, observation)
+    assert result.passed is True
+
+
+def test_live_port_assertion_reports_ambiguous_tool_selector() -> None:
+    case = BenchmarkCase.model_validate(
+        {
+            "id": "ambiguous_semantic_port_case",
+            "category": "planning",
+            "support": "supported",
+            "mode": "live_llm",
+            "prompt": "optimize then calculate frequencies",
+            "assertions": [
+                {
+                    "type": "input_from_tool_port",
+                    "value": "optimized_geometry",
+                    "tool": "frequency",
+                    "other_tool": "optimize_geometry",
+                }
+            ],
+        },
+        strict=True,
+    )
+    observation = CaseObservation.model_validate(
+        {
+            "case_id": case.id,
+            "run_index": 1,
+            "status": "completed",
+            "stage": "complete",
+            "plan": {
+                "steps": [
+                    {"id": "opt_a", "tool": "optimize_geometry", "inputs": {}},
+                    {"id": "opt_b", "tool": "optimize_geometry", "inputs": {}},
+                    {"id": "freq", "tool": "frequency", "inputs": {}},
+                ]
+            },
+        },
+        strict=True,
+    )
+    assertion = grade_case(case, observation).assertions[0]
+    assert assertion.passed is False
+    assert assertion.detail == "ambiguous semantic selector"

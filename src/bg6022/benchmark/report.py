@@ -99,7 +99,16 @@ def summarize_results(
         for result in results
         for code in result.observation.critical_violations
     ]
+    critical_case_failures = [
+        {"case_id": result.case_id, "run_index": result.run_index}
+        for result in results
+        if any(assertion.critical and not assertion.passed for assertion in result.assertions)
+    ]
     case_count = len(results)
+    unrequested_compute = sum(result.observation.unrequested_compute for result in results)
+    unexpected_recomputation = sum(
+        result.observation.unexpected_recomputation for result in results
+    )
     by_mode = _group_pass_rates(results, lambda item: item.mode)
     return {
         "benchmark_version": BENCHMARK_VERSION,
@@ -119,22 +128,26 @@ def summarize_results(
         "live_e2e_pass_rate": by_mode.get("live_e2e", {"passed": 0, "total": 0, "rate": None}),
         "supported_task_success": _rate_for_support(results, "supported"),
         "boundary_accuracy": dimensions["boundary_correct"],
-        "unrequested_compute": sum(result.observation.unrequested_compute for result in results),
+        "unrequested_compute": unrequested_compute,
         "unrequested_compute_rate": (
-            sum(result.observation.unrequested_compute for result in results) / case_count
+            unrequested_compute / case_count
             if case_count
             else None
         ),
-        "unexpected_recomputation": sum(
-            result.observation.unexpected_recomputation for result in results
-        ),
+        "unexpected_recomputation": unexpected_recomputation,
         "unexpected_recomputation_rate": (
-            sum(result.observation.unexpected_recomputation for result in results) / case_count
+            unexpected_recomputation / case_count
             if case_count
             else None
         ),
         "critical_violations": violations,
         "critical_violation_count": len(violations),
+        "critical_violation_count_deprecated": True,
+        "critical_assertion_failures": violations,
+        "critical_assertion_failure_count": len(violations),
+        "critical_case_failures": critical_case_failures,
+        "critical_case_failure_count": len(critical_case_failures),
+        "execution_safety_violation_count": unrequested_compute + unexpected_recomputation,
         "cost": {
             **llm,
             "orca_attempts": total_orca,
@@ -190,7 +203,7 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
     dimensions = summary["dimensions"]
     cost = summary["cost"]
     lines = [
-        "# BG6022 Benchmark v1",
+        f"# BG6022 Benchmark v{BENCHMARK_VERSION}",
         "",
         f"Commit: {summary.get('commit') or 'unknown'}",
         f"Branch: {summary.get('branch') or 'unknown'}",
@@ -208,7 +221,9 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
         _metric_line("Repair success", dimensions["repair_success"]),
         f"Unrequested compute: {summary['unrequested_compute']}",
         f"Unexpected recomputation: {summary['unexpected_recomputation']}",
-        f"Critical violations: {summary['critical_violation_count']}",
+        f"Critical assertion failures: {summary['critical_assertion_failure_count']}",
+        f"Critical case failures: {summary['critical_case_failure_count']}",
+        f"Execution safety violations: {summary['execution_safety_violation_count']}",
         "",
         "## Reliability by mode",
         "",
@@ -238,6 +253,26 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
     if skipped:
         lines.extend([f"Not selected: {len(skipped)} live/holdout cases", ""])
     failures = [item for item in summary["cases"] if not item["passed"]]
+    diagnostic_cases = [
+        item
+        for item in summary["cases"]
+        if item.get("observation", {}).get("error_diagnostics")
+    ]
+    if diagnostic_cases:
+        lines.extend(["", "## LLM diagnostics", ""])
+        for item in diagnostic_cases:
+            observation = item["observation"]
+            lines.append(f"### {item['case_id']} (run {item['run_index']})")
+            lines.append("")
+            for diagnostic in observation.get("error_diagnostics", []):
+                path = diagnostic.get("path", "$")
+                purpose = diagnostic.get("purpose", "llm")
+                category = diagnostic.get("category", "error")
+                message = diagnostic.get("message", "")
+                lines.append(
+                    f"- `{path}` ({purpose}/{category}): {message or 'no detail'}"
+                )
+            lines.append("")
     if failures:
         lines.extend(["", "## Failed cases", ""])
         for item in failures:
@@ -257,6 +292,14 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
                     )
             if item["observation"].get("error_message"):
                 lines.append(f"- Error: {item['observation']['error_message']}")
+            for diagnostic in item["observation"].get("error_diagnostics", []):
+                lines.append(
+                    "- Diagnostic `{}:{}`: {}".format(
+                        diagnostic.get("purpose", "llm"),
+                        diagnostic.get("path", diagnostic.get("category", "error")),
+                        diagnostic.get("message", ""),
+                    )
+                )
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

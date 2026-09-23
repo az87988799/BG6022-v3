@@ -129,8 +129,9 @@ def _run(args: argparse.Namespace) -> int:
     print(f"Passed: {summary['passed_cases']}/{summary['case_count']}")
     print(
         f"LLM calls: {summary['cost']['calls']} | ORCA attempts: "
-        f"{summary['cost']['orca_attempts']} | Critical violations: "
-        f"{summary['critical_violation_count']}"
+        f"{summary['cost']['orca_attempts']} | Critical assertion failures: "
+        f"{summary['critical_assertion_failure_count']} | Execution safety violations: "
+        f"{summary['execution_safety_violation_count']}"
     )
     if any(
         not result.passed and result.observation.error_category in _DEPENDENCY_CATEGORIES

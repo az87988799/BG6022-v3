@@ -1,0 +1,30 @@
+{
+  "evidence_class": "real_orca_fixture",
+  "tool": "optimize_geometry",
+  "output_geometry": "fixtures/live/B028_verified_optimized_water.xyz",
+  "values": {
+    "opt_final_electronic_energy": {
+      "source_line": 3107,
+      "token": "-76.418938720985",
+      "unit": "Eh",
+      "value": -76.418938720985
+    }
+  },
+  "checks": {
+    "exit_code_zero": true,
+    "final_energy_selected": true,
+    "finite_final_energy": true,
+    "geometry_consistent": true,
+    "input_hashes_match": true,
+    "normal_termination": true,
+    "optimization_converged": true,
+    "output_geometry_present": true,
+    "process_tree_empty": true,
+    "runner_succeeded": true,
+    "scf_converged": true,
+    "stderr_within_size_limit": true,
+    "stdout_geometry_present": true,
+    "stdout_valid_utf8": true,
+    "stdout_within_size_limit": true
+  }
+}

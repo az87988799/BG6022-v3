@@ -26,6 +26,7 @@ def test_summary_case_count_and_critical_gate_are_not_averaged(tmp_path) -> None
             "status": "completed",
             "stage": "complete",
             "plan": {"steps": [{"tool": "optimize_geometry"}]},
+            "unrequested_compute": True,
         },
         strict=True,
     )
@@ -38,5 +39,13 @@ def test_summary_case_count_and_critical_gate_are_not_averaged(tmp_path) -> None
     rows = (tmp_path / "report" / "cases.jsonl").read_text(encoding="utf-8").splitlines()
     assert summary["case_count"] == len(rows) == len(stored["cases"]) == 1
     assert summary["critical_violation_count"] == 1
+    assert summary["critical_assertion_failure_count"] == 1
+    assert summary["critical_case_failure_count"] == 1
+    assert summary["execution_safety_violation_count"] == 1
     assert summary["cost"]["calls"] == 0
     assert summary["cost"]["orca_attempts"] == 0
+    markdown = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    assert "Critical assertion failures: 1" in markdown
+    assert "Critical case failures: 1" in markdown
+    assert "Execution safety violations: 1" in markdown
+    assert "Critical violations:" not in markdown

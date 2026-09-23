@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -10,15 +11,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bg6022.agent import INPUT_GEOMETRY_PLACEHOLDER, Agent
+from pydantic import BaseModel
+
+from bg6022.agent import INPUT_GEOMETRY_PLACEHOLDER, Agent, AgentResponse
 from bg6022.config import AppConfig
 from bg6022.llm import LlmClient, LlmError
 from bg6022.models import InputReference, Plan, Request, Result, Run
+from bg6022.orca.profiles import get_profile
 from bg6022.planner import (
     IntakeOutput,
     PlanProposal,
-    intake_message,
-    plan_message,
     proposal_to_plan,
     request_from_intake,
     validate_request_plan,
@@ -27,6 +29,7 @@ from bg6022.session import (
     artifact_path,
     create_run,
     publish_step_result,
+    register_bytes_artifact,
     register_file_artifact,
     run_directory,
     save_run,
@@ -34,8 +37,12 @@ from bg6022.session import (
 )
 from bg6022.tools.registry import ToolRegistry, build_registry
 
-from .loader import BenchmarkConfigurationError, load_fixture
-from .models import BenchmarkCase, CaseObservation
+from .loader import (
+    BenchmarkConfigurationError,
+    load_fixture,
+    load_fixture_reference,
+)
+from .models import BenchmarkCase, CaseObservation, LiveResultFixture, LiveSetup
 from .observers import count_orca_attempts, observation_from_runtime
 
 
@@ -62,7 +69,7 @@ def run_case(
         allow_live_pubchem=allow_live_pubchem,
         config=config,
     )
-    if config is not None and case.requires_orca:
+    if config is not None and (case.requires_orca or case.mode == "live_llm"):
         data_root = data_root or _default_data_root(benchmark_dir)
     observations: list[CaseObservation] = []
     for run_index in range(1, case.repeat + 1):
@@ -75,7 +82,13 @@ def run_case(
                 data_root=data_root,
             )
         elif case.mode == "live_llm":
-            observation = _run_live_llm(case, run_index=run_index, config=_required_config(config))
+            observation = _run_live_llm(
+                case,
+                run_index=run_index,
+                benchmark_dir=benchmark_dir,
+                config=_required_config(config),
+                data_root=data_root,
+            )
         elif case.mode == "live_orca":
             observation = _run_live_orca(
                 case,
@@ -341,85 +354,581 @@ def _artifact_aliases(fixture: dict[str, Any]) -> dict[str, str]:
     return aliases
 
 
-def _run_live_llm(case: BenchmarkCase, *, run_index: int, config: AppConfig) -> CaseObservation:
-    started = time.monotonic()
-    registry = build_registry(config)
-    client = LlmClient(config)
-    stage = "intake"
-    intake = None
-    request = None
-    plan = None
-    try:
-        intake = intake_message(
-            client,
-            case.prompt,
-            result_catalog=registry.result_capabilities(),
-            geometry_catalog=[],
-            capability_catalog=registry.result_capabilities(),
-            registry=registry,
-        )
-        request = request_from_intake(
-            case.prompt,
-            intake,
-            request_id=f"benchmark_{case.id}_{run_index}",
-            registry=registry,
-        )
-        if request.requirements and not request.missing_fields:
-            stage = "planner"
-            proposal = plan_message(client, request, registry=registry)
-            stage = "plan_validation"
-            plan = proposal_to_plan(
-                request,
-                proposal,
-                registry,
-                plan_id=f"plan_{case.id}_{run_index}",
-                artifact_aliases={
-                    "initial_geometry": INPUT_GEOMETRY_PLACEHOLDER,
-                    "provided_geometry": INPUT_GEOMETRY_PLACEHOLDER,
-                    "input_geometry": INPUT_GEOMETRY_PLACEHOLDER,
-                },
+class _RecordingLlmClient(LlmClient):
+    """Record validated model outputs and bounded errors without changing calls."""
+
+    def __init__(self, config: AppConfig) -> None:
+        super().__init__(config)
+        self.structured_outputs: list[dict[str, Any]] = []
+        self.errors: list[dict[str, Any]] = []
+
+    def complete_json(
+        self,
+        messages,
+        schema,
+        *,
+        purpose: str = "json",
+        example=None,
+        cancel=None,
+        remaining_timeout_seconds=None,
+    ):
+        try:
+            value = super().complete_json(
+                messages,
+                schema,
+                purpose=purpose,
+                example=example,
+                cancel=cancel,
+                remaining_timeout_seconds=remaining_timeout_seconds,
             )
-        status = "blocked" if plan is None or request.missing_fields else "completed"
-        return observation_from_runtime(
-            case_id=case.id,
-            run_index=run_index,
-            status=status,
-            stage="complete" if status == "completed" else "answer",
-            intake=intake,
-            request=request,
-            plan=plan,
-            response_text=intake.answer,
-            llm_calls=client.calls,
-            elapsed_seconds=time.monotonic() - started,
+        except LlmError as error:
+            self.errors.append(
+                {
+                    "purpose": error.purpose or purpose,
+                    "category": error.category,
+                    "message": _redact_api_key(str(error), self.settings.api_key_env),
+                    "diagnostics": [
+                        {
+                            str(key): str(item)
+                            for key, item in dict(diagnostic).items()
+                            if key in {"path", "message"}
+                        }
+                        for diagnostic in error.diagnostics
+                    ],
+                }
+            )
+            raise
+        payload = value.model_dump(mode="json") if isinstance(value, BaseModel) else value
+        if isinstance(payload, dict):
+            self.structured_outputs.append({"purpose": purpose, "value": payload})
+        return value
+
+
+class _PlanningBarrierAgent(Agent):
+    """Run the production chat route but stop at the Tool execution boundary."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.barrier_calls = 0
+        super().__init__(*args, **kwargs)
+
+    def advance(self, run: Run, *, cancel=None) -> Result | None:
+        self.barrier_calls += 1
+        if run.status not in {"succeeded", "failed", "cancelled", "interrupted"}:
+            run.status = "waiting"
+            if run.waiting_for is None:
+                run.waiting_for = "confirmation"
+            run.pending_data = {
+                **dict(run.pending_data),
+                "benchmark_barrier": True,
+            }
+            save_run(self.config.data_root_path, run)
+        return None
+
+
+def _run_live_llm(
+    case: BenchmarkCase,
+    *,
+    run_index: int,
+    benchmark_dir: str | Path,
+    config: AppConfig,
+    data_root: str | Path | None,
+) -> CaseObservation:
+    started = time.monotonic()
+    stage = "intake"
+    llm: _RecordingLlmClient | None = None
+    agent: _PlanningBarrierAgent | None = None
+    seeded_run: Run | None = None
+    try:
+        fixture = load_fixture(case, benchmark_dir) if case.fixture is not None else {}
+        try:
+            live_setup = LiveSetup.model_validate(
+                fixture.get("live_setup", {}), strict=True
+            )
+        except (TypeError, ValueError) as error:
+            raise BenchmarkConfigurationError(
+                f"invalid live_setup for case {case.id}: {error}"
+            ) from error
+
+        isolated_root = _case_data_root(data_root, case.id, run_index)
+        isolated = _planning_only_config(config, isolated_root)
+        registry = build_registry(isolated)
+        llm = _RecordingLlmClient(isolated)
+        agent = _PlanningBarrierAgent(
+            isolated,
+            registry,
+            llm=llm,
+            session_id=f"bench_live_{case.id}_{run_index}",
         )
-    except LlmError as error:
+        seeded_run = _seed_live_scenario(
+            agent,
+            live_setup,
+            run_index=run_index,
+            case_id=case.id,
+            benchmark_dir=benchmark_dir,
+            registry=registry,
+        )
+        response = agent.handle_message(case.prompt)
+        return _observation_from_live_agent(
+            case,
+            run_index=run_index,
+            response=response,
+            agent=agent,
+            llm=llm,
+            seeded_run=seeded_run,
+            started=started,
+            registry=registry,
+        )
+    except (BenchmarkConfigurationError, LlmError, TypeError, ValueError, OSError) as error:
+        if llm is None:
+            return observation_from_runtime(
+                case_id=case.id,
+                run_index=run_index,
+                status="exception",
+                stage=stage,
+                elapsed_seconds=time.monotonic() - started,
+                error_category=(
+                    error.category if isinstance(error, LlmError) else "benchmark_harness_error"
+                ),
+                error_message=str(error),
+                registry=None,
+            )
         return observation_from_runtime(
             case_id=case.id,
             run_index=run_index,
             status="failed",
             stage=stage,
-            intake=intake,
-            request=request,
-            plan=plan,
-            llm_calls=client.calls,
+            run=seeded_run,
+            request=seeded_run.request if seeded_run is not None else None,
+            plan=seeded_run.plan if seeded_run is not None else None,
+            llm_calls=llm.calls,
             elapsed_seconds=time.monotonic() - started,
-            error_category=error.category,
-            error_message=str(error),
+            error_category=(
+                error.category if isinstance(error, LlmError) else "benchmark_harness_error"
+            ),
+            error_message=_redact_api_key(str(error), config.llm.api_key_env),
+            error_diagnostics=_flatten_llm_errors(llm.errors),
+            llm_structured_outputs=llm.structured_outputs,
         )
-    except (TypeError, ValueError, OSError) as error:
-        return observation_from_runtime(
-            case_id=case.id,
-            run_index=run_index,
-            status="failed",
-            stage=stage,
-            intake=intake,
-            request=request,
-            plan=plan,
-            llm_calls=client.calls,
-            elapsed_seconds=time.monotonic() - started,
-            error_category="validation_error",
-            error_message=str(error),
+
+
+def _planning_only_config(config: AppConfig, data_root: Path) -> AppConfig:
+    isolated = _isolated_config(config, data_root)
+    runtime = isolated.runtime.model_copy(update={"confirm_before_compute": True})
+    return isolated.model_copy(update={"runtime": runtime}, deep=True)
+
+
+def _seed_live_scenario(
+    agent: _PlanningBarrierAgent,
+    setup: LiveSetup,
+    *,
+    run_index: int,
+    case_id: str,
+    benchmark_dir: str | Path,
+    registry: ToolRegistry,
+) -> Run | None:
+    agent._session["recent_messages"] = [dict(item) for item in setup.recent_messages]
+    agent._session["recent_results"] = [dict(item) for item in setup.recent_results]
+    agent._session["last_delivery"] = [dict(item) for item in setup.last_delivery]
+    if setup.active_run_fixture is None:
+        agent._save_session()
+        return None
+
+    seed_fixture = load_fixture_reference(setup.active_run_fixture, benchmark_dir)
+    _intake, request, plan = _build_contract(
+        seed_fixture,
+        prompt=f"benchmark live scenario seed: {case_id}",
+        case_id=f"{case_id}_seed",
+        run_index=run_index,
+        registry=registry,
+    )
+    if plan is None:
+        raise BenchmarkConfigurationError(
+            f"active_run_fixture for {case_id} must define a validated Plan"
         )
+    run = agent._create_chat_run(request, validate_request_plan(request, plan, registry))
+
+    if setup.active_run_status == "waiting":
+        step = next(
+            (
+                item
+                for item in run.plan.steps
+                if registry.get(item.tool).requires_compute_permission
+            ),
+            None,
+        )
+        if step is None:
+            raise BenchmarkConfigurationError(
+                f"waiting live scenario {case_id} needs a compute Tool in its Plan"
+            )
+        agent._prepare_confirmation(run, step)
+        run.waiting_for = setup.waiting_for
+        run.pending_data.update(setup.pending_data)
+        save_run(agent.config.data_root_path, run)
+    elif setup.active_run_status == "succeeded":
+        assert setup.published_result_fixture is not None
+        result_fixture_payload = load_fixture_reference(
+            setup.published_result_fixture, benchmark_dir
+        )
+        try:
+            result_fixture = LiveResultFixture.model_validate(
+                result_fixture_payload, strict=True
+            )
+        except (TypeError, ValueError) as error:
+            raise BenchmarkConfigurationError(
+                f"invalid published result fixture for {case_id}: {error}"
+            ) from error
+        _publish_live_result_fixture(agent, run, result_fixture, benchmark_dir, registry)
+    else:
+        raise BenchmarkConfigurationError(
+            f"active Run for {case_id} needs a supported status"
+        )
+
+    agent._session["active_run_id"] = run.id
+    if setup.active_run_status == "succeeded":
+        result = _latest_result_for_run(agent.config.data_root_path, run)
+        if result is None:
+            raise BenchmarkConfigurationError(
+                f"succeeded live scenario {case_id} did not publish a Result"
+            )
+        agent._record_result_summary(run, result)
+        _seed_live_result_delivery(agent, run)
+    else:
+        agent._save_session()
+    return run
+
+
+def _seed_live_result_delivery(agent: _PlanningBarrierAgent, run: Run) -> None:
+    """Mark the fixture's verified public outputs as the seeded prior delivery."""
+
+    catalog = agent._build_query_catalog()
+    locators: list[dict[str, Any]] = []
+    for item in catalog:
+        result = item.get("result")
+        subject_ref = item.get("subject_ref")
+        if not isinstance(result, dict) or not isinstance(subject_ref, str):
+            continue
+        property_name = result.get("property")
+        binding = agent._query_bindings.get((subject_ref, property_name))
+        if not isinstance(binding, dict):
+            continue
+        locator = {
+            key: binding[key]
+            for key in (
+                "run_id",
+                "step_id",
+                "property",
+                "kind",
+                "attempt",
+                "step_fingerprint",
+            )
+        }
+        artifact_id = binding.get("artifact_id")
+        artifact_hash = binding.get("artifact_sha256")
+        if isinstance(artifact_id, str) and isinstance(artifact_hash, str):
+            locator["artifact_id"] = artifact_id
+            locator["sha256"] = artifact_hash
+        locators.append(locator)
+    if not locators:
+        raise BenchmarkConfigurationError(
+            f"succeeded live scenario {run.id} has no verified public outputs to deliver"
+        )
+    prior = agent._session.get("last_delivery", [])
+    existing = (
+        [dict(item) for item in prior if isinstance(item, dict)]
+        if isinstance(prior, list)
+        else []
+    )
+    agent._session["last_delivery"] = [*existing, *locators][-8:]
+    agent._save_session()
+
+
+def _publish_live_result_fixture(
+    agent: _PlanningBarrierAgent,
+    run: Run,
+    fixture: LiveResultFixture,
+    benchmark_dir: str | Path,
+    registry: ToolRegistry,
+) -> None:
+    matches = [step for step in run.plan.steps if step.tool == fixture.tool]
+    if len(matches) != 1:
+        raise BenchmarkConfigurationError(
+            "published result fixture must select exactly one Step by Tool"
+        )
+    step = matches[0]
+    tool = registry.get(step.tool)
+    if step.tool != "optimize_geometry":
+        raise BenchmarkConfigurationError(
+            "live benchmark saved-result fixtures currently support verified Opt Results"
+        )
+    geometry_path = _safe_fixture_file(fixture.output_geometry, benchmark_dir)
+    bindings = {
+        name: reference.artifact_id
+        for name, reference in step.inputs.items()
+        if reference.artifact_id is not None
+    }
+    if "geometry" not in bindings:
+        raise BenchmarkConfigurationError("saved Opt Result fixture needs a bound geometry input")
+    input_artifacts = {item.id: item for item in run.artifact_index}
+    input_hashes = {
+        artifact_id: sha256_file(
+            artifact_path(agent.config.data_root_path, run, input_artifacts[artifact_id])
+        )
+        for artifact_id in bindings.values()
+        if artifact_id in input_artifacts
+    }
+    if len(input_hashes) != len(bindings):
+        raise BenchmarkConfigurationError("saved Result has an unknown input Artifact")
+
+    output_geometry = register_file_artifact(
+        agent.config.data_root_path,
+        run,
+        geometry_path,
+        artifact_type="molecular_geometry",
+        role="optimized_geometry",
+        source="benchmark fixture: previously verified real ORCA Opt output",
+        step_id=step.id,
+        attempt=1,
+        metadata={"evidence_class": fixture.evidence_class},
+    )
+    value = fixture.values.get("opt_final_electronic_energy")
+    if not isinstance(value, dict) or type(value.get("value")) not in {int, float}:
+        raise BenchmarkConfigurationError(
+            "saved Opt Result fixture needs an electronic energy value"
+        )
+    profile = get_profile(str(step.parameters.get("method_profile", "")))
+    energy_payload = {
+        "schema": "bg6022.energy_data.v1",
+        "property": "electronic_energy",
+        "value": value["value"],
+        "unit": "Eh",
+        "method_profile": profile.name,
+        "method_keyword": profile.orca_keyword,
+        "operation": "Opt",
+        "charge": step.parameters.get("charge"),
+        "multiplicity": step.parameters.get("multiplicity"),
+        "source": {"step_id": step.id, "attempt": 1},
+        "geometry": {
+            "artifact_id": output_geometry.id,
+            "sha256": output_geometry.sha256,
+        },
+        "observation": value,
+    }
+    energy_artifact = register_bytes_artifact(
+        agent.config.data_root_path,
+        run,
+        json.dumps(energy_payload, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+        artifact_type="energy_data",
+        role="verified_energy_data",
+        source="benchmark fixture: previously verified real ORCA energy evidence",
+        extension=".json",
+        step_id=step.id,
+        attempt=1,
+        metadata={
+            "evidence_class": fixture.evidence_class,
+            "geometry_sha256": output_geometry.sha256,
+            "method_profile": profile.name,
+            "operation": "Opt",
+            "charge": step.parameters.get("charge"),
+            "multiplicity": step.parameters.get("multiplicity"),
+            "unit": "Eh",
+        },
+    )
+    result = Result(
+        run_id=run.id,
+        step_id=step.id,
+        attempt=1,
+        status="succeeded",
+        values=fixture.values,
+        checks=fixture.checks,
+        artifact_ids=[output_geometry.id, energy_artifact.id],
+        output_ports={
+            "optimized_geometry": output_geometry.id,
+            "energy_data": energy_artifact.id,
+        },
+        input_artifact_ids=list(bindings.values()),
+        input_bindings=bindings,
+        attempt_relative_path=f"{step.id}/attempt-01",
+    )
+    run.attempts.append(
+        {
+            "step_id": step.id,
+            "attempt": 1,
+            "phase": "finished",
+            "status": "succeeded",
+            "artifact_ids": list(result.artifact_ids),
+            "evidence_class": fixture.evidence_class,
+        }
+    )
+    run.attempt_counts[run.origin_step_map.get(step.id, step.id)] = 1
+    run.execution_permission = True
+    publish_step_result(
+        agent.config.data_root_path,
+        run,
+        step,
+        tool,
+        result,
+        expected_input_bindings=bindings,
+        expected_input_hashes=input_hashes,
+    )
+    run.status = "succeeded"
+    run.waiting_for = None
+    run.pending_data = {}
+    save_run(agent.config.data_root_path, run)
+
+
+def _latest_result_for_run(data_root: str | Path, run: Run) -> Result | None:
+    if not run.result_index:
+        return None
+    relative = Path(run.result_index[-1])
+    root = run_directory(data_root, run.id).resolve()
+    path = (root / relative).resolve()
+    if root not in path.parents or not path.is_file():
+        return None
+    return Result.model_validate(json.loads(path.read_text(encoding="utf-8")), strict=True)
+
+
+def _observation_from_live_agent(
+    case: BenchmarkCase,
+    *,
+    run_index: int,
+    response: AgentResponse,
+    agent: _PlanningBarrierAgent,
+    llm: _RecordingLlmClient,
+    seeded_run: Run | None,
+    started: float,
+    registry: ToolRegistry,
+) -> CaseObservation:
+    intake = next(
+        (
+            item["value"]
+            for item in reversed(llm.structured_outputs)
+            if item.get("purpose") == "intake" and isinstance(item.get("value"), dict)
+        ),
+        None,
+    )
+    run = response.run or agent._coerce_run(None)
+    unchanged_pending_run = bool(
+        seeded_run is not None
+        and run is not None
+        and run.id == seeded_run.id
+        and run.plan.model_dump(mode="json") == seeded_run.plan.model_dump(mode="json")
+        and run.status == "waiting"
+        and run.waiting_for is not None
+    )
+    latest_error = llm.errors[-1] if llm.errors else None
+    intent = intake.get("intent") if intake is not None else None
+    unresolved = (
+        intake.get("unresolved_requirements") or intake.get("missing_fields")
+        if intake is not None
+        else None
+    )
+    if latest_error is not None:
+        error_purpose = str(latest_error.get("purpose") or "intake")
+        stage = _stage_for_llm_purpose(error_purpose)
+        status = "failed"
+        error_category = str(latest_error.get("category") or "llm_error")
+        error_message = str(latest_error.get("message") or "language-model call failed")
+    elif intent == "context_query":
+        stage = "query"
+        status = "completed"
+        error_category = None
+        error_message = None
+    elif unchanged_pending_run:
+        stage = "intake"
+        status = "blocked"
+        error_category = "clarification_required"
+        error_message = response.text
+    elif run is not None and run.plan is not None:
+        stage = "complete"
+        status = "completed"
+        error_category = None
+        error_message = None
+    elif intent == "chemistry_compute" and unresolved:
+        stage = "intake"
+        status = "blocked"
+        error_category = "unsupported_or_unresolved"
+        error_message = response.text
+    elif intent in {"chemistry_qa", "daily_qa"}:
+        stage = "answer"
+        status = "completed"
+        error_category = None
+        error_message = None
+    elif intent is None:
+        stage = "intake"
+        status = "blocked"
+        error_category = "agent_route_short_circuit"
+        error_message = response.text
+    else:
+        stage = "planner" if intent == "chemistry_compute" else "intake"
+        status = "failed" if intent == "chemistry_compute" else "blocked"
+        error_category = "agent_planning_failed" if intent == "chemistry_compute" else None
+        error_message = response.text if status == "failed" else None
+
+    before_attempts = count_orca_attempts(seeded_run, registry)
+    after_attempts = count_orca_attempts(run, registry)
+    return observation_from_runtime(
+        case_id=case.id,
+        run_index=run_index,
+        status=status,
+        stage=stage,
+        intake=intake,
+        request=run.request if run is not None else None,
+        plan=run.plan if run is not None else None,
+        run=run,
+        response_text=response.text,
+        llm_calls=llm.calls,
+        elapsed_seconds=time.monotonic() - started,
+        error_category=error_category,
+        error_message=error_message,
+        error_diagnostics=_flatten_llm_errors(llm.errors),
+        llm_structured_outputs=llm.structured_outputs,
+        registry=registry,
+    ).model_copy(
+        update={
+            # Historical attempts in a seeded saved-result Run are context,
+            # not work performed by this live planning-only invocation.
+            "orca_attempts": max(0, after_attempts - before_attempts),
+            "orca_successes": 0,
+            "orca_failures": 0,
+        }
+    )
+
+
+def _flatten_llm_errors(errors: list[dict[str, Any]]) -> list[dict[str, str]]:
+    flattened: list[dict[str, str]] = []
+    for error in errors:
+        context = {
+            "purpose": str(error.get("purpose", "json")),
+            "category": str(error.get("category", "llm_error")),
+        }
+        diagnostics = error.get("diagnostics", [])
+        if isinstance(diagnostics, list) and diagnostics:
+            for item in diagnostics:
+                if isinstance(item, dict):
+                    flattened.append(
+                        context
+                        | {
+                            key: str(item[key])
+                            for key in ("path", "message")
+                            if key in item
+                        }
+                    )
+        else:
+            flattened.append(context | {"message": str(error.get("message", ""))})
+    return flattened
+
+
+def _stage_for_llm_purpose(purpose: str) -> str:
+    return {
+        "answer": "answer",
+        "planner": "planner",
+        "intake": "intake",
+    }.get(purpose, "intake")
+
+
+def _redact_api_key(message: str, env_name: str) -> str:
+    secret = os.environ.get(env_name)
+    return message.replace(secret, "[REDACTED]") if secret else message
 
 
 def _run_live_orca(
@@ -793,7 +1302,8 @@ def _case_data_root(base: str | Path | None, case_id: str, run_index: int) -> Pa
         root = Path(tempfile.gettempdir()) / "BG6022-v3-benchmark-data"
     else:
         root = Path(base)
-    return root.resolve() / f"bench_{case_id}_{run_index}"
+    digest = hashlib.sha256(case_id.encode("utf-8")).hexdigest()[:10]
+    return root.resolve() / f"bench_{run_index}_{digest}"
 
 
 def _default_data_root(benchmark_dir: str | Path) -> Path:
