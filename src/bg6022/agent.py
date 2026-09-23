@@ -773,9 +773,7 @@ class Agent:
                     run.finish_active_interval()
                     save_run(self.config.data_root_path, run)
                     return last_result
-                step = _next_ready_step(
-                    run, self.config.data_root_path, registry=self.registry
-                )
+                step = _next_ready_step(run, self.config.data_root_path, registry=self.registry)
                 if step is None:
                     blocked_checks = _unmet_goal_checks(
                         self.config.data_root_path, run, self.registry
@@ -3695,9 +3693,9 @@ class Agent:
                     ):
                         continue
                 label = (
-                    self.registry.get(step.tool).result_metadata.get(target.check, {}).get(
-                        "label", target.check.replace("_", " ")
-                    )
+                    self.registry.get(step.tool)
+                    .result_metadata.get(target.check, {})
+                    .get("label", target.check.replace("_", " "))
                     if step is not None
                     else target.check.replace("_", " ")
                 )

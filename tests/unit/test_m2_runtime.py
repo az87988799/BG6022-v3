@@ -962,13 +962,13 @@ def test_recovered_opt_geometry_flows_to_frequency_and_sp_without_repeating_prep
     registry = ToolRegistry(
         [
             base_registry.get(name).model_copy(
-                    update={
-                        "execute_function": executor_by_name.get(
-                            name, base_registry.get(name).execute_function
-                        ),
-                        # These test executors return intentionally minimal simulated evidence.
-                        "result_validation_function": None,
-                    }
+                update={
+                    "execute_function": executor_by_name.get(
+                        name, base_registry.get(name).execute_function
+                    ),
+                    # These test executors return intentionally minimal simulated evidence.
+                    "result_validation_function": None,
+                }
             )
             for name in base_registry.names()
         ]

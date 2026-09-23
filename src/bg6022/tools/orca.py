@@ -545,14 +545,8 @@ def _validate_energy_result(
                 expected_geometry_role is not None
                 and geometry_artifact.role != expected_geometry_role
             )
-            or (
-                operation == "SP"
-                and geometry_id not in result.input_artifact_ids
-            )
-            or (
-                operation == "Opt"
-                and geometry_id not in result.artifact_ids
-            )
+            or (operation == "SP" and geometry_id not in result.input_artifact_ids)
+            or (operation == "Opt" and geometry_id not in result.artifact_ids)
         ):
             return False
         artifact_path(config.data_root_path, run, geometry_artifact)

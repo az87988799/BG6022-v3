@@ -877,10 +877,7 @@ def _validate_requested_check_prerequisites(
                 for target in plan_check_targets
                 if target.check == check_name
                 and (target.step_id is None or target.step_id in steps_by_id)
-                and (
-                    target.requirement_id is None
-                    or target.requirement_id in requirements_by_id
-                )
+                and (target.requirement_id is None or target.requirement_id in requirements_by_id)
             ]
             sources: list[Step] = []
             for target in matching_targets:
@@ -1838,10 +1835,7 @@ def _require_composite_geometry_sources(request: Request, registry: ToolRegistry
             candidates = [
                 item
                 for item in request.requirements
-                if (
-                    binding.consumer_tool is not None
-                    and item.capability == binding.consumer_tool
-                )
+                if (binding.consumer_tool is not None and item.capability == binding.consumer_tool)
                 or (
                     binding.consumer_operation is not None
                     and binding.consumer_operation in registry.get(item.capability).operations

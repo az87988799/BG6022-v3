@@ -181,8 +181,7 @@ def test_one_chat_request_can_contain_two_scoped_distance_requirements() -> None
         ),
     ]
     targets = [
-        ResultTarget(requirement_id=item.id, field="interatomic_distance")
-        for item in requirements
+        ResultTarget(requirement_id=item.id, field="interatomic_distance") for item in requirements
     ]
     request = Request(
         id="request_distance_twice",
@@ -377,13 +376,10 @@ def test_pbe0_profile_is_complete_across_existing_orca_operations() -> None:
                 maxcore_mb=192,
             )
         ).decode("ascii")
-        assert (
-            f"! PBE0 D3BJ def2-SVP def2/J RIJCOSX TightSCF {operation}" in rendered
-        )
+        assert f"! PBE0 D3BJ def2-SVP def2/J RIJCOSX TightSCF {operation}" in rendered
         assert "%maxcore 192" in rendered
     assert any(
-        item["name"] == profile.name
-        for item in build_registry().method_capability_catalog()
+        item["name"] == profile.name for item in build_registry().method_capability_catalog()
     )
 
 
