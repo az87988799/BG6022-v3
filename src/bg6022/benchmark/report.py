@@ -417,11 +417,13 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
                 stats["schema_corrections"],
             )
         )
-    lines.extend([
-        "## Cases",
-        "",
-        f"Passed: {summary['passed_cases']}/{summary['case_count']}",
-    ])
+    lines.extend(
+        [
+            "## Cases",
+            "",
+            f"Passed: {summary['passed_cases']}/{summary['case_count']}",
+        ]
+    )
     skipped = summary.get("skipped_cases", [])
     if skipped:
         lines.extend([f"Not selected: {len(skipped)} live/holdout cases", ""])

@@ -330,11 +330,7 @@ class Agent:
             pending_tasks, pending_ref_to_requirement = _semantic_pending_tasks(
                 current, self.registry
             )
-            if (
-                semantic_enabled
-                and pending_tasks
-                and _ambiguous_iteration_parameter_change(text)
-            ):
+            if semantic_enabled and pending_tasks and _ambiguous_iteration_parameter_change(text):
                 response = AgentResponse(
                     "“迭代上限”可能指几何优化迭代或 SCF 电子迭代。"
                     "请明确要修改哪一种；当前任务未更改。",
@@ -463,9 +459,7 @@ class Agent:
                             )
                             self._persist_llm_diagnostics(llm_call_cursor, stage="semantic")
                             if semantic.mode in {"compute", "qa", "context_query"}:
-                                intake = semantic_to_intake(
-                                    text, semantic, registry=self.registry
-                                )
+                                intake = semantic_to_intake(text, semantic, registry=self.registry)
                             elif semantic.mode == "unsupported":
                                 response = AgentResponse(
                                     "当前工具目录不支持这些计算要求："
@@ -475,15 +469,11 @@ class Agent:
                                 self._record_response(response, cancel=request_cancel)
                                 return response
                             elif semantic.mode == "clarify":
-                                response = AgentResponse(
-                                    str(semantic.clarification), run=current
-                                )
+                                response = AgentResponse(str(semantic.clarification), run=current)
                                 self._record_response(response, cancel=request_cancel)
                                 return response
                             elif semantic.mode == "modify":
-                                response = AgentResponse(
-                                    "当前没有可修改的等待任务。", run=current
-                                )
+                                response = AgentResponse("当前没有可修改的等待任务。", run=current)
                                 self._record_response(response, cancel=request_cancel)
                                 return response
                             else:
@@ -1639,10 +1629,7 @@ class Agent:
             sources = dict(constraints.get("parameter_sources", {}))
             sources.update({name: "user_modification" for name in patch})
             constraints["parameter_sources"] = sources
-            if (
-                requirement.id == scoped_requirement_id
-                and requirement_constraint_patch
-            ):
+            if requirement.id == scoped_requirement_id and requirement_constraint_patch:
                 constraints.update(dict(requirement_constraint_patch))
             updated_requirements.append(
                 requirement.model_copy(

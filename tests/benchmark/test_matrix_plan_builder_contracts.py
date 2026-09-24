@@ -17,8 +17,7 @@ def test_plan_builder_preserves_scientific_matrix_t001_through_t005_contracts():
     selected = {
         item.task_id: item
         for item in expanded
-        if item.object_id == "water"
-        and item.task_id in {"T001", "T002", "T003", "T004", "T005"}
+        if item.object_id == "water" and item.task_id in {"T001", "T002", "T003", "T004", "T005"}
     }
 
     assert set(selected) == {"T001", "T002", "T003", "T004", "T005"}
@@ -82,10 +81,7 @@ def _result_identities(plan, request):
         )
         for target in plan.requested_results
         if target.step_id is not None
-        and (
-            target.requirement_id is not None
-            or steps[target.step_id].requirement_id is not None
-        )
+        and (target.requirement_id is not None or steps[target.step_id].requirement_id is not None)
     )
 
 

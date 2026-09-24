@@ -328,8 +328,7 @@ def semantic_schema(
     allowed_query_pairs = {
         (str(item["subject_ref"]), str(item["property"]))
         for item in query_items
-        if isinstance(item.get("subject_ref"), str)
-        and isinstance(item.get("property"), str)
+        if isinstance(item.get("subject_ref"), str) and isinstance(item.get("property"), str)
     }
     candidate_refs = {subject_ref for subject_ref, _property in allowed_query_pairs}
     pending_by_ref = {
@@ -357,9 +356,7 @@ def semantic_schema(
         "SemanticQuerySelectionForCatalog",
         __base__=QuerySelection,
         __validators__={
-            "_targets_are_catalogued": field_validator("targets")(
-                _query_targets_are_catalogued
-            )
+            "_targets_are_catalogued": field_validator("targets")(_query_targets_are_catalogued)
         },
     )
 
@@ -385,8 +382,7 @@ def semantic_schema(
                 wanted = _PROPERTY_NAMES[requested_property]
                 if not any(item["property"] == wanted for item in tool.public_outputs()):
                     raise ValueError(
-                        f"{tool.name} does not provide requested property "
-                        f"{requested_property!r}"
+                        f"{tool.name} does not provide requested property {requested_property!r}"
                     )
         if value.modification is not None:
             pending = pending_by_ref.get(value.modification.target_task_ref)

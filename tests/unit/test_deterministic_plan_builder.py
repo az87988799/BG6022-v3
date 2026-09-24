@@ -110,8 +110,7 @@ def test_opt_to_freq_uses_optimized_geometry_and_no_extra_opt_delivery():
     assert freq.inputs["geometry"].step_id == opt.id
     assert freq.inputs["geometry"].port == "optimized_geometry"
     assert [
-        (item.step_id, item.field or item.port or item.check)
-        for item in plan.requested_results
+        (item.step_id, item.field or item.port or item.check) for item in plan.requested_results
     ] == [(freq.id, "vibrational_frequencies")]
 
 

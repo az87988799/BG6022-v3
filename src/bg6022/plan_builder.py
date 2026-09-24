@@ -87,9 +87,7 @@ def build_plan(request: Request, *, registry: ToolRegistry, plan_id: str) -> Pla
             if input_type == "molecular_geometry":
                 reference = subject_geometry.get(requirement.subject_id)
                 if reference is None:
-                    raise PlanBuildError(
-                        f"no geometry source for Requirement {requirement.id!r}"
-                    )
+                    raise PlanBuildError(f"no geometry source for Requirement {requirement.id!r}")
                 inputs[input_name] = reference
                 continue
             raise PlanBuildError(f"unbound non-geometry input: {tool.name}.{input_name}")

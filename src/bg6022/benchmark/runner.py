@@ -807,8 +807,7 @@ def _observation_from_live_agent(
             (
                 item["value"]
                 for item in reversed(llm.structured_outputs)
-                if item.get("purpose") == "semantic"
-                and isinstance(item.get("value"), dict)
+                if item.get("purpose") == "semantic" and isinstance(item.get("value"), dict)
             ),
             None,
         )

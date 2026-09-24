@@ -1229,8 +1229,7 @@ class Tool(StrictModel):
         unknown_defaults = sorted(set(self.default_outputs) - declared_public_outputs)
         if unknown_defaults:
             raise ValueError(
-                "default_outputs refer to undeclared public outputs: "
-                f"{unknown_defaults}"
+                f"default_outputs refer to undeclared public outputs: {unknown_defaults}"
             )
         return self
 

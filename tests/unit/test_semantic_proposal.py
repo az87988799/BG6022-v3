@@ -42,9 +42,7 @@ def _compute_payload(**updates):
 
 
 def test_semantic_proposal_accepts_user_facing_intent_only():
-    proposal = semantic_schema(build_registry()).model_validate(
-        _compute_payload(), strict=True
-    )
+    proposal = semantic_schema(build_registry()).model_validate(_compute_payload(), strict=True)
 
     assert isinstance(proposal, SemanticProposal)
     assert proposal.tasks[0].capability == "optimize_geometry"
@@ -95,9 +93,7 @@ def test_semantic_schema_rejects_unknown_result_query_pair():
     with pytest.raises(ValidationError):
         semantic_schema(
             build_registry(),
-            result_catalog=[
-                {"subject_ref": "run_1", "property": "electronic_energy"}
-            ],
+            result_catalog=[{"subject_ref": "run_1", "property": "electronic_energy"}],
         ).model_validate(payload, strict=True)
 
 
@@ -234,6 +230,4 @@ def test_semantic_proposal_mode_contracts_are_strict():
     with pytest.raises(ValidationError):
         SemanticProposal.model_validate({"mode": "compute"}, strict=True)
     with pytest.raises(ValidationError):
-        SemanticProposal.model_validate(
-            {"mode": "clarify", "clarification": "  "}, strict=True
-        )
+        SemanticProposal.model_validate({"mode": "clarify", "clarification": "  "}, strict=True)

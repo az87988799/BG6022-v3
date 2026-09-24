@@ -186,8 +186,7 @@ def semantic_to_intake(
         proposal["outputs"] = list(dict.fromkeys(requested))
 
     requirements = [
-        RequirementProposal.model_validate(item, strict=True)
-        for item in proposals.values()
+        RequirementProposal.model_validate(item, strict=True) for item in proposals.values()
     ]
     return IntakeOutput(
         intent="chemistry_compute",
@@ -264,9 +263,7 @@ def canonicalize_modification(
 
 def _output_for_property(tool: Any, property_name: str) -> str:
     matches = [
-        str(item["name"])
-        for item in tool.public_outputs()
-        if item["property"] == property_name
+        str(item["name"]) for item in tool.public_outputs() if item["property"] == property_name
     ]
     if len(matches) != 1:
         raise ValueError(
@@ -293,8 +290,7 @@ def _common_output(
     common = set.intersection(*candidate_sets) if candidate_sets else set()
     if len(common) != 1:
         raise ValueError(
-            "comparison output is not uniquely derivable from Tool contracts: "
-            f"{sorted(common)}"
+            f"comparison output is not uniquely derivable from Tool contracts: {sorted(common)}"
         )
     return next(iter(common))
 
@@ -309,15 +305,11 @@ def _apply_use_output(
     target_task = tasks[relation.target_task]
     source_tool = registry.get(source_task.capability)
     target_tool = registry.get(target_task.capability)
-    wanted_type = {"geometry": "molecular_geometry", "energy": "energy_data"}[
-        relation.property
-    ]
+    wanted_type = {"geometry": "molecular_geometry", "energy": "energy_data"}[relation.property]
     source_ports = [
         name for name, value in source_tool.output_ports.items() if value == wanted_type
     ]
-    target_ports = [
-        name for name, value in target_tool.input_ports.items() if value == wanted_type
-    ]
+    target_ports = [name for name, value in target_tool.input_ports.items() if value == wanted_type]
     if len(source_ports) != 1 or len(target_ports) != 1:
         raise ValueError("typed dependency is not uniquely derivable")
     target_bindings = proposals[relation.target_task]["input_bindings"]

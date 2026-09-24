@@ -116,9 +116,7 @@ def summarize_llm_calls(calls: list[Any]) -> dict[str, Any]:
         summary["total_tokens"] += total
         summary["schema_corrections"] += corrections
         purpose = str(raw.get("purpose") or "other")
-        purpose_summary = summary["by_purpose"].setdefault(
-            purpose, _empty_call_summary()
-        )
+        purpose_summary = summary["by_purpose"].setdefault(purpose, _empty_call_summary())
         purpose_summary["calls"] += 1
         purpose_summary["input_tokens"] += input_tokens
         purpose_summary["output_tokens"] += output_tokens

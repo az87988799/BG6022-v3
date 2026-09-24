@@ -143,9 +143,7 @@ def test_dual_sp_difference_inserts_same_geometry_derived_requirement():
 
 def test_method_modification_resolves_user_text_and_preserves_constraint_patch():
     registry = build_registry()
-    initial = _proposal(
-        tasks=[_task("t1", "optimize_geometry", method="r²SCAN-3c")]
-    )
+    initial = _proposal(tasks=[_task("t1", "optimize_geometry", method="r²SCAN-3c")])
     request = canonicalize_semantic_request(
         "Optimize water with r²SCAN-3c.",
         initial,
