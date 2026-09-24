@@ -213,3 +213,20 @@ implementation commit `37f639f53eafbfca1f7a4246a4ba1b16dab043b9`, including
 pytest, Ruff lint and format checks, compileall, and `uv build`. **The phase is
 awaiting the user's review and explicit acceptance; it is not marked accepted
 or complete.**
+
+## Benchmark 1.2 verification status (2026-09-24)
+
+This section records verification, not user acceptance. The implementation and
+live evidence are linked from
+[`docs/evidence/benchmark1.2.md`](evidence/benchmark1.2.md).
+
+| Item | Evidence | Status |
+|---|---|---|
+| Live Benchmark 1.2 smoke | 5/5; explicit live LLM and ORCA; no execution safety violations | passed |
+| Live Benchmark 1.2 core | 18/18; all applicable grading dimensions passed; 23 ORCA attempts including one expected controlled failure and one bounded repair | passed |
+| Scientific Matrix v1 | 11/11; 16/16 ORCA attempts succeeded | passed |
+| Offline regression | 510 passed, 17 skipped | passed |
+| Ruff lint and formatting | Lint passed; 121 files already formatted | passed |
+| Compile and package build | `compileall` and `python -m build` passed | passed |
+| Active ORCA budget | 4 cores / 1024 MB / `%maxcore 192` / one concurrent job, matching generated input | passed |
+| User acceptance | User review has not yet been recorded | pending |

@@ -34,3 +34,14 @@ Result/Artifact publication, scientific checks, and bounded repair remain the
 execution layer. Verification facts are recorded in
 [`docs/evidence/L1-L8-lightweight-control-plane.md`](evidence/L1-L8-lightweight-control-plane.md);
 the phase is awaiting user acceptance.
+
+## Benchmark 1.2 implementation status (2026-09-24)
+
+Benchmark 1.2 now drives frozen natural-language tasks through the public Agent
+conversation and confirmation flow, then grades production Run/Result/Artifact
+evidence. The live smoke passed 5/5, core passed 18/18, and Scientific Matrix v1
+passed 11/11. Offline validation passed with 510 tests and 17 skips; Ruff,
+format, compileall, and package build also passed. Detailed run identifiers,
+resource evidence, report locations, and the grading calibration are recorded in
+[`docs/evidence/benchmark1.2.md`](evidence/benchmark1.2.md). This implementation
+is awaiting the user's review and explicit acceptance.

@@ -12,5 +12,6 @@ config.toml
 .env
 E:\BG6022-v3-data/
 E:\BG6022-v3-benchmark-data/
+benchmarks/results/
 *.log
 .mypy_cache/
