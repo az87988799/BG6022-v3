@@ -26,6 +26,7 @@ from .answer import (
     select_facts_for_question,
     validate_result_answer,
 )
+from .canonicalize import canonicalize_modification, semantic_to_intake
 from .config import AppConfig
 from .llm import LlmClient, LlmError
 from .models import InputReference, Plan, Request, Result, Run, Step, Subject, Tool
@@ -38,7 +39,10 @@ from .molecule_identity import (
     normalize_formula_token,
 )
 from .output_contracts import is_compatible_value, public_type_info
+from .plan_builder import PlanBuildError, build_plan
 from .planner import (
+    IntakeOutput,
+    IntakeSubjectProposal,
     QuerySelection,
     _request_output_preferences,
     apply_plan_change,
@@ -52,6 +56,7 @@ from .planner import (
     validate_request_plan,
 )
 from .repair import apply_repair_proposal, propose_repair
+from .semantic import semantic_message
 from .session import (
     MAX_RECENT_RUNS,
     artifact_path,
@@ -319,22 +324,94 @@ class Agent:
             result_catalog = self._build_query_catalog()
             geometry_catalog, geometry_bindings = self._build_geometry_catalog()
             capability_catalog = self.registry.result_capabilities()
-            intake = intake_message(
-                self.llm,
-                text,
-                context={
-                    "recent_messages": self._session.get("recent_messages", []),
-                    "recent_results": self._session.get("recent_results", []),
-                    "last_delivery": self._session.get("last_delivery", []),
-                },
-                result_catalog=result_catalog,
-                geometry_catalog=geometry_catalog,
-                capability_catalog=capability_catalog,
-                registry=self.registry,
-                pending_context=_pending_intake_context(current),
-                cancel=request_cancel,
+            semantic_enabled = bool(self.config.runtime.semantic_planner_v1) and not (
+                _is_waiting_for_identity(current)
             )
-            self._persist_llm_diagnostics(llm_call_cursor, stage="intake")
+            pending_tasks, pending_ref_to_requirement = _semantic_pending_tasks(
+                current, self.registry
+            )
+            if (
+                semantic_enabled
+                and pending_tasks
+                and _ambiguous_iteration_parameter_change(text)
+            ):
+                response = AgentResponse(
+                    "“迭代上限”可能指几何优化迭代或 SCF 电子迭代。"
+                    "请明确要修改哪一种；当前任务未更改。",
+                    run=current,
+                )
+                self._record_response(response, cancel=request_cancel)
+                return response
+            if semantic_enabled:
+                semantic = semantic_message(
+                    self.llm,
+                    text,
+                    registry=self.registry,
+                    recent_context={
+                        "recent_messages": self._session.get("recent_messages", []),
+                        "recent_results": self._session.get("recent_results", []),
+                        "last_delivery": self._session.get("last_delivery", []),
+                    },
+                    pending_tasks=pending_tasks,
+                    result_catalog=result_catalog,
+                    cancel=request_cancel,
+                )
+                self._persist_llm_diagnostics(llm_call_cursor, stage="semantic")
+                if semantic.mode == "modify":
+                    if current is None:
+                        response = AgentResponse("当前没有可修改的等待任务。")
+                    else:
+                        try:
+                            requirement_id, patch, constraint_patch = canonicalize_modification(
+                                semantic.modification,
+                                pending_ref_to_requirement=pending_ref_to_requirement,
+                                run=current,
+                                registry=self.registry,
+                            )
+                            response = self._apply_parameter_update(
+                                current,
+                                patch,
+                                requirement_id=requirement_id,
+                                requirement_constraint_patch=constraint_patch,
+                                cancel=request_cancel,
+                            )
+                        except (TypeError, ValueError) as error:
+                            response = AgentResponse(
+                                f"参数修改已拒绝（rejected）：{error}", run=current
+                            )
+                    self._record_response(response, cancel=request_cancel)
+                    return response
+                if semantic.mode == "clarify":
+                    response = AgentResponse(str(semantic.clarification), run=current)
+                    self._record_response(response, cancel=request_cancel)
+                    return response
+                if semantic.mode == "unsupported":
+                    response = AgentResponse(
+                        "当前工具目录不支持这些计算要求："
+                        + "；".join(semantic.unsupported_requirements)
+                        + "。本次没有启动计算。",
+                        run=current,
+                    )
+                    self._record_response(response, cancel=request_cancel)
+                    return response
+                intake = semantic_to_intake(text, semantic, registry=self.registry)
+            else:
+                intake = intake_message(
+                    self.llm,
+                    text,
+                    context={
+                        "recent_messages": self._session.get("recent_messages", []),
+                        "recent_results": self._session.get("recent_results", []),
+                        "last_delivery": self._session.get("last_delivery", []),
+                    },
+                    result_catalog=result_catalog,
+                    geometry_catalog=geometry_catalog,
+                    capability_catalog=capability_catalog,
+                    registry=self.registry,
+                    pending_context=_pending_intake_context(current),
+                    cancel=request_cancel,
+                )
+                self._persist_llm_diagnostics(llm_call_cursor, stage="intake")
             llm_call_cursor = self._llm_call_count()
             self._ensure_request_active(request_token, request_cancel)
 
@@ -362,30 +439,73 @@ class Agent:
                     if route_targets:
                         route_review_used = True
                         llm_stage = "intake"
-                        intake = intake_message(
-                            self.llm,
-                            text,
-                            context={
-                                "recent_messages": self._session.get("recent_messages", []),
-                                "recent_results": self._session.get("recent_results", []),
-                                "last_delivery": self._session.get("last_delivery", []),
-                            },
-                            result_catalog=result_catalog,
-                            geometry_catalog=geometry_catalog,
-                            capability_catalog=capability_catalog,
-                            registry=self.registry,
-                            pending_context=_pending_intake_context(current),
-                            validation_feedback=(
-                                "The previous intake classified this as ordinary question "
-                                "answering, but the public answer stage identified a "
-                                "concrete registered Tool "
-                                f"target: {route_targets}. Re-evaluate the original user message "
-                                "and preserve the molecule, source, and requested result exactly; "
-                                "do not add an operation that the user did not request."
-                            ),
-                            cancel=request_cancel,
+                        validation_feedback = (
+                            "The previous route classified this as ordinary question "
+                            "answering, but the public answer stage identified a concrete "
+                            f"registered Tool target: {route_targets}. Re-evaluate the original "
+                            "user message and preserve the molecule, source, and requested "
+                            "result exactly; do not add an operation that the user did not request."
                         )
-                        self._persist_llm_diagnostics(llm_call_cursor, stage="intake")
+                        if semantic_enabled:
+                            semantic = semantic_message(
+                                self.llm,
+                                text,
+                                registry=self.registry,
+                                recent_context={
+                                    "recent_messages": self._session.get("recent_messages", []),
+                                    "recent_results": self._session.get("recent_results", []),
+                                    "last_delivery": self._session.get("last_delivery", []),
+                                },
+                                pending_tasks=pending_tasks,
+                                result_catalog=result_catalog,
+                                validation_feedback=validation_feedback,
+                                cancel=request_cancel,
+                            )
+                            self._persist_llm_diagnostics(llm_call_cursor, stage="semantic")
+                            if semantic.mode in {"compute", "qa", "context_query"}:
+                                intake = semantic_to_intake(
+                                    text, semantic, registry=self.registry
+                                )
+                            elif semantic.mode == "unsupported":
+                                response = AgentResponse(
+                                    "当前工具目录不支持这些计算要求："
+                                    + "；".join(semantic.unsupported_requirements),
+                                    run=current,
+                                )
+                                self._record_response(response, cancel=request_cancel)
+                                return response
+                            elif semantic.mode == "clarify":
+                                response = AgentResponse(
+                                    str(semantic.clarification), run=current
+                                )
+                                self._record_response(response, cancel=request_cancel)
+                                return response
+                            elif semantic.mode == "modify":
+                                response = AgentResponse(
+                                    "当前没有可修改的等待任务。", run=current
+                                )
+                                self._record_response(response, cancel=request_cancel)
+                                return response
+                            else:
+                                intake = IntakeOutput(intent="chemistry_qa")
+                        else:
+                            intake = intake_message(
+                                self.llm,
+                                text,
+                                context={
+                                    "recent_messages": self._session.get("recent_messages", []),
+                                    "recent_results": self._session.get("recent_results", []),
+                                    "last_delivery": self._session.get("last_delivery", []),
+                                },
+                                result_catalog=result_catalog,
+                                geometry_catalog=geometry_catalog,
+                                capability_catalog=capability_catalog,
+                                registry=self.registry,
+                                pending_context=_pending_intake_context(current),
+                                validation_feedback=validation_feedback,
+                                cancel=request_cancel,
+                            )
+                            self._persist_llm_diagnostics(llm_call_cursor, stage="intake")
                         llm_call_cursor = self._llm_call_count()
                         self._ensure_request_active(request_token, request_cancel)
                         answer_draft = None
@@ -545,9 +665,7 @@ class Agent:
                     self._record_response(response, cancel=request_cancel)
                     return response
                 selected_geometry_alias = explicit_alias
-                intake = intake.model_copy(
-                    update={"history_geometry_alias": selected_geometry_alias}
-                )
+                intake = _intake_with_history_geometry(intake, selected_geometry_alias)
             if (
                 selected_geometry_alias is None
                 and intake.intent == "chemistry_compute"
@@ -566,9 +684,7 @@ class Agent:
                     self._record_response(response, cancel=request_cancel)
                     return response
                 selected_geometry_alias = str(geometry_catalog[0]["alias"])
-                intake = intake.model_copy(
-                    update={"history_geometry_alias": selected_geometry_alias}
-                )
+                intake = _intake_with_history_geometry(intake, selected_geometry_alias)
             if selected_geometry_alias is not None:
                 if intake.intent != "chemistry_compute":
                     raise ValueError(
@@ -617,56 +733,74 @@ class Agent:
                 normalized_parameters=normalized_parameters,
             )
             self._ensure_request_active(request_token, request_cancel)
-            plan = None
-            validation_feedback = None
-            max_revisions = int(self.config.repair.max_plan_revisions)
-            for revision in range(max_revisions + 1):
-                llm_stage = "planner"
-                proposal = plan_message(
-                    self.llm,
-                    request,
-                    registry=self.registry,
-                    context={
-                        "recent_messages": self._session.get("recent_messages", []),
-                        "recent_results": self._session.get("recent_results", []),
-                        "last_delivery": self._session.get("last_delivery", []),
-                        "geometry_catalog": (
-                            [
-                                item
-                                for item in geometry_catalog
-                                if item.get("alias") == selected_geometry_alias
-                            ]
-                            if selected_geometry_alias is not None
-                            else []
-                        ),
-                    },
-                    validation_feedback=validation_feedback,
-                    cancel=request_cancel,
-                )
-                self._persist_llm_diagnostics(llm_call_cursor, stage="planner")
-                llm_call_cursor = self._llm_call_count()
-                self._ensure_request_active(request_token, request_cancel)
+            if semantic_enabled:
+                llm_stage = "planning"
                 try:
-                    plan = proposal_to_plan(
+                    plan = build_plan(
                         request,
-                        proposal,
-                        self.registry,
+                        registry=self.registry,
                         plan_id=new_id("plan"),
-                        artifact_aliases=_selected_artifact_aliases(
-                            request, selected_geometry_alias
-                        ),
                     )
-                    _validate_selected_geometry_binding(plan, request, selected_geometry_alias)
-                    break
-                except ValueError as error:
-                    if revision >= max_revisions:
-                        raise ValueError(
-                            f"Plan failed local validation after {revision} correction(s): {error}"
-                        ) from error
-                    validation_feedback = (
-                        "The previous candidate Plan was rejected by local validation. "
-                        f"Correct these issues without changing the Request: {error}"
+                except PlanBuildError as error:
+                    response = AgentResponse(
+                        "当前请求存在无法唯一确定的执行依赖："
+                        f"{error}。请明确后再继续；本次没有启动计算。"
                     )
+                    self._record_response(response, cancel=request_cancel)
+                    return response
+                self._ensure_request_active(request_token, request_cancel)
+            else:
+                plan = None
+                validation_feedback = None
+                max_revisions = int(self.config.repair.max_plan_revisions)
+                for revision in range(max_revisions + 1):
+                    llm_stage = "planner"
+                    proposal = plan_message(
+                        self.llm,
+                        request,
+                        registry=self.registry,
+                        context={
+                            "recent_messages": self._session.get("recent_messages", []),
+                            "recent_results": self._session.get("recent_results", []),
+                            "last_delivery": self._session.get("last_delivery", []),
+                            "geometry_catalog": (
+                                [
+                                    item
+                                    for item in geometry_catalog
+                                    if item.get("alias") == selected_geometry_alias
+                                ]
+                                if selected_geometry_alias is not None
+                                else []
+                            ),
+                        },
+                        validation_feedback=validation_feedback,
+                        cancel=request_cancel,
+                    )
+                    self._persist_llm_diagnostics(llm_call_cursor, stage="planner")
+                    llm_call_cursor = self._llm_call_count()
+                    self._ensure_request_active(request_token, request_cancel)
+                    try:
+                        plan = proposal_to_plan(
+                            request,
+                            proposal,
+                            self.registry,
+                            plan_id=new_id("plan"),
+                            artifact_aliases=_selected_artifact_aliases(
+                                request, selected_geometry_alias
+                            ),
+                        )
+                        _validate_selected_geometry_binding(plan, request, selected_geometry_alias)
+                        break
+                    except ValueError as error:
+                        if revision >= max_revisions:
+                            raise ValueError(
+                                "Plan failed local validation after "
+                                f"{revision} correction(s): {error}"
+                            ) from error
+                        validation_feedback = (
+                            "The previous candidate Plan was rejected by local validation. "
+                            f"Correct these issues without changing the Request: {error}"
+                        )
             if plan is None:
                 raise ValueError("Planner did not produce a locally valid Plan")
             self._ensure_request_active(request_token, request_cancel)
@@ -712,6 +846,7 @@ class Agent:
             else:
                 stage_label = {
                     "intake": "请求解析阶段",
+                    "semantic": "语义解析阶段",
                     "planner": "计划生成阶段",
                 }.get(stage)
                 if stage == "intake" and error.category == "ambiguous_result":
@@ -1435,6 +1570,7 @@ class Agent:
         parameters: dict[str, Any],
         *,
         requirement_id: str | None = None,
+        requirement_constraint_patch: Mapping[str, Any] | None = None,
         cancel: Event | None = None,
     ) -> AgentResponse:
         if cancel is not None and cancel.is_set():
@@ -1503,6 +1639,11 @@ class Agent:
             sources = dict(constraints.get("parameter_sources", {}))
             sources.update({name: "user_modification" for name in patch})
             constraints["parameter_sources"] = sources
+            if (
+                requirement.id == scoped_requirement_id
+                and requirement_constraint_patch
+            ):
+                constraints.update(dict(requirement_constraint_patch))
             updated_requirements.append(
                 requirement.model_copy(
                     update={
@@ -1602,7 +1743,14 @@ class Agent:
             candidate_request=candidate_request,
             changed_step_ids=set(changed_steps),
         )
-        run.execution_permission = not self.config.runtime.confirm_before_compute
+        has_proposed_method = any(
+            isinstance(item.constraints.get("method_resolution"), Mapping)
+            and item.constraints["method_resolution"].get("status") == "proposed"
+            for item in candidate_request.requirements
+        )
+        run.execution_permission = (
+            not self.config.runtime.confirm_before_compute and not has_proposed_method
+        )
         run.accepted_snapshot = {}
         run.accepted_execution_sha256 = None
         run.parameter_sources_by_step.update(candidate_sources)
@@ -4478,6 +4626,62 @@ def _pending_missing_fields_are_scoped(run: Run, intake: Any, registry: ToolRegi
     return set(intake.missing_fields) <= known
 
 
+def _semantic_pending_tasks(
+    run: Run | None,
+    registry: ToolRegistry,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Give Semantic LLM short task refs without persistent Requirement IDs."""
+
+    if run is None or run.status != "waiting":
+        return [], {}
+    tasks: list[dict[str, Any]] = []
+    ref_map: dict[str, str] = {}
+    for index, requirement in enumerate(run.request.requirements, start=1):
+        ref = f"t{index}"
+        parameters = dict(requirement.parameters)
+        profile = parameters.pop("method_profile", None)
+        resolution = requirement.constraints.get("method_resolution")
+        method_request = (
+            resolution.get("request")
+            if isinstance(resolution, Mapping) and isinstance(resolution.get("request"), str)
+            else None
+        )
+        if method_request is None and isinstance(profile, str):
+            method_request = next(
+                (
+                    str(item["display_name"])
+                    for item in registry.method_capability_catalog()
+                    if item["name"] == profile
+                ),
+                None,
+            )
+        task = {
+            "task_ref": ref,
+            "capability": requirement.capability,
+            "parameters": parameters,
+        }
+        if method_request is not None:
+            task["method_request"] = method_request
+        tasks.append(task)
+        ref_map[ref] = requirement.id
+    return tasks, ref_map
+
+
+def _intake_with_history_geometry(intake: IntakeOutput, alias: str) -> IntakeOutput:
+    if intake.intent != "chemistry_compute":
+        raise ValueError("historical geometry can only bind a calculation Request")
+    subjects = dict(intake.subjects)
+    if not subjects:
+        subjects["subject_1"] = IntakeSubjectProposal(key="subject_1")
+    if len(subjects) != 1:
+        raise ValueError("historical geometry must identify exactly one calculation subject")
+    subject_key, subject = next(iter(subjects.items()))
+    if subject.inline_xyz is not None:
+        raise ValueError("a request cannot combine historical geometry and inline XYZ")
+    subjects[subject_key] = subject.model_copy(update={"history_geometry_alias": alias})
+    return intake.model_copy(update={"subjects": subjects})
+
+
 def _selected_artifact_aliases(
     request: Request, selected_history_alias: str | None
 ) -> dict[str, str]:
@@ -4862,6 +5066,31 @@ def _iteration_increase_allowed(message: str) -> bool:
             message,
             flags=re.IGNORECASE,
         )
+    )
+
+
+def _ambiguous_iteration_parameter_change(message: str) -> bool:
+    generic_iteration = re.search(
+        r"(?:迭代(?:上限|次数|步数|限)?|(?:iteration|iterations|maxiter)\s*"
+        r"(?:limit|cap|upper\s*bound)?)",
+        message,
+        flags=re.IGNORECASE,
+    )
+    numeric_assignment = re.search(
+        r"(?:设(?:置)?为|改为|调整到|设置成|上限为|to|=|:)\s*[-+]?\d+",
+        message,
+        flags=re.IGNORECASE,
+    )
+    parameter_is_specific = re.search(
+        r"(?:几何|结构优化|几何优化|优化步数|优化迭代|geometry|geom_maxiter|"
+        r"\bscf\b|自洽|电子迭代|scf_maxiter)",
+        message,
+        flags=re.IGNORECASE,
+    )
+    return (
+        generic_iteration is not None
+        and numeric_assignment is not None
+        and parameter_is_specific is None
     )
 
 
