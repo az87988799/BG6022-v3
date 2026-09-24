@@ -273,7 +273,10 @@ class LlmClient:
             "messages": [dict(message) for message in messages],
             "max_tokens": self.settings.max_tokens,
         }
-        if purpose in {"intake", "answer"} and "deepseek.com" in self.settings.base_url.casefold():
+        if (
+            purpose in {"intake", "semantic", "answer"}
+            and "deepseek.com" in self.settings.base_url.casefold()
+        ):
             # Intake and the public answer protocol are bounded extraction/
             # presentation calls. DeepSeek's default thinking mode can consume
             # the full output budget before emitting a usable body.

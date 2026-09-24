@@ -28,6 +28,7 @@ class RuntimeSettings(StrictConfig):
     maxcore_mb: StrictInt = Field(default=192, gt=0)
     max_concurrent_jobs: StrictInt = Field(default=1, ge=1, le=1)
     confirm_before_compute: StrictBool = True
+    semantic_planner_v1: StrictBool = True
     attempt_timeout_seconds: StrictInt = Field(default=1200, gt=0)
     run_active_timeout_seconds: StrictInt = Field(default=3600, gt=0)
     output_limit_mb: StrictInt = Field(default=64, gt=0)

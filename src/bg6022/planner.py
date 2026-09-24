@@ -18,6 +18,12 @@ from pydantic import (
     model_validator,
 )
 
+from bg6022.intake_utils import (
+    extract_single_inline_xyz as _extract_single_inline_xyz,
+)
+from bg6022.intake_utils import (
+    mentions_computation as _mentions_computation,
+)
 from bg6022.llm import LlmClient, LlmError
 from bg6022.models import (
     AnswerGoal,
@@ -44,7 +50,6 @@ from bg6022.molecule_identity import (
 )
 from bg6022.orca.profiles import resolve_method_request
 from bg6022.output_contracts import property_evidence_matches
-from bg6022.tools.molecule import parse_xyz_bytes
 from bg6022.tools.registry import ToolRegistry, build_registry, merge_explicit_step_parameters
 
 Intent = Literal["chemistry_compute", "chemistry_qa", "daily_qa", "context_query"]
@@ -876,40 +881,6 @@ def intake_message(
             }
         )
     return output
-
-
-def _extract_single_inline_xyz(message: str) -> tuple[str, int] | None:
-    """Find one complete XYZ block and retain its exact original text."""
-
-    lines = message.splitlines(keepends=True)
-    matches: list[tuple[str, int]] = []
-    for index, line in enumerate(lines):
-        count_text = line.strip()
-        if not count_text.isdecimal():
-            continue
-        count = int(count_text)
-        if count <= 0 or count > 10000 or index + count + 2 > len(lines):
-            continue
-        block = "".join(lines[index : index + count + 2])
-        try:
-            parsed = parse_xyz_bytes(block.encode("utf-8"))
-        except (TypeError, ValueError):
-            continue
-        matches.append((block, parsed.atom_count))
-        if len(matches) > 1:
-            return None
-    return matches[0] if matches else None
-
-
-def _mentions_computation(message: str) -> bool:
-    return (
-        re.search(
-            r"(?i)(?:\b(?:opt|sp|freq)\b|geometry\s+optimization|optimiz|"
-            r"single[ -]?point|frequency|frequencies|几何优化|优化|单点|频率|计算)",
-            message,
-        )
-        is not None
-    )
 
 
 def plan_message(
