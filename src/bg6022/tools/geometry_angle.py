@@ -63,6 +63,7 @@ def make_geometry_angle_tool(config: AppConfig | None = None) -> Tool:
         input_ports={"geometry": "molecular_geometry"},
         results={"angle_value": "degree", "selected_atoms": "record_list"},
         output_ports={"atom_report": "text_file"},
+        default_outputs=["angle_value"],
         result_properties={
             "angle_value": "angle",
             "selected_atoms": "selected_atoms",

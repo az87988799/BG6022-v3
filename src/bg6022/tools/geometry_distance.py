@@ -76,6 +76,7 @@ def make_geometry_distance_tool(config: AppConfig | None = None) -> Tool:
         request_parameters=["atom_i", "atom_j"],
         input_ports={"geometry": "molecular_geometry"},
         results={"interatomic_distance": "angstrom"},
+        default_outputs=["interatomic_distance"],
         result_properties={"interatomic_distance": "distance"},
         result_metadata={
             "interatomic_distance": {

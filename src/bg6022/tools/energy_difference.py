@@ -36,6 +36,7 @@ def make_energy_difference_tool(config: AppConfig | None = None) -> Tool:
         ),
         input_ports={"energy_a": "energy_data", "energy_b": "energy_data"},
         results={"method_energy_difference": "Eh"},
+        default_outputs=["method_energy_difference"],
         result_properties={"method_energy_difference": "method_energy_difference"},
         result_metadata={
             "method_energy_difference": {

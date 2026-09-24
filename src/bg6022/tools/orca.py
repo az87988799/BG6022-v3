@@ -103,6 +103,7 @@ def make_single_point_tool(config: AppConfig | None = None) -> Tool:
             "sp_electronic_energy": "electronic_energy",
             "energy_data": "energy_data",
         },
+        default_outputs=["sp_electronic_energy"],
         result_check_prerequisites={
             "sp_electronic_energy": ["local_minimum_supported"],
         },
@@ -147,6 +148,7 @@ def make_optimize_tool(config: AppConfig | None = None) -> Tool:
             "optimized_geometry": "molecular_geometry",
             "energy_data": "energy_data",
         },
+        default_outputs=["opt_final_electronic_energy", "optimized_geometry"],
         result_metadata={
             "opt_final_electronic_energy": {
                 "label": "优化后的电子能",
@@ -195,6 +197,7 @@ def make_frequency_tool(config: AppConfig | None = None) -> Tool:
             "frequency_complete": "frequency_complete",
             "local_minimum_supported": "local_minimum_supported",
         },
+        default_outputs=["vibrational_frequencies"],
         result_metadata={
             "hessian": {
                 "label": "振动 Hessian 文件",
@@ -250,6 +253,7 @@ def _make_tool(
     results: dict[str, str],
     result_properties: dict[str, ResultProperty],
     result_metadata: dict[str, dict[str, str]],
+    default_outputs: list[str],
     scientific_checks: dict[str, str] | None = None,
     scientific_check_input_ports: dict[str, str] | None = None,
     result_check_prerequisites: dict[str, list[str]] | None = None,
@@ -379,6 +383,7 @@ def _make_tool(
         results=results,
         result_properties=result_properties,
         result_metadata=result_metadata,
+        default_outputs=default_outputs,
         scientific_checks=scientific_checks or {},
         scientific_check_input_ports=scientific_check_input_ports or {},
         result_check_prerequisites=result_check_prerequisites or {},

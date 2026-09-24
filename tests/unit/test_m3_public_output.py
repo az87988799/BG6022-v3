@@ -24,6 +24,7 @@ executable = '{(tmp_path / "missing-orca.exe").as_posix()}'
 
 [runtime]
 data_root = 'data'
+semantic_planner_v1 = false
 
 [defaults]
 method_profile = 'r2scan3c'
@@ -56,6 +57,23 @@ def test_dynamic_output_contract_is_strict_and_public() -> None:
             results={"value": "unregistered_numeric_type"},
             requires_compute_permission=False,
         )
+
+
+def test_default_outputs_are_unique_declared_public_outputs() -> None:
+    base = {
+        "name": "records",
+        "description": "Return verified records.",
+        "results": {"records": "record_list"},
+        "result_properties": {"records": "records"},
+        "requires_compute_permission": False,
+    }
+    tool = Tool(**base, default_outputs=["records"])
+    assert tool.default_outputs == ["records"]
+
+    with pytest.raises(ValueError, match="must not contain duplicates"):
+        Tool(**base, default_outputs=["records", "records"])
+    with pytest.raises(ValueError, match="undeclared public outputs"):
+        Tool(**base, default_outputs=["missing"])
 
 
 def test_verified_initial_geometry_is_delivered_and_reindexed(tmp_path: Path) -> None:

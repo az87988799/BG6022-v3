@@ -1044,6 +1044,7 @@ class Tool(StrictModel):
     result_metadata: dict[str, dict[str, str]] = Field(default_factory=dict)
     success_conditions: list[str] = Field(default_factory=list)
     planning_role: Literal["task", "preparation"] = "task"
+    default_outputs: list[str] = Field(default_factory=list)
     scientific_checks: dict[str, str] = Field(default_factory=dict)
     scientific_check_input_ports: dict[str, str] = Field(default_factory=dict)
     result_check_prerequisites: dict[str, list[str]] = Field(default_factory=dict)
@@ -1221,7 +1222,16 @@ class Tool(StrictModel):
         # before a Tool can be exposed to Intake or query handling.
         from bg6022.output_contracts import canonical_public_outputs
 
-        canonical_public_outputs(self)
+        public_outputs = canonical_public_outputs(self)
+        declared_public_outputs = {str(item["name"]) for item in public_outputs}
+        if len(self.default_outputs) != len(set(self.default_outputs)):
+            raise ValueError("default_outputs must not contain duplicates")
+        unknown_defaults = sorted(set(self.default_outputs) - declared_public_outputs)
+        if unknown_defaults:
+            raise ValueError(
+                "default_outputs refer to undeclared public outputs: "
+                f"{unknown_defaults}"
+            )
         return self
 
     def execute(self, step: Step, context: ToolCallContext) -> Result:
