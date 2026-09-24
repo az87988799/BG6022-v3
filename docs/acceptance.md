@@ -228,5 +228,6 @@ live evidence are linked from
 | Offline regression | 510 passed, 17 skipped | passed |
 | Ruff lint and formatting | Lint passed; 121 files already formatted | passed |
 | Compile and package build | `compileall` and `python -m build` passed | passed |
+| GitHub Actions | Offline run `35966242920` passed on implementation code commit `547c15330a5dcfbaf5dc637072c376e441ecacbe` | passed |
 | Active ORCA budget | 4 cores / 1024 MB / `%maxcore 192` / one concurrent job, matching generated input | passed |
 | User acceptance | User review has not yet been recorded | pending |

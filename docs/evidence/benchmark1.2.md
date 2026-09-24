@@ -55,6 +55,9 @@ call changed. C004 passed with zero compute and no LLM call.
 - `compileall` for `src` and `tests`: passed.
 - `python -m build`: passed.
 - `git diff --check`: passed before final staging.
+- GitHub Actions offline run `35966242920` passed on code commit
+  `547c15330a5dcfbaf5dc637072c376e441ecacbe`; pytest (excluding live ORCA),
+  Ruff lint/format, compileall, and `uv build` all passed.
 
 The full profile and holdout were not run. Passing smoke/core and Scientific
 Matrix v1 verifies the requested implementation gates; it does not record user
