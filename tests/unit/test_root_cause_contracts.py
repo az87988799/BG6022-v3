@@ -179,7 +179,10 @@ def test_single_operation_on_history_geometry_uses_only_the_history_alias() -> N
 def test_agent_preserves_trailing_newline_in_inline_xyz(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        "[orca]\nexecutable = 'missing-orca.exe'\n[runtime]\ndata_root = 'data'\n",
+        (
+            "[orca]\nexecutable = 'missing-orca.exe'\n[runtime]\n"
+            "data_root = 'data'\nsemantic_planner_v1 = false\n"
+        ),
         encoding="utf-8",
     )
     config = load_config(config_path)
@@ -901,6 +904,7 @@ executable = '{(tmp_path / "missing-orca.exe").as_posix()}'
 
 [runtime]
 data_root = 'data'
+semantic_planner_v1 = false
 
 [defaults]
 method_profile = 'r2scan3c'

@@ -21,3 +21,16 @@ The exact companion master plan currently present in the working environment is
 for this stage is `E:\chrome\BG6022_v3_M0_Implementation_Plan.md`; attached
 documents provide architecture and stage requirements, while the user's
 current stage request authorizes implementation of M0.
+
+## Lightweight control-plane L1–L8 (2026-09-24)
+
+The control plane now has an opt-in Semantic Proposal contract, a program
+canonicalizer, and a deterministic typed-port PlanBuilder. After the live
+Benchmark v1.1 and Scientific Matrix v1 gates passed, `semantic_planner_v1` was
+enabled by default; setting it to `false` retains the legacy Intake/Planner
+route. This is a v3 source-level change, not a v2 database or runtime migration.
+The seven long-lived runtime objects, Tool execution boundary, ORCA adapter,
+Result/Artifact publication, scientific checks, and bounded repair remain the
+execution layer. Verification facts are recorded in
+[`docs/evidence/L1-L8-lightweight-control-plane.md`](evidence/L1-L8-lightweight-control-plane.md);
+the phase is awaiting user acceptance.

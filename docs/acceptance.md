@@ -202,3 +202,12 @@ explicitly accepted M2 on 2026-09-16; see
 [`docs/milestones/M2.md`](milestones/M2.md) and
 [`docs/evidence/M2-final-minimal-fix-acceptance.md`](evidence/M2-final-minimal-fix-acceptance.md),
 plus the [machine-readable run index](evidence/M2-final-live-run-index.json).
+
+## 2026-09-24 lightweight control-plane L1–L8
+
+Implementation and local/live validation evidence are recorded in
+[`docs/evidence/L1-L8-lightweight-control-plane.md`](evidence/L1-L8-lightweight-control-plane.md).
+The live Benchmark v1.1 passed 41/41 and Scientific Matrix v1 passed 11/11 with
+16 successful ORCA attempts. GitHub Actions status is pending the implementation
+push. **The phase is awaiting the user's review and explicit acceptance; it is
+not marked accepted or complete.**

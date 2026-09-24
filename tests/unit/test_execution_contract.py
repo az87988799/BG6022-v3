@@ -29,6 +29,7 @@ executable = '{executable.as_posix()}'
 
 [runtime]
 data_root = 'data'
+semantic_planner_v1 = false
 run_active_timeout_seconds = {run_timeout}
 
 [defaults]

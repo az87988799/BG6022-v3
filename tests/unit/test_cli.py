@@ -15,6 +15,7 @@ executable = '{(tmp_path / "missing-orca.exe").as_posix()}'
 
 [runtime]
 data_root = 'data'
+semantic_planner_v1 = false
 
 [defaults]
 method_profile = 'r2scan3c'
@@ -53,6 +54,7 @@ executable = '{(tmp_path / "missing-orca.exe").as_posix()}'
 
 [runtime]
 data_root = 'data'
+semantic_planner_v1 = false
 
 [defaults]
 method_profile = 'r2scan3c'

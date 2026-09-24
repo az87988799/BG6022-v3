@@ -54,6 +54,7 @@ executable = '{executable.as_posix()}'
 
 [runtime]
 data_root = 'data'
+semantic_planner_v1 = false
 
 [defaults]
 method_profile = '{default_method}'

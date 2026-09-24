@@ -13,7 +13,7 @@ def make_live_config(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         '[orca]\nexecutable = "orca.exe"\n'
-        '[runtime]\ndata_root = "runtime-data"\n'
+        '[runtime]\ndata_root = "runtime-data"\nsemantic_planner_v1 = false\n'
         "cores = 4\nmemory_mb = 1024\nmaxcore_mb = 192\n"
         "max_concurrent_jobs = 1\nconfirm_before_compute = false\n",
         encoding="utf-8",

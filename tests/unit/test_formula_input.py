@@ -58,6 +58,7 @@ executable = '{(tmp_path / "missing-orca.exe").as_posix()}'
 
 [runtime]
 data_root = 'data'
+semantic_planner_v1 = false
 """,
         encoding="utf-8",
     )
@@ -486,6 +487,7 @@ executable = '{(tmp_path / "missing-orca.exe").as_posix()}'
 
 [runtime]
 data_root = 'data'
+semantic_planner_v1 = false
 
 [molecule]
 pubchem_formula_max_cids = 20
