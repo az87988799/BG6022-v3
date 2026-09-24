@@ -401,10 +401,27 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
         f"Repair attempts: {cost['repair_attempts']}",
         f"Wall time: {cost['wall_time_seconds']:.2f}s",
         "",
+        "### LLM calls by purpose",
+        "",
+        "| Purpose | Calls | Input tokens | Output tokens | Total tokens | Schema corrections |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for purpose, stats in cost.get("by_purpose", {}).items():
+        lines.append(
+            "| {} | {} | {} | {} | {} | {} |".format(
+                purpose,
+                stats["calls"],
+                stats["input_tokens"],
+                stats["output_tokens"],
+                stats["total_tokens"],
+                stats["schema_corrections"],
+            )
+        )
+    lines.extend([
         "## Cases",
         "",
         f"Passed: {summary['passed_cases']}/{summary['case_count']}",
-    ]
+    ])
     skipped = summary.get("skipped_cases", [])
     if skipped:
         lines.extend([f"Not selected: {len(skipped)} live/holdout cases", ""])

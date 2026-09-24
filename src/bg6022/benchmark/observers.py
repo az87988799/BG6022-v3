@@ -88,29 +88,53 @@ def orca_attempt_outcomes(run: Run | None, registry: ToolRegistry | None) -> tup
     return total, successes, failures
 
 
-def summarize_llm_calls(calls: list[Any]) -> dict[str, int]:
+_LLM_PURPOSES = ("semantic", "intake", "planner", "repair", "answer")
+
+
+def summarize_llm_calls(calls: list[Any]) -> dict[str, Any]:
     summary = {
         "calls": len(calls),
         "input_tokens": 0,
         "output_tokens": 0,
         "total_tokens": 0,
         "schema_corrections": 0,
+        "by_purpose": {purpose: _empty_call_summary() for purpose in _LLM_PURPOSES},
     }
     for call in calls:
         raw = _dump(call)
         usage = raw.get("usage", {})
-        summary["input_tokens"] += _int_token(usage, "prompt_tokens", "input_tokens")
-        summary["output_tokens"] += _int_token(usage, "completion_tokens", "output_tokens")
+        input_tokens = _int_token(usage, "prompt_tokens", "input_tokens")
+        output_tokens = _int_token(usage, "completion_tokens", "output_tokens")
         total = _int_token(usage, "total_tokens")
         if not total:
-            total = _int_token(usage, "prompt_tokens", "input_tokens") + _int_token(
-                usage, "completion_tokens", "output_tokens"
-            )
-        summary["total_tokens"] += total
+            total = input_tokens + output_tokens
         corrections = raw.get("structured_correction_count", 0)
-        if type(corrections) is int and corrections > 0:
-            summary["schema_corrections"] += corrections
+        if type(corrections) is not int or corrections < 0:
+            corrections = 0
+        summary["input_tokens"] += input_tokens
+        summary["output_tokens"] += output_tokens
+        summary["total_tokens"] += total
+        summary["schema_corrections"] += corrections
+        purpose = str(raw.get("purpose") or "other")
+        purpose_summary = summary["by_purpose"].setdefault(
+            purpose, _empty_call_summary()
+        )
+        purpose_summary["calls"] += 1
+        purpose_summary["input_tokens"] += input_tokens
+        purpose_summary["output_tokens"] += output_tokens
+        purpose_summary["total_tokens"] += total
+        purpose_summary["schema_corrections"] += corrections
     return summary
+
+
+def _empty_call_summary() -> dict[str, int]:
+    return {
+        "calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "schema_corrections": 0,
+    }
 
 
 def _int_token(usage: dict[str, Any], *names: str) -> int:

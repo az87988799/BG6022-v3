@@ -27,6 +27,17 @@ def test_summary_case_count_and_critical_gate_are_not_averaged(tmp_path) -> None
             "stage": "complete",
             "plan": {"steps": [{"tool": "optimize_geometry"}]},
             "unrequested_compute": True,
+            "llm_calls": [
+                {
+                    "purpose": "semantic",
+                    "usage": {"prompt_tokens": 120, "completion_tokens": 24},
+                },
+                {
+                    "purpose": "answer",
+                    "usage": {"input_tokens": 40, "output_tokens": 10},
+                    "structured_correction_count": 1,
+                },
+            ],
         },
         strict=True,
     )
@@ -42,10 +53,17 @@ def test_summary_case_count_and_critical_gate_are_not_averaged(tmp_path) -> None
     assert summary["critical_assertion_failure_count"] == 1
     assert summary["critical_case_failure_count"] == 1
     assert summary["execution_safety_violation_count"] == 1
-    assert summary["cost"]["calls"] == 0
+    assert summary["cost"]["calls"] == 2
+    assert summary["cost"]["by_purpose"]["semantic"]["calls"] == 1
+    assert summary["cost"]["by_purpose"]["semantic"]["total_tokens"] == 144
+    assert summary["cost"]["by_purpose"]["planner"]["calls"] == 0
+    assert summary["cost"]["by_purpose"]["answer"]["schema_corrections"] == 1
     assert summary["cost"]["orca_attempts"] == 0
     markdown = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
     assert "Critical assertion failures: 1" in markdown
     assert "Critical case failures: 1" in markdown
     assert "Execution safety violations: 1" in markdown
     assert "Critical violations:" not in markdown
+    assert "LLM calls by purpose" in markdown
+    assert "| semantic | 1 | 120 | 24 | 144 | 0 |" in markdown
+    assert "| planner | 0 | 0 | 0 | 0 | 0 |" in markdown

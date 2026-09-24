@@ -802,6 +802,27 @@ def _observation_from_live_agent(
         ),
         None,
     )
+    if intake is None:
+        semantic = next(
+            (
+                item["value"]
+                for item in reversed(llm.structured_outputs)
+                if item.get("purpose") == "semantic"
+                and isinstance(item.get("value"), dict)
+            ),
+            None,
+        )
+        if semantic is not None:
+            semantic_intents = {
+                "compute": "chemistry_compute",
+                "qa": "chemistry_qa",
+                "context_query": "context_query",
+                "modify": "modify",
+                "clarify": "clarify",
+                "unsupported": "unsupported",
+            }
+            intent = semantic_intents.get(str(semantic.get("mode", "")))
+            intake = {"intent": intent} if intent is not None else None
     run = response.run or agent._coerce_run(None)
     unchanged_pending_run = bool(
         seeded_run is not None
