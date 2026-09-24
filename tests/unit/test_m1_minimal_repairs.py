@@ -8,9 +8,21 @@ import pytest
 from bg6022.agent import Agent
 from bg6022.answer import render_run
 from bg6022.config import load_config
-from bg6022.models import InputReference, Plan, Request, Result, ResultTarget, Run, Step, Tool
+from bg6022.models import (
+    InputReference,
+    Plan,
+    Request,
+    Requirement,
+    Result,
+    ResultTarget,
+    Run,
+    Step,
+    Subject,
+    Tool,
+)
 from bg6022.orca.parser import inspect_attempt
 from bg6022.orca.profiles import resolve_parameters
+from bg6022.plan_builder import build_plan
 from bg6022.planner import (
     ElectronicStateCandidate,
     InputBindingProposal,
@@ -54,6 +66,48 @@ def test_current_default_runtime_budget_is_4_core_1024_mb(tmp_path: Path) -> Non
     assert config.resources["memory_mb"] == 1024
     assert config.resources["maxcore_mb"] == 192
     assert config.resources["max_concurrent_jobs"] == 1
+
+
+def test_inline_subject_geometry_is_bound_to_verified_artifact(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    registry = build_registry(config)
+    xyz_text = "3\nwater\nO 0 0 0\nH 0 0.75 0.5\nH 0 -0.75 0.5\n"
+    request = Request(
+        id="request_inline_geometry",
+        description="optimize the supplied water geometry",
+        source="chat",
+        subjects={
+            "subject_1": Subject(
+                key="subject_1",
+                structure_input={"xyz_text": xyz_text},
+            )
+        },
+        requirements=[
+            Requirement(
+                id="req_opt",
+                capability="optimize_geometry",
+                parameters={
+                    "method_profile": "r2scan3c",
+                    "environment": "gas",
+                    "charge": 0,
+                    "multiplicity": 1,
+                },
+                outputs=["opt_final_electronic_energy", "optimized_geometry"],
+            )
+        ],
+    )
+    plan = build_plan(request, registry=registry, plan_id="plan_inline_geometry")
+    agent = Agent(config, registry, llm=None, session_id="session_inline_geometry")
+
+    run = agent._create_chat_run(request, plan)
+
+    geometry_ref = run.plan.steps[0].inputs["geometry"]
+    assert geometry_ref.artifact_id is not None
+    assert geometry_ref.artifact_id in {item.id for item in run.artifact_index}
+    assert len(run.artifact_index) == 1
+    artifact = run.artifact_index[0]
+    artifact_path = Path(config.data_root_path) / "runs" / run.id / artifact.relative_path
+    assert artifact_path.read_text(encoding="utf-8") == xyz_text
 
 
 def test_generic_compute_tool_does_not_inherit_orca_preparation_or_budget(

@@ -1449,15 +1449,19 @@ class Agent:
             replacements["request_geometry"] = artifact
             replacements[INPUT_GEOMETRY_PLACEHOLDER] = artifact
         for subject_id, subject in run.request.subjects.items():
-            if not isinstance(subject, Mapping):
+            if isinstance(subject, Subject):
+                subject_input = subject.structure_input
+                subject_key = subject.key or subject_id
+            elif isinstance(subject, Mapping):
+                subject_input = subject.get("structure_input", {})
+                subject_key = str(subject.get("key") or subject_id)
+            else:
                 continue
-            subject_input = subject.get("structure_input", {})
             if not isinstance(subject_input, Mapping):
                 continue
             subject_xyz = subject_input.get("xyz_text") or subject_input.get("xyz")
             if subject_xyz is None:
                 continue
-            subject_key = str(subject.get("key") or subject_id)
             if xyz_text is not None and len(run.request.subjects) == 1 and subject_xyz == xyz_text:
                 artifact = replacements["request_geometry"]
             else:

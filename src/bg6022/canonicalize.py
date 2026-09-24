@@ -64,7 +64,7 @@ def semantic_to_intake(
     for subject in semantic.subjects:
         if _ID_RE.fullmatch(subject.key) is None:
             raise ValueError("semantic subject keys must be simple local identifiers")
-        if subject.evidence not in message:
+        if inline is None and subject.evidence not in message:
             raise ValueError(
                 f"subject {subject.key!r} evidence must quote the original user message"
             )

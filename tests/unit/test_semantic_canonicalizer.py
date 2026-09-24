@@ -164,7 +164,9 @@ def test_dual_sp_difference_inserts_same_geometry_derived_requirement():
     )
 
     request = canonicalize_semantic_request(
-        "Calculate the PBE0 minus r²SCAN-3c single-point energy difference for water.",
+        "Calculate the PBE0 minus r²SCAN-3c single-point energy difference for water. "
+        "总电荷为0，自旋多重度为1。\n\n"
+        "3\nwater\nO 0 0 0\nH 0 0.75 0.5\nH 0 -0.75 0.5\n",
         proposal,
         request_id="request_difference",
         registry=registry,
@@ -178,6 +180,23 @@ def test_dual_sp_difference_inserts_same_geometry_derived_requirement():
     assert difference.input_bindings["energy_b"].source_requirement_id == right.id
     assert difference.outputs == ["method_energy_difference"]
     assert left.outputs == right.outputs == []
+    assert left.parameters["charge"] == right.parameters["charge"] == 0
+    assert left.parameters["multiplicity"] == right.parameters["multiplicity"] == 1
+    assert difference.parameters == {}
+
+
+def test_inline_geometry_does_not_require_model_evidence_to_quote_stripped_coordinates():
+    proposal = _proposal(tasks=[_task("sp", "single_point", method="r²SCAN-3c")])
+    proposal = proposal.model_copy(
+        update={
+            "subjects": [proposal.subjects[0].model_copy(update={"evidence": "Oxygen hydrate"})]
+        }
+    )
+    message = "Run a single point calculation.\n\n3\nwater\nO 0 0 0\nH 0 0.75 0.5\nH 0 -0.75 0.5\n"
+
+    intake = semantic_to_intake(message, proposal, registry=build_registry())
+
+    assert intake.subjects["subject_1"].inline_xyz is not None
 
 
 def test_method_modification_resolves_user_text_and_preserves_constraint_patch():

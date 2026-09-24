@@ -1731,6 +1731,9 @@ def request_from_intake(
                 "电子态参数需要澄清：" + ", ".join(normalized.clarification_fields)
             )
         params = dict(normalized.explicit_parameters)
+        for name in ("charge", "multiplicity"):
+            if name not in tool.request_parameters:
+                params.pop(name, None)
         if normalized_parameters is not None and len(intake.requirements) == 1:
             for name, value in normalized_parameters.explicit_parameters.items():
                 if name not in tool.request_parameters:
