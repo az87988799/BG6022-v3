@@ -208,6 +208,8 @@ plus the [machine-readable run index](evidence/M2-final-live-run-index.json).
 Implementation and local/live validation evidence are recorded in
 [`docs/evidence/L1-L8-lightweight-control-plane.md`](evidence/L1-L8-lightweight-control-plane.md).
 The live Benchmark v1.1 passed 41/41 and Scientific Matrix v1 passed 11/11 with
-16 successful ORCA attempts. GitHub Actions status is pending the implementation
-push. **The phase is awaiting the user's review and explicit acceptance; it is
-not marked accepted or complete.**
+16 successful ORCA attempts. GitHub Actions offline run `35956751600` passed on
+implementation commit `37f639f53eafbfca1f7a4246a4ba1b16dab043b9`, including
+pytest, Ruff lint and format checks, compileall, and `uv build`. **The phase is
+awaiting the user's review and explicit acceptance; it is not marked accepted
+or complete.**

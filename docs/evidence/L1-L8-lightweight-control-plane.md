@@ -35,6 +35,7 @@ acceptance. This record does not mark the phase accepted.
 | Ruff | `ruff check .` passed |
 | Bytecode compilation | `compileall -q src tests` passed |
 | Whitespace validation | `git diff --check` passed |
+| GitHub Actions offline | Run `35956751600` on implementation commit `37f639f53eafbfca1f7a4246a4ba1b16dab043b9` passed: pytest, Ruff lint/format, compileall, and `uv build` |
 | Live Benchmark v1.1 | 41/41 passed; boundary accuracy 11/11; critical assertion failures 0; execution-safety violations 0 |
 | Live LLM cost route | Fresh compute cases B001, B004, B008, B009 (3 runs), and B018 (3 runs) each used one Semantic call and zero Planner calls |
 | Live LLM totals | 15 Semantic calls, 3 Answer calls, 0 Intake/Planner/Repair calls; 62,126 tokens |
