@@ -1,0 +1,58 @@
+{
+  "objects": [
+    {
+      "id": "h2",
+      "label": "氢分子",
+      "geometry": "geometries/h2.xyz",
+      "charge": 0,
+      "multiplicity": 1,
+      "aliases": ["H2", "氢气"],
+      "tags": ["diatomic"]
+    },
+    {
+      "id": "water",
+      "label": "水分子",
+      "geometry": "geometries/water.xyz",
+      "charge": 0,
+      "multiplicity": 1,
+      "aliases": ["H2O", "水"],
+      "tags": ["small", "nonlinear"]
+    },
+    {
+      "id": "ammonia",
+      "label": "氨分子",
+      "geometry": "geometries/ammonia.xyz",
+      "charge": 0,
+      "multiplicity": 1,
+      "aliases": ["NH3", "氨"],
+      "tags": ["small", "nonlinear"]
+    },
+    {
+      "id": "co2",
+      "label": "二氧化碳分子",
+      "geometry": "geometries/co2.xyz",
+      "charge": 0,
+      "multiplicity": 1,
+      "aliases": ["CO2", "二氧化碳"],
+      "tags": ["small", "linear"]
+    },
+    {
+      "id": "methane",
+      "label": "甲烷分子",
+      "geometry": "geometries/methane.xyz",
+      "charge": 0,
+      "multiplicity": 1,
+      "aliases": ["CH4", "甲烷"],
+      "tags": ["small", "nonlinear"]
+    },
+    {
+      "id": "ethanol",
+      "label": "乙醇分子",
+      "geometry": "geometries/ethanol.xyz",
+      "charge": 0,
+      "multiplicity": 1,
+      "aliases": ["ethanol", "乙醇"],
+      "tags": ["small", "flexible"]
+    }
+  ]
+}

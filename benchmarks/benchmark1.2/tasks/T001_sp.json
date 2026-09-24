@@ -1,0 +1,51 @@
+{
+  "id": "T001",
+  "label": "r2SCAN-3c single point",
+  "input_mode": "inline_xyz",
+  "prompt_variants": [
+    {
+      "id": "canonical",
+      "style": "canonical",
+      "template": "请使用 r²SCAN-3c 对下面的 {label} XYZ 结构进行单点计算，并报告电子能。\n\n总电荷为{charge}，自旋多重度为{multiplicity}。\n\n{xyz_text}"
+    },
+    {
+      "id": "natural",
+      "style": "natural",
+      "template": "对这个 {label} 结构跑一个 r²SCAN-3c 单点，告诉我电子能。\n\n总电荷为{charge}，自旋多重度为{multiplicity}。\n\n{xyz_text}"
+    },
+    {
+      "id": "compact",
+      "style": "compact",
+      "template": "r²SCAN-3c：{label} SP，返回电子能。\n\n总电荷为{charge}，自旋多重度为{multiplicity}。\n\n{xyz_text}"
+    },
+    {
+      "id": "colloquial",
+      "style": "colloquial",
+      "template": "帮我用 r²SCAN-3c 算一下这个 {label} 的单点能。\n\n总电荷为{charge}，自旋多重度为{multiplicity}。\n\n{xyz_text}"
+    }
+  ],
+  "ground_truth": {
+    "route": "compute",
+    "roles": [
+      {
+        "role": "sp",
+        "capability": "single_point",
+        "method_profile": "r2scan3c"
+      }
+    ],
+    "answer_property": "electronic_energy",
+    "output_properties": {
+      "sp": [
+        "electronic_energy"
+      ]
+    },
+    "forbidden_tools": [
+      "optimize_geometry",
+      "frequency"
+    ],
+    "max_orca_attempts": 1,
+    "require_confirmation": true,
+    "expect_confirmation_turn": true
+  },
+  "cost_class": "low"
+}

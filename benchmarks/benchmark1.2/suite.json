@@ -1,0 +1,22 @@
+{
+  "name": "benchmark1.2",
+  "version": "1.2",
+  "schema": "bg6022.benchmark.full_pipeline.v1",
+  "official_profile": "core",
+  "prompt_generation": "frozen_templates",
+  "scientific_matrix_source": "../scientific_v1",
+  "identity_cases": [
+    {
+      "id": "I001_water_name_opt",
+      "object_id": "water",
+      "task_id": "T002",
+      "prompt_template": "请用 r²SCAN-3c 优化{label}（电荷{charge}，自旋多重度{multiplicity}），并报告优化后的电子能。"
+    },
+    {
+      "id": "I002_ethanol_name_opt",
+      "object_id": "ethanol",
+      "task_id": "T002",
+      "prompt_template": "请用 r²SCAN-3c 优化{label}（电荷{charge}，自旋多重度{multiplicity}），并报告优化后的电子能。"
+    }
+  ]
+}

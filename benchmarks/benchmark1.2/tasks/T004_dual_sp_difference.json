@@ -1,0 +1,69 @@
+{
+  "id": "T004",
+  "label": "same-geometry dual single-point energy difference",
+  "input_mode": "inline_xyz",
+  "prompt_variants": [
+    {
+      "id": "canonical",
+      "style": "canonical",
+      "template": "在同一个 {label} XYZ 结构上，分别用 r²SCAN-3c 和 PBE0 做单点计算，并给出 PBE0 - r²SCAN-3c 的电子能差。\n\n总电荷为{charge}，自旋多重度为{multiplicity}。\n\n{xyz_text}"
+    },
+    {
+      "id": "natural",
+      "style": "natural",
+      "template": "请对这个 {label} 的同一份结构分别跑 r²SCAN-3c 和 PBE0 单点，然后告诉我两者能量相差多少（PBE0 减 r²SCAN-3c）。\n\n总电荷为{charge}，自旋多重度为{multiplicity}。\n\n{xyz_text}"
+    },
+    {
+      "id": "compact",
+      "style": "compact",
+      "template": "{label} 同几何双 SP：r²SCAN-3c / PBE0；输出 PBE0 - r²SCAN-3c。\n\n总电荷为{charge}，自旋多重度为{multiplicity}。\n\n{xyz_text}"
+    },
+    {
+      "id": "colloquial",
+      "style": "colloquial",
+      "template": "用两种方法给这个 {label} 算单点能，比较一下 PBE0 比 r²SCAN-3c 高或低多少。\n\n总电荷为{charge}，自旋多重度为{multiplicity}。\n\n{xyz_text}"
+    }
+  ],
+  "ground_truth": {
+    "route": "compute",
+    "roles": [
+      {
+        "role": "sp_r2",
+        "capability": "single_point",
+        "method_profile": "r2scan3c"
+      },
+      {
+        "role": "sp_pbe0",
+        "capability": "single_point",
+        "method_profile": "pbe0_d3bj_def2svp"
+      },
+      {
+        "role": "compare",
+        "capability": "same_geometry_method_energy_difference"
+      }
+    ],
+    "same_initial_geometry_groups": [
+      [
+        "sp_r2",
+        "sp_pbe0"
+      ]
+    ],
+    "answer_property": "method_energy_difference",
+    "output_properties": {
+      "sp_r2": [
+        "electronic_energy"
+      ],
+      "sp_pbe0": [
+        "electronic_energy"
+      ],
+      "compare": [
+        "method_energy_difference"
+      ]
+    },
+    "comparison_mode": "numeric_difference",
+    "max_orca_attempts": 2,
+    "require_confirmation": true,
+    "expect_confirmation_turn": true
+  },
+  "cost_class": "medium"
+}

@@ -1,0 +1,64 @@
+{
+  "id": "T005",
+  "label": "independent dual optimization comparison",
+  "input_mode": "inline_xyz",
+  "prompt_variants": [
+    {
+      "id": "canonical",
+      "style": "canonical",
+      "template": "从同一个 {label} 初始 XYZ 出发，分别用 r²SCAN-3c 和 PBE0 做几何优化，并列比较两个优化末态的电子能。\n\n总电荷为{charge}，自旋多重度为{multiplicity}。\n\n{xyz_text}"
+    },
+    {
+      "id": "natural",
+      "style": "natural",
+      "template": "请从这份 {label} 初始结构各自开始一次 r²SCAN-3c 和 PBE0 优化，最后把两种方法得到的能量放在一起比较。\n\n总电荷为{charge}，自旋多重度为{multiplicity}。\n\n{xyz_text}"
+    },
+    {
+      "id": "compact",
+      "style": "compact",
+      "template": "{label} 同一初始几何，独立 Opt：r²SCAN-3c vs PBE0；并列能量。\n\n总电荷为{charge}，自旋多重度为{multiplicity}。\n\n{xyz_text}"
+    },
+    {
+      "id": "colloquial",
+      "style": "colloquial",
+      "template": "这个 {label} 分别用 r²SCAN-3c 和 PBE0 优化一遍，互相不要接着对方的结构算，然后对比末态能量。\n\n总电荷为{charge}，自旋多重度为{multiplicity}。\n\n{xyz_text}"
+    }
+  ],
+  "ground_truth": {
+    "route": "compute",
+    "roles": [
+      {
+        "role": "opt_r2",
+        "capability": "optimize_geometry",
+        "method_profile": "r2scan3c"
+      },
+      {
+        "role": "opt_pbe0",
+        "capability": "optimize_geometry",
+        "method_profile": "pbe0_d3bj_def2svp"
+      }
+    ],
+    "same_initial_geometry_groups": [
+      [
+        "opt_r2",
+        "opt_pbe0"
+      ]
+    ],
+    "answer_property": "electronic_energy",
+    "output_properties": {
+      "opt_r2": [
+        "electronic_energy",
+        "molecular_geometry"
+      ],
+      "opt_pbe0": [
+        "electronic_energy",
+        "molecular_geometry"
+      ]
+    },
+    "comparison_mode": "side_by_side",
+    "max_orca_attempts": 2,
+    "require_confirmation": true,
+    "expect_confirmation_turn": true
+  },
+  "cost_class": "high"
+}

@@ -1,0 +1,48 @@
+{
+  "id": "T002",
+  "label": "r2SCAN-3c geometry optimization",
+  "input_mode": "inline_xyz",
+  "prompt_variants": [
+    {
+      "id": "canonical",
+      "style": "canonical",
+      "template": "请用 r²SCAN-3c 优化下面的 {label} 结构，并报告优化后的结构和电子能。\n\n总电荷为{charge}，自旋多重度为{multiplicity}。\n\n{xyz_text}"
+    },
+    {
+      "id": "natural",
+      "style": "natural",
+      "template": "把这个 {label} 的几何用 r²SCAN-3c 优化一下，给我优化后的结构和能量。\n\n总电荷为{charge}，自旋多重度为{multiplicity}。\n\n{xyz_text}"
+    },
+    {
+      "id": "compact",
+      "style": "compact",
+      "template": "r²SCAN-3c：{label} Opt，交付末态几何和电子能。\n\n总电荷为{charge}，自旋多重度为{multiplicity}。\n\n{xyz_text}"
+    },
+    {
+      "id": "colloquial",
+      "style": "colloquial",
+      "template": "帮我把这个 {label} 松弛到稳定结构，用 r²SCAN-3c，顺便报能量。\n\n总电荷为{charge}，自旋多重度为{multiplicity}。\n\n{xyz_text}"
+    }
+  ],
+  "ground_truth": {
+    "route": "compute",
+    "roles": [
+      {
+        "role": "opt",
+        "capability": "optimize_geometry",
+        "method_profile": "r2scan3c"
+      }
+    ],
+    "answer_property": "electronic_energy",
+    "output_properties": {
+      "opt": [
+        "electronic_energy",
+        "molecular_geometry"
+      ]
+    },
+    "max_orca_attempts": 1,
+    "require_confirmation": true,
+    "expect_confirmation_turn": true
+  },
+  "cost_class": "medium"
+}

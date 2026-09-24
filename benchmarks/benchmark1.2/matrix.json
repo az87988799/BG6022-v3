@@ -1,0 +1,15 @@
+{
+  "cells": [
+    {"object_id": "h2", "task_id": "T001", "enabled": true, "variants": ["canonical"], "repeat": 1},
+    {"object_id": "water", "task_id": "T001", "enabled": true, "variants": ["canonical"], "repeat": 1},
+    {"object_id": "water", "task_id": "T002", "enabled": true, "variants": ["canonical"], "repeat": 1},
+    {"object_id": "water", "task_id": "T003", "enabled": true, "variants": ["canonical"], "repeat": 1},
+    {"object_id": "water", "task_id": "T004", "enabled": true, "variants": ["canonical"], "repeat": 1},
+    {"object_id": "water", "task_id": "T005", "enabled": true, "variants": ["canonical"], "repeat": 1},
+    {"object_id": "ammonia", "task_id": "T002", "enabled": true, "variants": ["canonical"], "repeat": 1},
+    {"object_id": "ammonia", "task_id": "T003", "enabled": true, "variants": ["canonical"], "repeat": 1},
+    {"object_id": "co2", "task_id": "T003", "enabled": true, "variants": ["canonical"], "repeat": 1},
+    {"object_id": "methane", "task_id": "T002", "enabled": true, "variants": ["canonical"], "repeat": 1},
+    {"object_id": "ethanol", "task_id": "T002", "enabled": true, "variants": ["canonical"], "repeat": 1}
+  ]
+}
