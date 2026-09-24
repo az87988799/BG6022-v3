@@ -18,6 +18,14 @@ def compare_reports(baseline_dir: str | Path, candidate_dir: str | Path) -> dict
         raise BenchmarkReportError(
             "benchmark versions differ; capability pass-rate comparison is not valid"
         )
+    baseline_suite = baseline.get("suite_identity")
+    candidate_suite = candidate.get("suite_identity")
+    if (baseline_suite is None) != (candidate_suite is None) or (
+        baseline_suite is not None and baseline_suite != candidate_suite
+    ):
+        raise BenchmarkReportError(
+            "benchmark suite identities differ; capability pass-rate comparison is not valid"
+        )
     before = _case_map(baseline)
     after = _case_map(candidate)
     improved: list[dict[str, Any]] = []

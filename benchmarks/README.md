@@ -1,5 +1,14 @@
 # BG6022-v3 Benchmarks
 
+Benchmark 1.2 is the product full-pipeline benchmark. It begins with frozen
+natural-language prompts and drives the public Agent conversation, including
+confirmation, Tools, Results/Artifacts, and deterministic grading. Run it with
+`uv run python -m bg6022.benchmark bench12 benchmarks/benchmark1.2`; see the
+dataset README for profiles and explicit live flags.
+
+`v1/` remains the diagnostic benchmark, and `scientific_v1/` remains the fixed
+Request/Plan real-ORCA regression matrix. Neither is removed by Benchmark 1.2.
+
 Benchmark 1.1 is a regression tool for Request normalization, Tool planning, geometry provenance, scientific result boundaries, query/replay behavior, and repair. It is a test-only package under `src/bg6022/benchmark/`; the production Agent does not import it.
 
 ## Default run

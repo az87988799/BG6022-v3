@@ -55,3 +55,22 @@ def test_compare_rejects_capability_scores_across_versions(tmp_path) -> None:
 
     with pytest.raises(BenchmarkReportError, match="benchmark versions differ"):
         compare_reports(baseline, candidate)
+
+
+def test_compare_rejects_different_suite_identities_at_same_version(tmp_path) -> None:
+    baseline = tmp_path / "baseline"
+    candidate = tmp_path / "candidate"
+    _report(baseline, passed=True, token_count=100)
+    _report(candidate, passed=True, token_count=80)
+    for path, schema in (
+        (baseline, "bg6022.benchmark.full_pipeline.v1"),
+        (candidate, "bg6022.benchmark.full_pipeline.v2"),
+    ):
+        summary_path = path / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["benchmark_version"] = "1.2"
+        summary["suite_identity"] = {"name": "benchmark1.2", "version": "1.2", "schema": schema}
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    with pytest.raises(BenchmarkReportError, match="suite identities differ"):
+        compare_reports(baseline, candidate)
