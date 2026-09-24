@@ -236,11 +236,75 @@ class CaseResult(BenchmarkModel):
     observation: CaseObservation
 
 
+class Benchmark12TurnObservation(BenchmarkModel):
+    """One public message/response pair observed by the full pipeline driver."""
+
+    index: StrictInt = Field(ge=1)
+    user_message: StrictStr
+    response_text: StrictStr
+    run_id: StrictStr | None = None
+    run_status: StrictStr | None = None
+    waiting_for: StrictStr | None = None
+    llm_purposes: list[StrictStr] = Field(default_factory=list)
+    orca_attempts_after_turn: StrictInt = Field(default=0, ge=0)
+    delivery_status: StrictStr | None = None
+    delivery_properties: list[StrictStr] = Field(default_factory=list)
+
+
+class Benchmark12Observation(BenchmarkModel):
+    """Read-only production evidence collected after a Benchmark 1.2 dialogue."""
+
+    item_id: StrictStr
+    run_index: StrictInt = Field(ge=1)
+    turns: list[Benchmark12TurnObservation] = Field(default_factory=list)
+    request: dict[str, Any] | None = None
+    plan: dict[str, Any] | None = None
+    results: list[dict[str, Any]] = Field(default_factory=list)
+    artifacts: list[dict[str, Any]] = Field(default_factory=list)
+    final_response_text: StrictStr | None = None
+    llm_calls: list[dict[str, Any]] = Field(default_factory=list)
+    orca_attempts: StrictInt = Field(default=0, ge=0)
+    orca_successes: StrictInt = Field(default=0, ge=0)
+    orca_failures: StrictInt = Field(default=0, ge=0)
+    repair_attempts: StrictInt = Field(default=0, ge=0)
+    final_status: StrictStr
+    failed_stage: StrictStr | None = None
+    error_category: StrictStr | None = None
+    pre_confirmation_orca_attempts: StrictInt = Field(default=0, ge=0)
+    post_confirmation_orca_attempts: StrictInt = Field(default=0, ge=0)
+    confirmation_turn_index: StrictInt | None = Field(default=None, ge=1)
+    confirmation_required: bool = False
+    public_delivery_properties: list[StrictStr] = Field(default_factory=list)
+    delivery_status: StrictStr | None = None
+    legacy_control_plane_used: bool = False
+    external_calls: dict[StrictStr, StrictInt] = Field(default_factory=dict)
+    elapsed_seconds: float = Field(default=0.0, ge=0)
+
+
+class Benchmark12Result(BenchmarkModel):
+    """Deterministic grade for one expanded Benchmark 1.2 item."""
+
+    item_id: StrictStr
+    task_id: StrictStr
+    object_id: StrictStr
+    variant_id: StrictStr
+    run_index: StrictInt = Field(ge=1)
+    passed: StrictBool
+    dimensions: dict[StrictStr, bool | None]
+    failed_stage: StrictStr | None = None
+    error_category: StrictStr | None = None
+    failures: list[StrictStr] = Field(default_factory=list)
+    observation: Benchmark12Observation
+
+
 __all__ = [
     "AssertionResult",
     "AssertionType",
     "BenchmarkAssertion",
     "BenchmarkCase",
+    "Benchmark12Observation",
+    "Benchmark12Result",
+    "Benchmark12TurnObservation",
     "CaseObservation",
     "CaseResult",
     "LiveResultFixture",
