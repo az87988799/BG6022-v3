@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from bg6022.canonicalize import canonicalize_modification, canonicalize_semantic_request
+from bg6022.canonicalize import (
+    canonicalize_modification,
+    canonicalize_semantic_request,
+    semantic_to_intake,
+)
 from bg6022.semantic import SemanticProposal
 from bg6022.tools.registry import build_registry
 
@@ -56,6 +60,41 @@ def test_pbe0_is_resolved_by_program_and_terminal_output_is_derived():
     assert requirement.parameters["method_profile"] == "pbe0_d3bj_def2svp"
     assert requirement.constraints["method_resolution"]["status"] == "proposed"
     assert requirement.outputs == ["opt_final_electronic_energy"]
+
+
+def test_chinese_name_uses_english_lookup_and_preserves_original_evidence():
+    semantic = SemanticProposal.model_validate(
+        {
+            "mode": "compute",
+            "subjects": [
+                {
+                    "key": "ethanol",
+                    "query": "ethanol",
+                    "input_kind": "name",
+                    "evidence": "乙醇",
+                }
+            ],
+            "tasks": [
+                {
+                    "key": "opt",
+                    "subject_key": "ethanol",
+                    "capability": "optimize_geometry",
+                    "method_request": "r²SCAN-3c",
+                    "parameters": {},
+                    "requested_properties": [],
+                }
+            ],
+            "relations": [],
+        },
+        strict=True,
+    )
+
+    intake = semantic_to_intake("优化乙醇", semantic, registry=build_registry())
+    subject = intake.subjects["ethanol"]
+
+    assert subject.molecule_query == "ethanol"
+    assert subject.molecule_name_evidence == "乙醇"
+    assert subject.molecule_input_kind == "name"
 
 
 def test_dual_opt_compare_derives_shared_output_and_answer_goal():

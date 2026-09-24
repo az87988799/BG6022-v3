@@ -46,6 +46,7 @@ _PROPERTY_NAMES = {
     "distance": "distance",
     "angle": "angle",
 }
+_HAN_NAME = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 
 
 class SemanticModel(BaseModel):
@@ -71,6 +72,15 @@ class SemanticSubject(SemanticModel):
         if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", value) is None:
             raise ValueError("semantic subject keys must be simple local identifiers")
         return value
+
+    @model_validator(mode="after")
+    def _normalized_name_lookup(self) -> SemanticSubject:
+        if self.input_kind == "name" and _HAN_NAME.search(self.query):
+            raise ValueError(
+                "name query must use a reliable English PubChem lookup spelling; "
+                "preserve the original Chinese name in evidence"
+            )
+        return self
 
 
 class SemanticTask(SemanticModel):

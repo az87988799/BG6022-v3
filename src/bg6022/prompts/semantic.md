@@ -11,6 +11,13 @@ program adds molecule resolution and geometry generation when needed.
 For compute requests:
 - Give every subject a short local key and an input query grounded in this turn or
   recent conversation. `evidence` must quote the user's original wording exactly.
+- Keep the user's original molecule wording in `evidence`. When `input_kind`
+  is `name` and the user gives a Chinese chemical name, use a reliable English
+  PubChem lookup name in `query` while preserving the exact Chinese wording in
+  `evidence`. For example, `乙醇` should use `query="ethanol"` and
+  `evidence="乙醇"`. Never send an untranslated Chinese name as a PubChem
+  `name` query. If you cannot determine a reliable English lookup name, return
+  `clarify` instead of guessing.
 - Give every task a unique short key such as `t1`; task keys are temporary refs.
 - Set `method_request` to the user's wording (for example `PBE0` or `r²SCAN-3c`).
   Never output a canonical method profile ID.

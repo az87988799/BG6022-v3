@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from bg6022.semantic import (
     SemanticProposal,
+    SemanticSubject,
     compact_method_catalog,
     compact_result_catalog,
     compact_tool_catalog,
@@ -48,6 +49,45 @@ def test_semantic_proposal_accepts_user_facing_intent_only():
     assert proposal.tasks[0].capability == "optimize_geometry"
     assert proposal.tasks[0].method_request == "PBE0"
     assert proposal.tasks[0].requested_properties == ["energy"]
+
+
+def test_semantic_subject_rejects_untranslated_chinese_name_query():
+    with pytest.raises(ValueError, match="reliable English PubChem lookup spelling"):
+        SemanticSubject(
+            key="ethanol",
+            query="乙醇",
+            input_kind="name",
+            evidence="乙醇",
+        )
+
+
+def test_semantic_subject_accepts_english_lookup_with_chinese_evidence():
+    subject = SemanticSubject(
+        key="ethanol",
+        query="ethanol",
+        input_kind="name",
+        evidence="乙醇",
+    )
+
+    assert subject.query == "ethanol"
+    assert subject.evidence == "乙醇"
+    assert subject.input_kind == "name"
+
+
+@pytest.mark.parametrize(
+    ("query", "input_kind"),
+    [("702", "cid"), ("CCO", "smiles"), ("C2H6O", "formula")],
+)
+def test_semantic_subject_non_name_inputs_are_unchanged(query: str, input_kind: str):
+    subject = SemanticSubject(
+        key="subject_1",
+        query=query,
+        input_kind=input_kind,
+        evidence=query,
+    )
+
+    assert subject.query == query
+    assert subject.input_kind == input_kind
 
 
 @pytest.mark.parametrize(
