@@ -1,0 +1,274 @@
+{
+  "run_id": "run_cad2e4b9ca1347f5a8ad84feda1aefbe",
+  "run_status": "succeeded",
+  "resources": {
+    "cores": 4,
+    "memory_mb": 1024,
+    "maxcore_mb": 192,
+    "max_concurrent_jobs": 1,
+    "attempt_timeout_seconds": 1200,
+    "run_active_timeout_seconds": 3600,
+    "output_limit_bytes": 67108864,
+    "workdir_limit_bytes": 536870912
+  },
+  "intake": "deterministic proposal; not live LLM evidence",
+  "result_status": "succeeded",
+  "results": [
+    {
+      "step_id": "s01_optimize_geometry",
+      "status": "succeeded",
+      "input_bindings": {
+        "geometry": "artifact_3876137ee68148a196ce4e0bbddd168f"
+      },
+      "input_hashes": {
+        "geometry": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2"
+      },
+      "values": {
+        "opt_final_electronic_energy": {
+          "source_line": 2712,
+          "token": "-76.418938721015",
+          "unit": "Eh",
+          "value": -76.418938721015
+        }
+      }
+    },
+    {
+      "step_id": "s02_single_point",
+      "status": "succeeded",
+      "input_bindings": {
+        "geometry": "artifact_a700462e67724c1c98e5a2b070088fe7"
+      },
+      "input_hashes": {
+        "geometry": "2f3ef063c200ea080f92d148002aae21b51641f7b167150341bd395a52575ee7"
+      },
+      "values": {
+        "sp_electronic_energy": {
+          "source_line": 844,
+          "token": "-76.276694537753",
+          "unit": "Eh",
+          "value": -76.276694537753
+        }
+      }
+    },
+    {
+      "step_id": "s03_single_point",
+      "status": "succeeded",
+      "input_bindings": {
+        "geometry": "artifact_a700462e67724c1c98e5a2b070088fe7"
+      },
+      "input_hashes": {
+        "geometry": "2f3ef063c200ea080f92d148002aae21b51641f7b167150341bd395a52575ee7"
+      },
+      "values": {
+        "sp_electronic_energy": {
+          "source_line": 845,
+          "token": "-76.321781136262",
+          "unit": "Eh",
+          "value": -76.321781136262
+        }
+      }
+    },
+    {
+      "step_id": "s04_same_geometry_method_energy_difference",
+      "status": "succeeded",
+      "input_bindings": {
+        "energy_a": "artifact_688a206daa8a46f482897c8ca44e44d5",
+        "energy_b": "artifact_a7b8ba04180843718720e0f9971620b6"
+      },
+      "input_hashes": {
+        "energy_a": "0c47ff474b8394ba6970cb4859a90cd826f16ff6d55010102f1435e27855aadb",
+        "energy_b": "3bd8713fdd0b165b995a1915fe7ca77cf21ff5e77c615e9a493a3744513d4ae4"
+      },
+      "values": {
+        "method_energy_difference": {
+          "charge": 0,
+          "direction": "B - A",
+          "geometry_sha256": "2f3ef063c200ea080f92d148002aae21b51641f7b167150341bd395a52575ee7",
+          "input_energy_artifact_ids": [
+            "artifact_688a206daa8a46f482897c8ca44e44d5",
+            "artifact_a7b8ba04180843718720e0f9971620b6"
+          ],
+          "method_a": "pbe0_d3bj_def2svp",
+          "method_b": "b3lyp_d3bj_def2svp",
+          "multiplicity": 1,
+          "unit": "Eh",
+          "value": -0.045086598509001874
+        }
+      }
+    }
+  ],
+  "reports": [
+    {
+      "access": "raw_output",
+      "source_context": {
+        "subject_label": "water",
+        "method_label": "r²SCAN-3c",
+        "operation_label": "optimize_geometry",
+        "task_label": "Optimize water, report dipole moment; compare PBE0 and B3LYP energies at that optimized geometry. charge=0 multiplicity=1\n3\nBG6022 water initial geometry; coordinates in angstrom\nO -0.00066957 0.37761498 -0.00000000\nH 0.80285178 -0.18859766",
+        "source_status": "succeeded",
+        "attempt": 1
+      },
+      "session_id": "session_ca8e14c7d83d4d039314fe6cab4990e5",
+      "run_id": "run_cad2e4b9ca1347f5a8ad84feda1aefbe",
+      "source_step_id": "s01_optimize_geometry",
+      "attempt": 1,
+      "source_result_path": "s01_optimize_geometry/attempt-01/result.json",
+      "source_result_fingerprint": "589ea562971392dc601491fd557e4cbf01ed42b7a708275e997ad5c126ff90a4",
+      "artifact_id": "artifact_3a967e953b11411ca4cf023f06067454",
+      "artifact_sha256": "08e4405a0deeae476438df6d0c5647efcb051d66c788a50aaa4a3aabcaf97e65",
+      "artifact_size": 144617,
+      "artifact_role": "stdout",
+      "source_status": "succeeded",
+      "is_current_attempt": true,
+      "task_description": "Optimize water, report dipole moment; compare PBE0 and B3LYP energies at that optimized geometry. charge=0 multiplicity=1\n3\nBG6022 water initial geometry; coordinates in angstrom\nO -0.00066957 0.37761498 -0.00000000\nH 0.80285178 -0.18859766",
+      "tool": "optimize_geometry",
+      "run_status": "succeeded",
+      "queries": [
+        {
+          "evidence": "dipole moment",
+          "search_terms": [
+            "Total Dipole Moment",
+            "Magnitude (Debye)"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "query_index": 0,
+          "lookup_status": "found",
+          "snippets": [
+            {
+              "start_line": 2790,
+              "end_line": 2814,
+              "text": "Electronic contribution:     -0.000123399       0.252839801       0.000000000\nNuclear contribution   :      0.000479022      -0.985141587       0.000000000\n                        -----------------------------------------\nTotal Dipole Moment    :      0.000355623      -0.732301786       0.000000000\n                        -----------------------------------------\nMagnitude (a.u.)       :      0.732301872\nMagnitude (Debye)      :      1.861363434\n\n\n\n--------------------\nRotational spectrum \n--------------------\n \nRotational constants in cm-1:            26.886426            14.547578             9.439889 \nRotational constants in MHz :        806034.771107        436125.419091        283000.739458 \n\nDipole components along the rotational axes: \nx,y,z [a.u.] :    -0.000001    -0.732302     0.000000 \nx,y,z [Debye]:    -0.000002    -1.861363     0.000000 \n\n \n\nDipole moment calculation done in   0.0 sec \n"
+            }
+          ],
+          "truncated": false,
+          "ambiguous": false
+        }
+      ],
+      "bytes_read": 144617
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "artifact_3876137ee68148a196ce4e0bbddd168f",
+      "role": "input_geometry",
+      "sha256": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2"
+    },
+    {
+      "id": "artifact_15e425eae78c49a6a3209173acc02583",
+      "role": "input",
+      "sha256": "f38298ce5ea5fa5bb4630c9473914682d43e331ee932d456d528ac8db8e5f000"
+    },
+    {
+      "id": "artifact_eea22b52493b43cbab4d4f1c45db74dd",
+      "role": "input_geometry_snapshot",
+      "sha256": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2"
+    },
+    {
+      "id": "artifact_3a967e953b11411ca4cf023f06067454",
+      "role": "stdout",
+      "sha256": "08e4405a0deeae476438df6d0c5647efcb051d66c788a50aaa4a3aabcaf97e65"
+    },
+    {
+      "id": "artifact_84017a249dab4bb6a1871068c18e97d1",
+      "role": "stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "artifact_a700462e67724c1c98e5a2b070088fe7",
+      "role": "optimized_geometry",
+      "sha256": "2f3ef063c200ea080f92d148002aae21b51641f7b167150341bd395a52575ee7"
+    },
+    {
+      "id": "artifact_67fcedb67b734b5f94f84b352dda4808",
+      "role": "verified_energy_data",
+      "sha256": "9ab906da796af0fb6d683e288bb0f9d14457501488ab8fa3956c8aa1837d09b3"
+    },
+    {
+      "id": "artifact_77cc6063474b447290bccc14a73aee8c",
+      "role": "input",
+      "sha256": "1dc51bb80eee8f0bd5c19e93861a3a6daae8f38fe48fbed0f978540b8da0d345"
+    },
+    {
+      "id": "artifact_d6ebbba66c3941c28319c8aba253208d",
+      "role": "input_geometry_snapshot",
+      "sha256": "2f3ef063c200ea080f92d148002aae21b51641f7b167150341bd395a52575ee7"
+    },
+    {
+      "id": "artifact_4c0346753e7843519bb8c8d5dc353d85",
+      "role": "stdout",
+      "sha256": "3093f72f883dfe07b14bac257d839df1112e6ae6de8e2890f7f7f2517d683412"
+    },
+    {
+      "id": "artifact_8447dbc20cb140ad8338ee9110cc26cd",
+      "role": "stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "artifact_688a206daa8a46f482897c8ca44e44d5",
+      "role": "verified_energy_data",
+      "sha256": "0c47ff474b8394ba6970cb4859a90cd826f16ff6d55010102f1435e27855aadb"
+    },
+    {
+      "id": "artifact_97b5d48309e040f2b32fe864d8eab63a",
+      "role": "input",
+      "sha256": "eb0dd5c4ff970a2b5720b6d4f18972bad69287f950f3e6d6afec876437893f6e"
+    },
+    {
+      "id": "artifact_cbc340e329f940e1a9166d661b27caad",
+      "role": "input_geometry_snapshot",
+      "sha256": "2f3ef063c200ea080f92d148002aae21b51641f7b167150341bd395a52575ee7"
+    },
+    {
+      "id": "artifact_84cf0c3adbdf4bbeaa2fb7141fa374ae",
+      "role": "stdout",
+      "sha256": "02fca5dec82416a4017a5db6334f5df419586c6f31065ab42a5eec9b3b84d7ea"
+    },
+    {
+      "id": "artifact_0bc38665db2649dd8ac0b4e4f7535d08",
+      "role": "stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "artifact_a7b8ba04180843718720e0f9971620b6",
+      "role": "verified_energy_data",
+      "sha256": "3bd8713fdd0b165b995a1915fe7ca77cf21ff5e77c615e9a493a3744513d4ae4"
+    }
+  ],
+  "attempts": [
+    {
+      "step_id": "s01_optimize_geometry",
+      "attempt": 1,
+      "status": "succeeded",
+      "geometry_sha256": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2",
+      "input_geometry_artifact_id": "artifact_3876137ee68148a196ce4e0bbddd168f",
+      "phase": "finished"
+    },
+    {
+      "step_id": "s02_single_point",
+      "attempt": 1,
+      "status": "succeeded",
+      "geometry_sha256": "2f3ef063c200ea080f92d148002aae21b51641f7b167150341bd395a52575ee7",
+      "input_geometry_artifact_id": "artifact_a700462e67724c1c98e5a2b070088fe7",
+      "phase": "finished"
+    },
+    {
+      "step_id": "s03_single_point",
+      "attempt": 1,
+      "status": "succeeded",
+      "geometry_sha256": "2f3ef063c200ea080f92d148002aae21b51641f7b167150341bd395a52575ee7",
+      "input_geometry_artifact_id": "artifact_a700462e67724c1c98e5a2b070088fe7",
+      "phase": "finished"
+    },
+    {
+      "step_id": "s04_same_geometry_method_energy_difference",
+      "attempt": 1,
+      "status": "succeeded",
+      "geometry_sha256": null,
+      "input_geometry_artifact_id": null,
+      "phase": "finished"
+    }
+  ]
+}

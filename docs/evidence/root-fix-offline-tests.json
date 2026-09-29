@@ -1,0 +1,2563 @@
+{
+  "command": "python -m pytest -m \"not live_orca\" --disable-socket",
+  "counts": {
+    "passed": 618,
+    "failed": 0,
+    "skipped": 20
+  },
+  "deselected": 6,
+  "cases": [
+    {
+      "test": "tests.benchmark.test_case_schema::test_case_schema_accepts_bounded_assertion",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_case_schema::test_case_schema_rejects_unknown_assertion",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_case_schema::test_case_schema_rejects_expression_fields_and_excessive_repeat",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_cli12::test_bench12_cli_is_registered_with_explicit_live_flags",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_cli12::test_no_live_flags_produce_blocked_report_without_running_agent",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_cli12::test_core_without_live_flags_does_not_run_identity_or_scientific_cases",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_cli12::test_identity_cases_are_skipped_when_only_pubchem_permission_is_missing",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_cli12::test_live_flags_without_config_do_not_start_agent",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_compare::test_compare_identifies_regression_and_cost_delta",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_compare::test_compare_rejects_capability_scores_across_versions",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_compare::test_compare_rejects_different_suite_identities_at_same_version",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_expand::test_profiles_expand_expected_frozen_items_deterministically",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_expand::test_full_profile_adds_holdout_only_when_requested",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_expand::test_matrix_rejects_unknown_references[<lambda>-unknown object]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_expand::test_matrix_rejects_unknown_references[<lambda>-unknown task]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_expand::test_matrix_rejects_unknown_references[<lambda>-unknown variant]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_expand::test_matrix_rejects_duplicate_cells",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_expand::test_geometry_path_escape_is_rejected",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_expand::test_geometry_symlink_is_rejected",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_expand::test_sampling_requires_a_fixed_seed_and_is_reproducible",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_expand::test_full_variant_sampling_does_not_duplicate_frozen_profile_items",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_schema::test_object_schema_rejects_charged_or_open_shell_structures",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_schema::test_task_schema_rejects_duplicate_variant_ids",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_schema::test_prompt_renderer_rejects_empty_unknown_or_unsafe_markers[]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_schema::test_prompt_renderer_rejects_empty_unknown_or_unsafe_markers[use {object.__class__}]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_schema::test_prompt_renderer_rejects_empty_unknown_or_unsafe_markers[use {unknown}]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_schema::test_prompt_renderer_rejects_empty_unknown_or_unsafe_markers[use {label!r}]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_schema::test_prompt_renderer_substitutes_only_declared_markers",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_schema::test_prompt_renderer_rejects_missing_marker_value",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_dataset12_schema::test_prompt_variant_rejects_unknown_style",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_driver12::test_driver_confirms_only_through_public_message",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_driver12::test_driver_does_not_auto_confirm_after_unchanged_clarification",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_driver12::test_driver_turn_bound_includes_public_confirmation",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_driver12::test_driver_honors_script_stop_after",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_grader::test_grader_uses_runtime_facts_not_answer_wording",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_grader::test_critical_failure_remains_visible_as_a_violation",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_grader::test_result_status_uses_latest_attempt_per_step",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_grader::test_method_profile_assertion_checks_resolution_status",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_grader::test_live_port_assertion_uses_unique_tool_selectors_not_step_ids",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_grader::test_live_port_assertion_reports_ambiguous_tool_selector",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_grader12::test_t003_roles_dependency_science_and_delivery_grade_pass",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_grader12::test_t003_rejects_frequency_not_bound_to_optimized_geometry",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_grader12::test_t005_accepts_shared_initial_geometry_and_independent_optimizations",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_grader12::test_t005_rejects_one_optimization_chained_from_the_other",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_grader12::test_legacy_planner_call_is_reported_as_semantic_control_plane_failure",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_grader12::test_preconfirmation_orca_attempt_is_a_safety_violation",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_grader12::test_role_mapping_fails_when_two_requirements_remain_ambiguous",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_grader12::test_method_profile_disambiguates_duplicate_capabilities",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_grader12::test_history_query_requires_verified_value_and_no_recomputation",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_grader12::test_deterministic_unsupported_route_does_not_require_an_llm_call",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_live_agent_parity::test_live_llm_uses_real_agent_and_never_invokes_tools",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_live_agent_parity::test_fresh_session_separates_results_from_capabilities_and_blocks_unsupported[B023_gibbs_unsupported-Gibbs \\u81ea\\u7531\\u80fd\\u4e0d\\u5728 Tool \\u76ee\\u5f55\\u4e2d]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_live_agent_parity::test_fresh_session_separates_results_from_capabilities_and_blocks_unsupported[B024_global_conformer_search-\\u6ca1\\u6709\\u5168\\u5c40\\u6784\\u8c61\\u641c\\u7d22 Tool]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_live_agent_parity::test_live_agent_retries_a_locally_invalid_planner_proposal",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_live_agent_parity::test_live_agent_observer_accepts_a_pre_intake_response",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_live_diagnostics::test_llm_schema_diagnostics_and_structured_outputs_reach_report",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_live_modes_require_explicit_flags::test_live_llm_case_requires_an_explicit_flag",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_live_modes_require_explicit_flags::test_offline_case_uses_production_plan_pipeline_without_live_calls",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_live_scenario::test_b010_continuation_updates_only_the_selected_requirement",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_live_scenario::test_b022_ambiguous_iteration_keeps_the_seeded_opt_unchanged",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_live_scenario::test_b028_queries_a_published_verified_result_without_recomputation",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_loader::test_case_sets_keep_holdout_separate",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_loader::test_live_compute_cases_declare_loadable_fixtures",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_loader::test_live_scenario_fixtures_validate_and_resolve_seed_references",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_loader::test_live_setup_references_cannot_escape_benchmark_root",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_loader::test_loader_rejects_unknown_assertion",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_loader::test_fixture_paths_cannot_escape_benchmark_root",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_matrix_cli::test_matrix_cli_requires_explicit_live_orca_permission",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_matrix_cli::test_matrix_cli_accepts_explicit_live_orca_and_required_config",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_matrix_expand::test_scientific_matrix_expands_exactly_the_eleven_enabled_cells",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_matrix_expand::test_expanded_request_geometry_matches_the_execution_geometry_file",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_matrix_expand::test_unknown_matrix_object_or_task_is_rejected[matrix_change0-unknown object]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_matrix_expand::test_unknown_matrix_object_or_task_is_rejected[matrix_change1-unknown task]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_matrix_expand::test_duplicate_cell_is_rejected",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_matrix_expand::test_matrix_with_no_enabled_cells_is_rejected",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_matrix_expand::test_geometry_path_escape_is_rejected",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_matrix_expand::test_symlink_geometry_escape_is_rejected",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_matrix_expand::test_unknown_template_marker_is_rejected",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_matrix_expand::test_live_orca_case_stays_blocked_without_explicit_permission",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_matrix_plan_builder_contracts::test_plan_builder_preserves_scientific_matrix_t001_through_t005_contracts",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_matrix_report::test_matrix_report_has_task_object_breakdowns_and_failure_diagnostics",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_matrix_schema::test_scientific_matrix_v1_rejects_non_neutral_singlets[1-1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_matrix_schema::test_scientific_matrix_v1_rejects_non_neutral_singlets[0-2]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_matrix_schema::test_scientific_matrix_v1_rejects_non_neutral_singlets[-1-2]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_report::test_summary_case_count_and_critical_gate_are_not_averaged",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_report12::test_report_writes_environment_summary_items_and_transcript_without_ground_truth",
+      "status": "passed"
+    },
+    {
+      "test": "tests.benchmark.test_report12::test_report_writes_failure_detail_for_failed_item",
+      "status": "passed"
+    },
+    {
+      "test": "tests.integration.test_runner_windows::test_cancel_stops_parent_and_child_process_tree",
+      "status": "passed"
+    },
+    {
+      "test": "tests.integration.test_runner_windows::test_natural_parent_exit_forces_residual_child_cleanup",
+      "status": "passed"
+    },
+    {
+      "test": "tests.live.test_generic_output_live::test_live_llm_geometry_angle_and_csv_followup",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_m1_live::test_live_pubchem_water_and_ethanol",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_m1_live::test_live_deepseek_intake",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_m3_extension_live::test_live_llm_distance_variants_twice",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_m3_extension_live::test_live_llm_b3lyp_variants_twice",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_m3_extension_live::test_live_llm_m2_composed_opt_result_variants_twice",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_m3_extension_live::test_live_llm_opt_distance_variants_twice",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_m3_extension_live::test_live_llm_history_distance_variants_twice",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_m3_extension_live::test_live_llm_confirmation_update_and_rejection",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_m3_extension_live::test_live_llm_completed_distance_query_variants_twice",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_m3_extension_live::test_live_llm_missing_and_unsupported_requests_twice",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_root_fix_live::test_live_natural_dipole_intake[True-\\u4f18\\u5316\\u6c34\\uff0c\\u7136\\u540e\\u7ed9\\u51fa\\u5b83\\u7684\\u5076\\u6781\\u77e9]",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_root_fix_live::test_live_natural_dipole_intake[True-\\u4f18\\u5316\\u6c34\\uff0c\\u7136\\u540e\\u544a\\u8bc9\\u6211\\u5076\\u6781\\u77e9]",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_root_fix_live::test_live_natural_dipole_intake[True-\\u4f18\\u5316\\u6c34\\u5e76\\u62a5\\u544a\\u5076\\u6781\\u77e9]",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_root_fix_live::test_live_natural_dipole_intake[True-\\u4f18\\u5316\\u6c34\\uff0c\\u7136\\u540e\\u8ba1\\u7b97\\u5b83\\u7684\\u5076\\u6781\\u77e9]",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_root_fix_live::test_live_natural_dipole_intake[False-\\u4f18\\u5316\\u6c34\\uff0c\\u7136\\u540e\\u7ed9\\u51fa\\u5b83\\u7684\\u5076\\u6781\\u77e9]",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_root_fix_live::test_live_natural_dipole_intake[False-\\u4f18\\u5316\\u6c34\\uff0c\\u7136\\u540e\\u544a\\u8bc9\\u6211\\u5076\\u6781\\u77e9]",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_root_fix_live::test_live_natural_dipole_intake[False-\\u4f18\\u5316\\u6c34\\u5e76\\u62a5\\u544a\\u5076\\u6781\\u77e9]",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.live.test_root_fix_live::test_live_natural_dipole_intake[False-\\u4f18\\u5316\\u6c34\\uff0c\\u7136\\u540e\\u8ba1\\u7b97\\u5b83\\u7684\\u5076\\u6781\\u77e9]",
+      "status": "skipped"
+    },
+    {
+      "test": "tests.unit.test_chat_controls::test_chat_prepares_then_waits_for_one_confirmation",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_chat_controls::test_planner_receives_local_validation_feedback_for_one_bounded_revision",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_chat_controls::test_invalid_parameter_intake_does_not_create_a_run",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_chat_controls::test_ambiguous_parameter_cannot_mutate_a_waiting_request",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_chat_presentation::test_confirmation_is_chinese_and_uses_the_bound_xyz_atom_count",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_chat_presentation::test_confirmation_keeps_water_smiles_for_name_variants",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_chat_presentation::test_confirmation_marks_missing_identity_fields_without_hiding_known_facts",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_chat_presentation::test_confirmation_includes_verified_hexane_identity_in_plan_heading",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_chat_presentation::test_confirmation_discloses_the_full_ordered_opt_freq_sp_plan",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_chat_presentation::test_result_and_repeat_confirmation_are_property_scoped_natural_language",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_chat_presentation::test_clarification_and_missing_property_do_not_dump_internal_data",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_chat_presentation::test_molecule_clarifications_explain_the_verified_failure_reason[ambiguous_molecule-\\u591a\\u4e2a\\u4e0d\\u540c\\u7ed3\\u6784]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_chat_presentation::test_molecule_clarifications_explain_the_verified_failure_reason[molecule_search_incomplete-\\u68c0\\u7d22\\u5c1a\\u672a\\u5b8c\\u6574]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_chat_presentation::test_molecule_clarifications_explain_the_verified_failure_reason[molecule_source_unverified-\\u65e0\\u6cd5\\u53ef\\u9760\\u6838\\u9a8c]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_chat_presentation::test_structured_property_targets_cover_multiple_facts_for_one_task",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_chat_presentation::test_structured_targets_cannot_be_covered_by_a_different_task",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_chat_presentation::test_multi_task_result_context_identifies_each_request",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_cli::test_preview_does_not_create_a_run",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_cli::test_execute_with_missing_orca_is_rejected_without_runner_or_run",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_query_reloads_the_saved_result_after_agent_recreation",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_query_selection_cannot_use_a_reference_outside_this_round",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_query_property_must_match_the_user_cited_property_phrase",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_structure_as_query_subject_is_not_a_geometry_output_request",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_generic_energy_phrase_cannot_stand_in_for_free_energy",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_selected_electronic_energy_cannot_answer_a_missing_zero_point_property",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_catalog_selects_the_indexed_water_result_without_falling_back_to_latest",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_three_step_runs_preserve_current_and_historical_energy_for_queries",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_history_geometry_language_does_not_route_result_query_into_compute_selection",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_llm_intake_failure_names_stage_and_persists_bounded_diagnostic[empty_response-\\u8bf7\\u6c42\\u89e3\\u6790\\u9636\\u6bb5\\u672a\\u83b7\\u5f97\\u6709\\u6548\\u6a21\\u578b\\u54cd\\u5e94]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_llm_intake_failure_names_stage_and_persists_bounded_diagnostic[ambiguous_result-Opt \\u548c SP \\u540c\\u65f6\\u8bf7\\u6c42\\u65f6]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_llm_planner_failure_names_stage_without_creating_a_run",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_model_cannot_select_history_geometry_without_user_request[Optimize fresh water with charge 0 and multiplicity 1; start from scratch.]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_model_cannot_select_history_geometry_without_user_request[Do not use or reuse the previous optimized geometry; generate fresh water with charge 0 and multiplicity 1.]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_model_cannot_choose_between_multiple_history_geometries",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_history_geometry_request_requires_affirmative_reuse_intent",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_current_task_cannot_borrow_energy_from_a_different_task",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_recent_result_window_is_bounded_by_distinct_runs",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_opt_and_sp_energy_keep_distinct_step_subjects_within_one_run",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_stale_fingerprint_and_foreign_session_are_not_catalog_facts",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_context_query::test_current_result_is_removed_when_the_step_fingerprint_changes",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_deterministic_plan_builder::test_single_point_and_opt_have_deterministic_preparation_and_targets",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_deterministic_plan_builder::test_opt_to_freq_uses_optimized_geometry_and_no_extra_opt_delivery",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_deterministic_plan_builder::test_dual_sp_difference_consumes_one_shared_initial_geometry",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_deterministic_plan_builder::test_dual_opt_compare_is_independent_and_shares_initial_geometry",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_deterministic_plan_builder::test_requirement_cycle_stops_without_planner_fallback",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_energy_data::test_method_difference_consumes_two_verified_energy_ports",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_energy_data::test_requirement_scoped_outputs_complete_for_repeated_tool_instances",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_energy_data::test_method_difference_rejects_mismatched_geometry",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_energy_data::test_method_difference_rejects_artifact_id_instead_of_current_output_port",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_energy_data::test_method_difference_requires_distinct_method_profiles",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_energy_data::test_plan_wires_energy_data_ports_without_copying_scalar_parameters",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_execution_contract::test_tool_requires_explicit_permission_and_accepted_content",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_execution_contract::test_active_clock_accumulates_one_interval",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_execution_contract::test_config_loading_is_pure_for_missing_orca_and_data_root",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_execution_contract::test_failed_opt_with_missing_xyz_can_publish_only_restart_candidate",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_execution_contract::test_residual_process_failure_has_no_public_values_and_stops_following_step",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_parser_preserves_unicode_and_literal_h20",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_no_hydrogen_structures_keep_rdkit_and_source_facts_consistent[O=C=O-CO2]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_no_hydrogen_structures_keep_rdkit_and_source_facts_consistent[N#N-N2]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_no_hydrogen_structures_keep_rdkit_and_source_facts_consistent[ClC(Cl)(Cl)Cl-CCl4]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_explicit_hydrogens_are_not_double_counted_and_non_formula_scope_stays_open",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_co2_geometry_generation_uses_verified_no_hydrogen_composition",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_explicit_smiles_forms_are_extracted_once_and_never_formula_normalized[SMILES:C1CCCCC1-C1CCCCC1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_explicit_smiles_forms_are_extracted_once_and_never_formula_normalized[SMILES: C1CCCCC1-C1CCCCC1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_explicit_smiles_forms_are_extracted_once_and_never_formula_normalized[\\u4f18\\u5316 SMILES:C1CCCCC1-C1CCCCC1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_explicit_smiles_forms_are_extracted_once_and_never_formula_normalized[\\u4f18\\u5316SMILES:C1CCCCC1-C1CCCCC1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_explicit_smiles_forms_are_extracted_once_and_never_formula_normalized[SMILES\\uff1aC1CCCCC1-C1CCCCC1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_explicit_smiles_forms_are_extracted_once_and_never_formula_normalized[SMILES\\uff1a CCO-CCO]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_explicit_smiles_forms_are_extracted_once_and_never_formula_normalized[SMILES=C1CCCCC1-C1CCCCC1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_labels_skip_horizontal_space_and_keep_complete_value[formula: C6H14]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_labels_skip_horizontal_space_and_keep_complete_value[formula\\uff1a\\tC6H14]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_labels_skip_horizontal_space_and_keep_complete_value[\\u5206\\u5b50\\u5f0f: C6H14]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_suffixes_are_rejected_as_whole_tokens[formula:C6H14+]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_suffixes_are_rejected_as_whole_tokens[formula:C6H14.Cl]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_suffixes_are_rejected_as_whole_tokens[formula:C6H14(OH)]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_name_evidence_keeps_original_name_separate_from_lookup_spelling",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_conflicting_explicit_smiles_require_clarification",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_case_normalization_is_narrow_and_preserves_literal_identity",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_structure_identity_binding_allows_selected_cid_and_rejects_other_queries",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_identity_facts_check_selected_fields_without_formula",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_explicit_cid_identity_requires_the_returned_cid",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_identity_is_program_owned_and_planner_preserves_it",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_planner_cannot_replace_unselected_formula_with_name",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_pubchem_uses_fastformula_then_batched_properties",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_pubchem_default_bound_covers_twenty_three_records",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_pubchem_explicit_bound_twenty_keeps_search_incomplete",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_pubchem_shares_retry_budget_across_endpoints",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_remote_formula_metadata_cannot_override_rdkit_facts",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_existing_charged_smiles_input_keeps_rdkit_facts",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_resolution_returns_bounded_candidates_and_raw_sources",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_resolution_marks_no_match_as_identity_failure",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_resolution_ignores_verified_exclusions_when_one_structure_is_unique",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_resolution_deduplicates_same_verified_structure_and_keeps_source_cids",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_resolution_does_not_auto_accept_unverified_source_record",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_formula_resolution_reports_incomplete_search_even_with_one_candidate",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_name_not_found_preserves_identity_task_for_name_supplement",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_direct_tool_rejects_selected_cid_binding_before_network",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_selected_cid_and_structure_are_both_required[7892-CCCCCC]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_selected_cid_and_structure_are_both_required[8058-CC(C)CCC]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_wrong_bare_smiles_does_not_replace_waiting_formula_or_change_target",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_invalid_original_smiles_is_not_silently_replaced_by_model_case",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_invalid_original_smiles_keeps_full_handle_message_waiting",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_name_not_found_supplement_updates_lookup_only_on_same_run",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_saved_candidate_selection_skips_intake_and_planner",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_handle_message_candidate_selection_reaches_confirmation_without_llm",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_candidate_choice_and_bare_equivalent_smiles_keep_original_formula",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_pending_formula_candidate_selection_is_snapshot_bound",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_followup_subject_binding_rejects_other_molecule",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_output_preference_negation_does_not_cross_clauses",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_formula_input::test_answer_cancellation_after_provider_call_is_not_complete",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_parser::test_parses_all_signed_modes_and_already_applied_scale_from_bytes",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_parser::test_parses_orca_imaginary_mode_annotation_without_losing_negative_sign",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_parser::test_scale_without_applied_marker_is_retained_as_unscaled",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_parser::test_missing_heading_and_scaling_factor_are_incomplete",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_parser::test_truncated_block_reports_missing_mode_indices",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_parser::test_duplicate_and_out_of_range_indices_are_rejected",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_parser::test_nonfinite_mode_and_scale_values_are_rejected",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_parser::test_nonpositive_scaling_factor_is_rejected[0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_parser::test_nonpositive_scaling_factor_is_rejected[-1.2]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_parser::test_unsupported_frequency_row_layout_or_unit_is_rejected",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_parser::test_multiple_frequency_sections_are_rejected",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_support::test_frequency_input_is_a_standalone_orca_operation",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_support::test_frequency_input_rejects_geometry_optimization_controls",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_support::test_energy_results_keep_opt_sp_and_frequency_categories_distinct",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_support::test_external_mode_count_depends_on_geometry_linearity",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_support::test_complete_frequency_and_matching_hessian_succeed_without_energy",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_support::test_hessian_frequency_values_must_match_stdout_modes",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_support::test_hessian_frequency_scale_must_match_stdout_scale",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_support::test_hessian_frequency_count_must_match_stdout_modes",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_support::test_annotated_imaginary_mode_is_complete_frequency_evidence_with_sign_preserved",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_support::test_frequency_facts_serialize_as_inspectable_evidence",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_support::test_truncated_frequency_section_cannot_succeed",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_support::test_missing_hessian_cannot_succeed",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_support::test_hessian_atom_distances_are_compared_in_bohr_and_ignore_origin_translation",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_support::test_hessian_column_blocks_are_fully_parsed",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_support::test_hessian_dimension_must_match_three_coordinates_per_atom",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_support::test_hessian_interatomic_distances_must_match_input_geometry",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_frequency_support::test_nonfinite_hessian_matrix_values_are_rejected",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_geometry_angle::test_geometry_angle_proves_scalar_records_and_csv_delivery",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_geometry_angle::test_registered_geometry_angle_rejects_missing_and_out_of_range_inputs",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_public_output_directory_keeps_fields_ports_and_checks_distinct",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_public_output_property_collision_is_rejected_at_registration",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_record_contract_does_not_accept_scalar_or_non_record_rows[42-record]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_record_contract_does_not_accept_scalar_or_non_record_rows[not a record list-record_list]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_record_contract_does_not_accept_scalar_or_non_record_rows[value2-record_list]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_record_contract_does_not_accept_scalar_or_non_record_rows[value3-record_list]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_generic_property_evidence_accepts_declared_semantic_synonyms",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_atom_index_assignment_is_parsed_as_a_whole_invalid_token[2.5]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_atom_index_assignment_is_parsed_as_a_whole_invalid_token[2e0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_atom_index_assignment_is_parsed_as_a_whole_invalid_token[2/3]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_atom_index_assignment_is_parsed_as_a_whole_invalid_token[0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_atom_index_assignment_is_parsed_as_a_whole_invalid_token[-1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_query_schema_rejects_subject_property_cross_binding",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_result_answer_bounds_explanations_and_renders_verified_file_content",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_request_output_preferences_are_small_and_non_scientific",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_followup_query_requires_recent_delivery_and_conversational_reference",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_followup_focus_accepts_implicit_question_but_rejects_new_request",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_output_views_preserve_context_and_require_explicit_link_only",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_index_normalization_uses_declared_tool_fields",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_registry_rejects_incompatible_cross_tool_property_contracts",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_generic_output_contracts::test_model_cannot_force_link_only_without_user_request",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_geometry_binding_compatibility_projection::test_non_geometry_requirement_bindings_stay_out_of_legacy_geometry_view",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_geometry_binding_compatibility_projection::test_opt_to_freq_geometry_binding_still_projects_to_legacy_view",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_history_directory::test_history_index_keeps_runs_outside_recent_window",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_history_directory::test_history_discovery_is_cancelled_and_rejects_invented_cursor",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_history_directory::test_selected_raw_source_does_not_enumerate_history_again",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_history_directory::test_discovery_paginates_and_excludes_unindexed_legacy_or_foreign",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_history_directory::test_metadata_budget_rejects_oversize_before_read_and_cancels_cached_read",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_history_directory::test_directory_properties_reaches_field_30_without_execution",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_history_directory::test_directory_can_be_selected_from_empty_semantic_catalog",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_history_directory::test_index_limit_preserves_old_entries_and_discovery_can_still_find_new",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_history_directory::test_discovery_budget_continuation_makes_progress",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_history_directory::test_directory_reports_save_failure_without_changing_run",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_input::test_sp_input_is_closed_and_uses_resource_budget",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_input::test_opt_input_has_typed_iteration_blocks",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_input::test_sp_rejects_optimization_parameter",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_empty_stopped_json_response_gets_one_valid_correction_and_keeps_call_metadata",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_empty_length_json_response_is_classified_as_truncated",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_nonempty_length_json_response_uses_the_same_correction_budget",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_always_empty_stopped_json_response_exhausts_one_correction",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_invalid_json_and_schema_errors_share_the_same_correction_limit[{bad-invalid_json]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_invalid_json_and_schema_errors_share_the_same_correction_limit[{\"value\":\"wrong type\"}-schema_error]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_malformed_compute_shapes_get_one_schema_correction[malformed0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_malformed_compute_shapes_get_one_schema_correction[malformed1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_malformed_compute_shapes_get_one_schema_correction[malformed2]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_persistent_malformed_compute_shapes_stop_with_schema_error[malformed0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_persistent_malformed_compute_shapes_stop_with_schema_error[malformed1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_invalid_message_structure_is_not_classified_as_empty_content[payload0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_invalid_message_structure_is_not_classified_as_empty_content[payload1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_invalid_message_structure_is_not_classified_as_empty_content[payload2]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_length_finish_reason_wins_over_missing_json_message",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_deepseek_disables_thinking_for_intake_and_public_answer_json[intake-expected_thinking0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_deepseek_disables_thinking_for_intake_and_public_answer_json[answer-expected_thinking1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_deepseek_disables_thinking_for_intake_and_public_answer_json[planner-None]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_complete_text_still_rejects_an_empty_answer",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_complete_text_classifies_length_finish_as_truncated",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_auth_failure_is_recorded_once_without_exposing_response_body[401]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_auth_failure_is_recorded_once_without_exposing_response_body[403]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_rate_limit_and_server_error_use_only_one_transport_retry[429]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_rate_limit_and_server_error_use_only_one_transport_retry[503]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_timeout_uses_only_one_transport_retry",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_cancellation_after_transport_does_not_apply_a_late_response",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_llm::test_intake_corrects_non_normalized_name_lookup_with_one_structured_retry",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_current_default_runtime_budget_is_4_core_1024_mb",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_inline_subject_geometry_is_bound_to_verified_artifact",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_generic_compute_tool_does_not_inherit_orca_preparation_or_budget",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_parser_uses_geometry_settings_and_records_the_line",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_parser_rejects_conflicting_input_and_output_iteration_limits",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_model_qm_values_are_not_scientific_authority",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_chinese_electronic_state_statements_are_parsed[\\u4f18\\u5316\\u4e09\\u91cd\\u6001\\u6c27\\u6c14-expected0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_chinese_electronic_state_statements_are_parsed[\\u8fd9\\u4e2a\\u5206\\u5b50\\u662f\\u4e2d\\u6027\\u7684-expected1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_chinese_electronic_state_statements_are_parsed[\\u628a\\u7535\\u8377\\u8bbe\\u4e3a0-expected2]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_chinese_electronic_state_statements_are_parsed[\\u591a\\u91cd\\u5ea6\\u4e3a3\\uff0c\\u7535\\u8377\\u4e3a0-expected3]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_negated_or_conflicting_spin_words_do_not_become_parameters",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_parameter_normalization_preserves_the_current_affirmative_value[\\u660e\\u786e\\u8bbe\\u7535\\u8377\\u4e3a0-expected0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_parameter_normalization_preserves_the_current_affirmative_value[\\u660e\\u786e\\u4f7f\\u7528\\u4e09\\u91cd\\u6001-expected1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_parameter_normalization_preserves_the_current_affirmative_value[\\u628a\\u7535\\u8377\\u4ece0\\u6539\\u4e3a+1-expected2]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_parameter_normalization_preserves_the_current_affirmative_value[\\u4e0d\\u8981\\u7528\\u5355\\u91cd\\u6001\\uff0c\\u4f7f\\u7528\\u4e09\\u91cd\\u6001-expected3]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_invalid_electronic_state_is_not_coerced_or_dropped_as_absent[\\u591a\\u91cd\\u5ea6\\u8bbe\\u4e3a1.5-multiplicity]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_invalid_electronic_state_is_not_coerced_or_dropped_as_absent[\\u7535\\u8377\\u8bbe\\u4e3a1e2-charge]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_invalid_electronic_state_is_not_coerced_or_dropped_as_absent[\\u591a\\u91cd\\u5ea6\\u8bbe\\u4e3atrue-multiplicity]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_invalid_electronic_state_is_not_coerced_or_dropped_as_absent[\\u591a\\u91cd\\u5ea6\\u8bbe\\u4e3a0-multiplicity]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_model_qm_candidates_need_exact_user_evidence_and_omitted_fields_stay_absent",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_one_field_parameter_update_does_not_erase_other_effective_values",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_conflicting_parameter_statements_require_clarification",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_electronic_state_values_are_bound_to_their_own_field[\\u7535\\u8377\\u4e0d\\u53d8\\uff0c\\u4f18\\u5316\\u6b65\\u6570\\u8bbe\\u4e3a2-parameters0-expected0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_electronic_state_values_are_bound_to_their_own_field[\\u591a\\u91cd\\u5ea6\\u4e0d\\u53d8\\uff0c\\u4f18\\u5316\\u6b65\\u6570\\u8bbe\\u4e3a3-parameters1-expected1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_electronic_state_values_are_bound_to_their_own_field[\\u7535\\u8377\\u4e0d\\u53d8\\u4f18\\u5316\\u6b65\\u6570\\u8bbe\\u4e3a2-parameters2-expected2]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_electronic_state_values_are_bound_to_their_own_field[\\u4f18\\u5316\\u6b65\\u6570\\u8bbe\\u4e3a2\\uff0c\\u7535\\u8377\\u4e0d\\u53d8-parameters3-expected3]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_electronic_state_values_are_bound_to_their_own_field[\\u7535\\u8377\\u4ece0\\u6539\\u4e3a+1\\uff0c\\u4f18\\u5316\\u6b65\\u6570\\u8bbe\\u4e3a2-parameters4-expected4]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_electronic_state_values_are_bound_to_their_own_field[\\u591a\\u91cd\\u5ea6\\u8bbe\\u4e3a3\\uff0c\\u4f18\\u5316\\u6b65\\u6570\\u4e3a2-parameters5-expected5]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_agent_parameter_update_preserves_charge_in_request_step_and_preview",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_request_target_and_operation_cannot_be_dropped",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_electronic_energy_target_matches_operation_result[SP-single_point-sp_electronic_energy]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_electronic_energy_target_matches_operation_result[Opt-optimize_geometry-opt_final_electronic_energy]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_molecular_geometry_target_matches_opt_result_port",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_opt_geometry_target_means_optimized_geometry_not_initial_geometry",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_legacy_output_target_is_narrowly_converted_to_a_port",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_unknown_planner_target_is_a_feedback_error",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_waiting_render_never_promotes_a_preparation_result_to_run_success",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_failed_run_can_render_valid_partial_results_and_repair_history",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_rejected_method_update_does_not_mutate_waiting_run",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_minimal_repairs::test_repair_scope_disables_iteration_increase_when_user_forbids_it",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_tools::test_old_config_gets_bounded_m1_defaults",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_tools::test_deferred_orca_fields_keep_full_validation",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_tools::test_explicit_smiles_resolve_and_geometry_are_real_tools",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_tools::test_parameter_resolution_preserves_explicit_zero_and_reports_sources",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_tools::test_pubchem_url_encoding_and_bounded_retry",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_tools::test_llm_json_schema_correction_is_bounded_and_does_not_record_secret",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_tools::test_restart_rule_requires_evidence_and_validated_candidate",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m1_tools::test_agent_repair_continues_same_run_after_failed_opt",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m2_runtime::test_history_geometry_is_verified_copied_and_bound_to_the_new_run",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m2_runtime::test_invalid_historical_geometry_bindings_stop_before_a_new_run[missing]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m2_runtime::test_invalid_historical_geometry_bindings_stop_before_a_new_run[fabricated]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m2_runtime::test_invalid_historical_geometry_bindings_stop_before_a_new_run[wrong_role]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m2_runtime::test_invalid_historical_geometry_bindings_stop_before_a_new_run[altered_bytes]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m2_runtime::test_local_minimum_check_excludes_supported_external_modes_and_preserves_imaginary_modes",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m2_runtime::test_failed_local_minimum_gate_never_calls_the_sp_executor[not_met]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m2_runtime::test_failed_local_minimum_gate_never_calls_the_sp_executor[unverified]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m2_runtime::test_passed_check_unblocks_sp_and_upstream_invalidation_cascades",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m2_runtime::test_repair_context_includes_prior_attempts_remaining_limits_and_original_constraints",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m2_runtime::test_science_attempt_and_extra_execution_budgets_are_cumulative",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m2_runtime::test_expired_active_time_budget_stops_before_tool_execution",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m2_runtime::test_recovered_opt_geometry_flows_to_frequency_and_sp_without_repeating_preparation",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m2_runtime::test_chat_freq_only_request_runs_on_supplied_xyz_without_preparation",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_independent_method_optimizations_keep_answer_goal_out_of_plan",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_parameters_and_exact_measurement",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_parameters_reject_unsafe_indices[payload0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_parameters_reject_unsafe_indices[payload1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_parameters_reject_unsafe_indices[payload2]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_parameters_reject_unsafe_indices[payload3]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_parameters_reject_unsafe_indices[payload4]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_parameters_reject_unsafe_indices[payload5]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_parameters_reject_unsafe_indices[payload6]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_tool_is_operation_free_and_declares_only_indices",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_operation_free_chat_intake_and_plan_are_supported",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_one_chat_request_can_contain_two_scoped_distance_requirements",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_execution_consumes_exact_artifact_without_orca",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_execution_rejects_out_of_range_without_success_value",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_request_parameter_merge_preserves_user_precedence",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_opt_to_distance_binding_requires_tool_selector",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_b3lyp_profile_is_complete_and_repair_scope_is_empty",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_pbe0_profile_is_complete_across_existing_orca_operations",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_b3lyp_default_is_selected_when_step_omits_method",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_explicit_plan_normalization_preserves_method_precedence[b3lyp_d3bj_def2svp-None-b3lyp_d3bj_def2svp]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_explicit_plan_normalization_preserves_method_precedence[b3lyp_d3bj_def2svp-r2scan3c-r2scan3c]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_explicit_plan_normalization_preserves_method_precedence[r2scan3c-b3lyp_d3bj_def2svp-b3lyp_d3bj_def2svp]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_index_update_checks_known_geometry_before_writing_run",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_invalid_initial_distance_index_never_reaches_confirmation",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_atom_index_update_is_classified_as_parameter_only_change",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_user_atom_index_assignments_override_model_intake_values",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_waiting_parameter_update_precedes_intake_blocking",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_new_distance_request_uses_new_index_scope_after_waiting_opt",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_waiting_parameter_scope_rejects_non_integer_user_text[atom_i=2.5]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_waiting_parameter_scope_rejects_non_integer_user_text[atom_i=2e0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_waiting_parameter_scope_rejects_non_integer_user_text[atom_i=2/3]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_waiting_parameter_scope_rejects_non_integer_user_text[\\u4e0d\\u8981 atom_i=2]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_waiting_parameter_scope_rejects_non_integer_user_text[atom_i=2, atom_i=3]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_query_compatibility_rejects_bad_persisted_values[value0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_query_compatibility_rejects_bad_persisted_values[value1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_query_compatibility_rejects_bad_persisted_values[value2]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_query_compatibility_rejects_bad_persisted_values[value3]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_query_compatibility_rejects_bad_persisted_values[value4]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_query_compatibility_rejects_bad_persisted_values[None]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_extension::test_distance_query_evidence_and_rendering",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_public_output::test_dynamic_output_contract_is_strict_and_public",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_public_output::test_default_outputs_are_unique_declared_public_outputs",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_public_output::test_verified_initial_geometry_is_delivered_and_reindexed",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_m3_public_output::test_answer_needs_tools_allows_one_bounded_intake_review",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_molecule::test_valid_xyz_and_closed_shell_water",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_molecule::test_invalid_xyz_is_rejected[2\\nwater\\nO 0 0 0\\nH 0 1 0\\nH 0 -1 0\\n]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_molecule::test_invalid_xyz_is_rejected[1\\nwater\\nXx 0 0 0\\n]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_molecule::test_invalid_xyz_is_rejected[1\\nwater\\nH nan 0 0\\n]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_molecule::test_invalid_xyz_is_rejected[1\\nwater\\nH 0 0\\n]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_molecule::test_impossible_charge_and_multiplicity_are_rejected",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_multiple_terms_in_one_window_are_one_candidate",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_real_water_fixture_dipole_has_exact_lines_and_original_units",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_unknown_title_and_three_questions_share_one_read_and_no_writes",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_bounded_read_failures_never_deliver_unverified_bytes[hash]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_bounded_read_failures_never_deliver_unverified_bytes[size]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_bounded_read_failures_never_deliver_unverified_bytes[missing]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_bounded_read_failures_never_deliver_unverified_bytes[cancelled]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_bounded_read_failures_never_deliver_unverified_bytes[deadline]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_bounded_read_failures_never_deliver_unverified_bytes[limit]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_oversize_is_rejected_before_content_open",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_unsafe_paths_rejected_before_read[../escape.out]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_unsafe_paths_rejected_before_read[C:/escape.out]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_unsafe_paths_rejected_before_read[artifacts/x:stream]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_reparse_component_rejected",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_registry_metadata_and_attempt_ownership_are_required",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_foreign_session_unindexed_run_and_changed_file",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_global_budgets_long_lines_and_cancelled_search",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_shared_byte_budget_preserves_first_source",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_markdown_and_controls_are_data_not_instructions",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_private_tool_never_enters_compute_registry",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_raw_query_does_not_relax_scientific_publication",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_cancellation_during_hashing_returns_no_partial_payload",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_query_spec_rejects_controls_and_extra_authority[changes0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_query_spec_rejects_controls_and_extra_authority[changes1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_query_spec_rejects_controls_and_extra_authority[changes2]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_query_spec_rejects_controls_and_extra_authority[changes3]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_query_spec_rejects_controls_and_extra_authority[changes4]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_orca_output_query::test_query_spec_rejects_controls_and_extra_authority[changes5]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_partial_verified_delivery_updates_only_actually_rendered_focus",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_raw_source_does_not_borrow_parameters_from_modified_step",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_both_entrypoints_and_route_review_read_failed_source_without_compute[True-True]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_both_entrypoints_and_route_review_read_failed_source_without_compute[True-False]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_both_entrypoints_and_route_review_read_failed_source_without_compute[False-True]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_both_entrypoints_and_route_review_read_failed_source_without_compute[False-False]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_raw_summary_and_next_model_request_never_include_body",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_report_persistence_preview_and_requirement_producer_attempt",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_first_report_missing_keeps_run_success_and_delivery_partial",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_report_sources_do_not_cross_requirement_boundaries",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_two_method_reports_bind_separate_producers_not_last_result",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_explicit_old_attempt_is_read_as_historical_evidence",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_verified_energy_focus_survives_raw_partial_delivery",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_followup_reuses_only_one_unchanged_question",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_fabricated_or_demoted_report_requirements_rejected[Optimize water-reports0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_constraint_collision_and_global_query_limit",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_history_gibbs_routes_but_new_gibbs_remains_unsupported",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_legacy_intake_keeps_report_requirement",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_old_request_and_acceptance_snapshot_round_trip_unchanged",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_baseline_generated_acceptance_snapshot_keeps_original_hash",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_full_verified_catalog_reserves_raw_slots_and_rejects_unknown_alias",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_finished_failed_attempt_without_current_result_can_supply_first_report",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_cancelled_run_does_not_start_report_reads",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_title_and_multiple_candidates_never_claim_final_scientific_value",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_reports::test_report_waiting_fixture_from_b9eced9_restores_without_reclassification",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_views::test_verified_channel_rejects_free_scientific_assertions[No imaginary frequencies; stable minimum confirmed.]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_views::test_verified_channel_rejects_free_scientific_assertions[Total energy is 1 Eh.]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_views::test_large_record_list_is_paged_before_model_serialization",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_views::test_complete_table_request_remains_partial_after_one_page",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_views::test_display_precision_preserves_original_token",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_views::test_view_bounds_reject_invalid_selectors[view0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_views::test_view_bounds_reject_invalid_selectors[view1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_views::test_view_bounds_reject_invalid_selectors[view2]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_views::test_view_bounds_reject_invalid_selectors[view3]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_views::test_view_bounds_reject_invalid_selectors[view4]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_views::test_entire_model_output_catalog_including_metadata_fits_turn_budget",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_views::test_table_precision_is_programmatic_and_does_not_mutate_values",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_views::test_unrequested_rounding_never_turns_small_nonzero_value_into_zero",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_views::test_full_requested_column_subset_is_complete_without_claiming_full_value",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_views::test_view_rejects_out_of_range_rows_and_unknown_columns[view0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_views::test_view_rejects_out_of_range_rows_and_unknown_columns[view1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_output_views::test_preview_counts_multibyte_keys_inside_byte_budget",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parameter_scoping::test_request_geometry_and_scoped_parameters_reach_composite_confirmation[operations0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parameter_scoping::test_request_geometry_and_scoped_parameters_reach_composite_confirmation[operations1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parameter_scoping::test_request_geometry_and_scoped_parameters_reach_composite_confirmation[operations2]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parameter_scoping::test_confirmation_update_recomputes_each_applicable_step_atomically",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parameter_scoping::test_sp_only_request_cannot_silently_drop_geom_maxiter",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parameter_scoping::test_preparation_error_fails_run_and_closes_active_interval",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parameter_scoping::test_profile_parameter_merge_scopes_request_values_to_tool_fields",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parameter_scoping::test_production_intake_path_normalizes_empty_structure_for_parameter_continuation[omitted]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parameter_scoping::test_production_intake_path_normalizes_empty_structure_for_parameter_continuation[empty-object]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parameter_scoping::test_production_intake_path_normalizes_empty_structure_for_parameter_continuation[empty-bindings]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parameter_scoping::test_unresolved_goal_blocks_pending_parameter_update_before_planning[unresolved_results-blocking_text0]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parameter_scoping::test_unresolved_goal_blocks_pending_parameter_update_before_planning[missing_fields-blocking_text1]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parameter_scoping::test_repeated_unknown_intake_parameter_stops_before_planner_or_run",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parser::test_real_crlf_fixture_is_observed_and_bound",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parser::test_failed_output_keeps_evidence_and_does_not_succeed",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parser::test_failed_opt_keeps_a_consistent_restart_candidate_geometry",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parser::test_orca_maximum_geometry_cycles_are_recognized_as_iteration_limit",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parser::test_bad_last_energy_never_falls_back_to_an_older_cycle[NaN]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parser::test_bad_last_energy_never_falls_back_to_an_older_cycle[Inf]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parser::test_bad_last_energy_never_falls_back_to_an_older_cycle[-76.1garbage]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parser::test_bad_last_energy_never_falls_back_to_an_older_cycle[-76.1E+]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parser::test_bad_last_energy_never_falls_back_to_an_older_cycle[1e999]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parser::test_missing_final_energy_line_does_not_select_previous_opt_cycle",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parser::test_valid_d_exponent_and_input_hash_check_are_explicit",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parser::test_sp_does_not_reuse_energy_before_an_unbound_later_scf",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parser::test_opt_does_not_publish_geometry_when_a_later_scf_is_unbound",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_parser::test_sp_selects_the_second_complete_energy_record",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_plan_composition::test_intake_and_plan_schemas_accept_composed_operations_and_targets",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_plan_composition::test_single_point_plan_covers_only_sp_and_maps_energy_alias",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_plan_composition::test_opt_plan_covers_only_opt_and_maps_energy_alias",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_plan_composition::test_frequency_only_plan_uses_supplied_geometry_without_an_opt_protocol",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_plan_composition::test_opt_freq_plan_covers_frequency_goal_without_adding_sp",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_plan_composition::test_opt_freq_independent_sp_plan_uses_opt_geometry_and_check_references",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_plan_composition::test_requested_local_minimum_check_requires_a_gate_on_every_sp_step",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_plan_composition::test_plan_rejects_missing_or_extra_operations[requested_operations0-planned_tools0-does not cover the requested SP calculation]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_plan_composition::test_plan_rejects_missing_or_extra_operations[requested_operations1-planned_tools1-adds unrequested operation.*Opt]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_plan_composition::test_plan_rejects_unknown_goal_check_step_reference",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_plan_composition::test_plan_rejects_bad_input_port_reference",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_plan_composition::test_plan_rejects_undeclared_goal_check_name",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_plan_composition::test_plan_rejects_requested_result_target_with_unknown_step",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_plan_composition::test_plan_rejects_missing_user_requested_result",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_rdkit_diagnostics::test_rdkit_logging_filters_known_console_warning_but_keeps_file_diagnostics",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_rdkit_diagnostics::test_rdkit_helper_preserves_stderr_and_geometry_tool_writes_raw_diagnostic",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_registry::test_registered_tools_are_public",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_registry::test_orca_result_properties_are_declared_as_machine_readable_contracts",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_registry::test_result_property_cannot_describe_an_undeclared_output",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_registry::test_input_reference_rejects_arbitrary_path_shape",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_registry::test_plan_keeps_step_reference_logical",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_registry::test_validate_plan_rejects_invalid_following_step_before_execution",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_registry::test_validate_plan_rejects_self_reference_without_key_error",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_registry::test_local_minimum_gate_requires_same_geometry_reference_as_frequency_check",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_registry_capabilities_are_the_intake_target_vocabulary",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_intake_geometry_target_and_legacy_geometry_alias_keep_distinct_meanings",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_single_operation_on_history_geometry_uses_only_the_history_alias",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_agent_preserves_trailing_newline_in_inline_xyz",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_preparation_results_can_be_requested_with_sp_and_need_real_producers",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_unresolved_requirements_block_but_deferred_charge_and_multiplicity_do_not",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_intake_schema_rejects_free_text_even_without_history_candidates",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_intake_parameter_catalog_is_tool_derived_and_operation_scoped",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_intake_corrects_parameter_name_once_using_real_tool_catalog",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_legacy_energy_alias_is_scoped_by_operation_and_ambiguous_combinations_stop",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_intake_normalizes_only_declared_result_targets",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_intake_preserves_inline_xyz_bytes_without_sending_coordinates_for_reasoning",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_intake_corrects_generic_energy_before_request_and_planner",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_intake_corrects_free_text_sp_energy_before_request_creation",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_intake_registry_binding_error_uses_bounded_structured_correction",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_intake_preserves_explicit_initial_geometry_binding_from_user_semantics",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_composite_intake_without_geometry_source_stops_for_user_clarification",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_legacy_request_and_accepted_snapshot_keep_fingerprint_on_confirmation",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_ambiguous_energy_after_one_correction_stops_at_intake",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_required_optimized_geometry_binding_rejects_initial_geometry_candidate",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_required_frequency_geometry_binding_rejects_initial_geometry_candidate",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_cause_contracts::test_required_initial_geometry_binding_survives_an_opt_step",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_output_selector_rejects_name_property_collision",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_dynamic_semantic_property_and_injected_registry_projection",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_natural_attached_report_needs_no_output_keywords[True-\\u4f18\\u5316\\u6c34\\uff0c\\u7136\\u540e\\u7ed9\\u51fa\\u5b83\\u7684\\u5076\\u6781\\u77e9]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_natural_attached_report_needs_no_output_keywords[True-\\u4f18\\u5316\\u6c34\\uff0c\\u7136\\u540e\\u544a\\u8bc9\\u6211\\u5076\\u6781\\u77e9]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_natural_attached_report_needs_no_output_keywords[True-\\u4f18\\u5316\\u6c34\\u5e76\\u62a5\\u544a\\u5076\\u6781\\u77e9]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_natural_attached_report_needs_no_output_keywords[True-\\u4f18\\u5316\\u6c34\\uff0c\\u7136\\u540e\\u8ba1\\u7b97\\u5b83\\u7684\\u5076\\u6781\\u77e9]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_natural_attached_report_needs_no_output_keywords[False-\\u4f18\\u5316\\u6c34\\uff0c\\u7136\\u540e\\u7ed9\\u51fa\\u5b83\\u7684\\u5076\\u6781\\u77e9]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_natural_attached_report_needs_no_output_keywords[False-\\u4f18\\u5316\\u6c34\\uff0c\\u7136\\u540e\\u544a\\u8bc9\\u6211\\u5076\\u6781\\u77e9]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_natural_attached_report_needs_no_output_keywords[False-\\u4f18\\u5316\\u6c34\\u5e76\\u62a5\\u544a\\u5076\\u6781\\u77e9]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_natural_attached_report_needs_no_output_keywords[False-\\u4f18\\u5316\\u6c34\\uff0c\\u7136\\u540e\\u8ba1\\u7b97\\u5b83\\u7684\\u5076\\u6781\\u77e9]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_shared_intent_contract_blocks_uncovered_and_unresolved_targets",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_non_compute_intents_do_not_reject_unsupported_words[exclude]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_non_compute_intents_do_not_reject_unsupported_words[explain]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_new_compute_missing_intents_uses_bounded_model_correction",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_attached_report_promotes_to_registered_verified_output",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_compare_opt_and_sp_preserves_real_fields_with_one_semantic_goal",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_shared_optimized_geometry_difference_is_independent_of_relation_order",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_history_subjects_keep_independent_sources_and_allow_new_identity",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_two_history_subjects_copy_their_own_verified_geometry",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_dependency_requires_port_and_explicit_choice_for_multiple_inputs",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_automatic_permission_prepares_all_steps_before_acceptance",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_exclusion_does_not_swallow_supported_positive_goal[Gibbs\\u81ea\\u7531\\u80fd-single_point-energy]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_exclusion_does_not_swallow_supported_positive_goal[\\u5168\\u5c40\\u6784\\u8c61\\u641c\\u7d22-optimize_geometry-geometry]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_subject_history_selection_does_not_need_recency_keywords[\\u6cbf\\u7528\\u8fd9\\u4e2a\\u7ed3\\u6784\\u8ba1\\u7b97\\u5355\\u70b9\\u80fd]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_subject_history_selection_does_not_need_recency_keywords[\\u6cbf\\u7528\\u8fd9\\u4e2a\\u7ed3\\u6784\\uff0c\\n\\u5728\\u6c14\\u76f8\\u6761\\u4ef6\\u4e0b\\u8ba1\\u7b97\\u5355\\u70b9\\u80fd]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_attached_report_allows_uniquely_nested_evidence[\\u7ed9\\u51fa\\u5b83\\u7684\\u5076\\u6781\\u77e9-\\u5076\\u6781\\u77e9]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_root_contracts::test_attached_report_allows_uniquely_nested_evidence[\\u5076\\u6781\\u77e9-\\u7ed9\\u51fa\\u5b83\\u7684\\u5076\\u6781\\u77e9]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_runner::test_natural_parent_and_child_exit_keeps_success",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_runner::test_residual_child_forced_termination_revokes_natural_success",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_runner::test_unconfirmed_residual_cleanup_stays_interrupted_and_guard_is_retained",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_runner::test_cancel_request_stops_process_tree_and_clears_execution_guard",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_runner::test_probe_allows_natural_nonzero_exit_when_version_is_present",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_runner::test_probe_timeout_after_version_is_not_success",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_runner::test_probe_output_limit_reason_is_not_overwritten_by_timeout",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_runner::test_probe_fast_output_limit_is_checked_after_natural_exit",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_runner::test_probe_without_version_reports_version_not_found",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_runner::test_probe_with_residual_child_cannot_pass",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_agent_route::test_semantic_planner_feature_flag_defaults_enabled_after_gates",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_agent_route::test_feature_flag_routes_compute_to_one_semantic_call_and_no_planner",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_agent_route::test_ambiguous_iteration_update_is_clarified_without_mutating_waiting_run",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_canonicalizer::test_pbe0_is_resolved_by_program_and_terminal_output_is_derived",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_canonicalizer::test_chinese_name_uses_english_lookup_and_preserves_original_evidence",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_canonicalizer::test_dual_opt_compare_derives_shared_output_and_answer_goal",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_canonicalizer::test_opt_to_freq_relation_binds_typed_geometry_output",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_canonicalizer::test_dual_sp_difference_inserts_same_geometry_derived_requirement",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_canonicalizer::test_inline_geometry_does_not_require_model_evidence_to_quote_stripped_coordinates",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_canonicalizer::test_method_modification_resolves_user_text_and_preserves_constraint_patch",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_source_context_survives_repeated_catalog_compression",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_semantic_proposal_accepts_user_facing_intent_only",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_semantic_subject_rejects_untranslated_chinese_name_query",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_semantic_subject_accepts_english_lookup_with_chinese_evidence",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_semantic_subject_non_name_inputs_are_unchanged[702-cid]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_semantic_subject_non_name_inputs_are_unchanged[CCO-smiles]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_semantic_subject_non_name_inputs_are_unchanged[C2H6O-formula]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_semantic_task_rejects_internal_parameter_fields[method_profile]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_semantic_task_rejects_internal_parameter_fields[subject_id]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_semantic_task_rejects_internal_parameter_fields[requirement_id]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_semantic_task_rejects_internal_parameter_fields[step_id]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_semantic_task_rejects_internal_parameter_fields[artifact_id]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_dynamic_capability_schema_excludes_program_generated_tools[generate_geometry]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_dynamic_capability_schema_excludes_program_generated_tools[same_geometry_method_energy_difference]",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_semantic_schema_rejects_unknown_result_query_pair",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_semantic_query_accepts_nested_result_catalog_pair",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_compact_semantic_catalogs_hide_internal_execution_identifiers",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_model_classifies_unimplemented_gibbs_as_unsupported",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_model_classifies_unimplemented_global_search_as_unsupported",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_semantic_modify_uses_short_pending_ref_and_target_tool_contract",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_semantic_proposal::test_semantic_proposal_mode_contracts_are_strict",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_session::test_artifact_copy_and_run_json_are_atomic",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_tool_runtime::test_tool_call_context_freezes_inputs_and_binds_results",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_turn_routing::test_new_complete_request_is_not_swallowed_by_waiting_identity_run",
+      "status": "passed"
+    },
+    {
+      "test": "tests.unit.test_turn_routing::test_identity_supplement_updates_same_waiting_run_with_structured_intake",
+      "status": "passed"
+    }
+  ]
+}

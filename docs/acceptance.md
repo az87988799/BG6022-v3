@@ -245,3 +245,19 @@ See [the detailed evidence and Q01–Q22 mapping](evidence/orca-output-query.md)
 | Old confirmation compatibility | Snapshot and fingerprint generated with baseline `6113161`; persisted expected hash unchanged when loaded | offline tested |
 | New scientific properties / JSON export / new real compute | Outside this minimal plan; no new live-compute acceptance claimed | not included |
 | User acceptance | Awaiting the user's explicit review after push | pending |
+
+
+## Output/query root fix verification (2026-09-29)
+
+Implementation follows the user-provided v2 minimal root-fix plan, packages A–F.
+Optional G1/G2 are not enabled. [The acceptance matrix and evidence](evidence/root-fix-acceptance.md)
+cover R01–R49 and R16A–R16D. This is verification evidence, not user acceptance.
+
+| Item | Evidence | Status |
+| --- | --- | --- |
+| Offline regression | 618 passed, 20 skipped, 6 deselected | passed locally |
+| Live LLM parsing | Four dipole phrasings through both entrypoints, 8/8; only one Opt compute task | passed |
+| Real ORCA dependency chain | Shared optimized geometry → two SPs → verified method-energy difference; raw dipole report found | passed |
+| Compatibility | Original 6113161 hash retained; b9eced9 report waiting fixture restored without reclassification | passed |
+| Resource contract | 4 cores / 1024 MB / maxcore 192 / one concurrent job | preserved |
+| User acceptance | Awaiting explicit user review after push | pending |

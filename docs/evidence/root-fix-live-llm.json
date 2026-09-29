@@ -1,0 +1,1676 @@
+{
+  "cases": [
+    {
+      "message": "优化水，然后计算它的偶极矩",
+      "entrypoint": "intake",
+      "proposal": {
+        "intent": "chemistry_compute",
+        "intent_items": [
+          {
+            "evidence": "优化水",
+            "kind": "compute",
+            "task_keys": [
+              "opt_water"
+            ],
+            "requested_property": "molecular_geometry"
+          },
+          {
+            "evidence": "偶极矩",
+            "kind": "report",
+            "task_keys": [
+              "opt_water"
+            ],
+            "requested_property": "dipole_moment"
+          }
+        ],
+        "answer": null,
+        "requirements": [
+          {
+            "key": "opt_water",
+            "subject_key": "subject_1",
+            "capability": "optimize_geometry",
+            "parameters": {},
+            "outputs": [
+              "optimized_geometry"
+            ],
+            "input_bindings": {},
+            "parameter_evidence": [],
+            "constraints": {},
+            "report_queries": [
+              {
+                "evidence": "偶极矩",
+                "search_terms": [
+                  "DIPOLE MOMENT",
+                  "Magnitude (Debye)"
+                ]
+              }
+            ]
+          }
+        ],
+        "subjects": {
+          "subject_1": {
+            "key": "subject_1",
+            "molecule_query": "water",
+            "molecule_input_kind": "name",
+            "molecule_name_evidence": "水",
+            "inline_xyz": null,
+            "history_geometry_alias": null
+          }
+        },
+        "answer_goals": [],
+        "unresolved_requirements": [],
+        "parameter_target_requirement_key": null,
+        "parameter_patch": {},
+        "pending_action": "none",
+        "pending_action_evidence": null,
+        "missing_fields": [
+          "charge",
+          "multiplicity"
+        ],
+        "query_selection": null,
+        "output_preferences": {
+          "layout": "auto",
+          "file_content": "auto",
+          "detail": "normal"
+        }
+      },
+      "request": {
+        "id": "live_dipole",
+        "description": "优化水，然后计算它的偶极矩",
+        "source": "chat",
+        "original_text": "优化水，然后计算它的偶极矩",
+        "subjects": {
+          "sub_4268fcd2bdfa05be": {
+            "key": "subject_1",
+            "molecule_query": "water",
+            "molecule_input_kind": "name",
+            "molecule_name_evidence": "水",
+            "structure_input": {
+              "molecule_identity": {
+                "input_kind": "name",
+                "raw_query": "水",
+                "lookup_query": "water",
+                "selected_cid": null
+              }
+            }
+          }
+        },
+        "requirements": [
+          {
+            "id": "req_54d4f21a9dd5920a",
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "capability": "optimize_geometry",
+            "parameters": {},
+            "outputs": [
+              "optimized_geometry"
+            ],
+            "input_bindings": {},
+            "constraints": {
+              "report_queries": [
+                {
+                  "evidence": "偶极矩",
+                  "search_terms": [
+                    "DIPOLE MOMENT",
+                    "Magnitude (Debye)"
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "answer_goals": [],
+        "missing_fields": [
+          "charge",
+          "multiplicity"
+        ],
+        "output_preferences": {
+          "layout": "auto",
+          "file_content": "auto",
+          "detail": "normal"
+        }
+      },
+      "plan": {
+        "id": "live_dipole",
+        "revision": 1,
+        "request_id": "live_dipole",
+        "steps": [
+          {
+            "id": "s01_resolve_molecule_subject_1",
+            "tool": "resolve_molecule",
+            "parameters": {
+              "query": "water",
+              "input_kind": "name"
+            },
+            "inputs": {},
+            "goal_checks": [],
+            "requirement_id": null,
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s01_resolve_molecule_subject_1"
+          },
+          {
+            "id": "s02_generate_geometry_subject_1",
+            "tool": "generate_geometry",
+            "parameters": {},
+            "inputs": {
+              "molecule": {
+                "artifact_id": null,
+                "step_id": "s01_resolve_molecule_subject_1",
+                "port": "molecule"
+              }
+            },
+            "goal_checks": [],
+            "requirement_id": null,
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s02_generate_geometry_subject_1"
+          },
+          {
+            "id": "s03_optimize_geometry",
+            "tool": "optimize_geometry",
+            "parameters": {},
+            "inputs": {
+              "geometry": {
+                "artifact_id": null,
+                "step_id": "s02_generate_geometry_subject_1",
+                "port": "geometry"
+              }
+            },
+            "goal_checks": [],
+            "requirement_id": "req_54d4f21a9dd5920a",
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s03_optimize_geometry"
+          }
+        ],
+        "requested_results": [
+          {
+            "step_id": "s03_optimize_geometry",
+            "requirement_id": "req_54d4f21a9dd5920a",
+            "field": null,
+            "port": "optimized_geometry",
+            "check": null
+          }
+        ]
+      },
+      "llm_calls": [
+        {
+          "purpose": "intake",
+          "request_model": "deepseek-flash",
+          "schema_version": "5dd9a430637e8ff9",
+          "elapsed_seconds": 1.452999999979511,
+          "usage": {
+            "prompt_tokens": 7124,
+            "completion_tokens": 323,
+            "total_tokens": 7447,
+            "prompt_tokens_details": {
+              "cached_tokens": 5248
+            },
+            "prompt_cache_hit_tokens": 5248,
+            "prompt_cache_miss_tokens": 1876
+          },
+          "response_model": "deepseek-flash",
+          "category": "success",
+          "finish_reason": "stop",
+          "body_length": 1049,
+          "transport_attempts": 1,
+          "structured_correction_count": 0,
+          "corrected": false
+        }
+      ],
+      "execution": "planning only; no ORCA run"
+    },
+    {
+      "message": "优化水，然后计算它的偶极矩",
+      "entrypoint": "semantic",
+      "proposal": {
+        "mode": "compute",
+        "intent_items": [
+          {
+            "evidence": "优化水",
+            "kind": "compute",
+            "task_keys": [
+              "t1"
+            ],
+            "requested_property": "molecular_geometry"
+          },
+          {
+            "evidence": "偶极矩",
+            "kind": "report",
+            "task_keys": [
+              "t1"
+            ],
+            "requested_property": "dipole_moment"
+          }
+        ],
+        "subjects": [
+          {
+            "key": "subject_1",
+            "query": "water",
+            "history_geometry_ref": null,
+            "input_kind": "name",
+            "evidence": "水"
+          }
+        ],
+        "tasks": [
+          {
+            "key": "t1",
+            "subject_key": "subject_1",
+            "capability": "optimize_geometry",
+            "method_request": null,
+            "parameters": {},
+            "requested_properties": [
+              "molecular_geometry"
+            ],
+            "report_queries": [
+              {
+                "evidence": "偶极矩",
+                "search_terms": [
+                  "DIPOLE MOMENT",
+                  "Magnitude (Debye)"
+                ]
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "modification": null,
+        "query_selection": null,
+        "clarification": null,
+        "unsupported_requirements": []
+      },
+      "request": {
+        "id": "live_dipole",
+        "description": "优化水，然后计算它的偶极矩",
+        "source": "chat",
+        "original_text": "优化水，然后计算它的偶极矩",
+        "subjects": {
+          "sub_4268fcd2bdfa05be": {
+            "key": "subject_1",
+            "molecule_query": "water",
+            "molecule_input_kind": "name",
+            "molecule_name_evidence": "水",
+            "structure_input": {
+              "molecule_identity": {
+                "input_kind": "name",
+                "raw_query": "水",
+                "lookup_query": "water",
+                "selected_cid": null
+              }
+            }
+          }
+        },
+        "requirements": [
+          {
+            "id": "req_3dcf4bce436b22ce",
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "capability": "optimize_geometry",
+            "parameters": {},
+            "outputs": [
+              "optimized_geometry"
+            ],
+            "input_bindings": {},
+            "constraints": {
+              "report_queries": [
+                {
+                  "evidence": "偶极矩",
+                  "search_terms": [
+                    "DIPOLE MOMENT",
+                    "Magnitude (Debye)"
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "answer_goals": [],
+        "missing_fields": [],
+        "output_preferences": {
+          "layout": "auto",
+          "file_content": "auto",
+          "detail": "normal"
+        }
+      },
+      "plan": {
+        "id": "live_dipole",
+        "revision": 1,
+        "request_id": "live_dipole",
+        "steps": [
+          {
+            "id": "s01_resolve_molecule_subject_1",
+            "tool": "resolve_molecule",
+            "parameters": {
+              "query": "water",
+              "input_kind": "name"
+            },
+            "inputs": {},
+            "goal_checks": [],
+            "requirement_id": null,
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s01_resolve_molecule_subject_1"
+          },
+          {
+            "id": "s02_generate_geometry_subject_1",
+            "tool": "generate_geometry",
+            "parameters": {},
+            "inputs": {
+              "molecule": {
+                "artifact_id": null,
+                "step_id": "s01_resolve_molecule_subject_1",
+                "port": "molecule"
+              }
+            },
+            "goal_checks": [],
+            "requirement_id": null,
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s02_generate_geometry_subject_1"
+          },
+          {
+            "id": "s03_optimize_geometry",
+            "tool": "optimize_geometry",
+            "parameters": {},
+            "inputs": {
+              "geometry": {
+                "artifact_id": null,
+                "step_id": "s02_generate_geometry_subject_1",
+                "port": "geometry"
+              }
+            },
+            "goal_checks": [],
+            "requirement_id": "req_3dcf4bce436b22ce",
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s03_optimize_geometry"
+          }
+        ],
+        "requested_results": [
+          {
+            "step_id": "s03_optimize_geometry",
+            "requirement_id": "req_3dcf4bce436b22ce",
+            "field": null,
+            "port": "optimized_geometry",
+            "check": null
+          }
+        ]
+      },
+      "llm_calls": [
+        {
+          "purpose": "semantic",
+          "request_model": "deepseek-flash",
+          "schema_version": "619eff4bbf70c33e",
+          "elapsed_seconds": 1.4370000001508743,
+          "usage": {
+            "prompt_tokens": 6875,
+            "completion_tokens": 291,
+            "total_tokens": 7166,
+            "prompt_tokens_details": {
+              "cached_tokens": 4864
+            },
+            "prompt_cache_hit_tokens": 4864,
+            "prompt_cache_miss_tokens": 2011
+          },
+          "response_model": "deepseek-flash",
+          "category": "success",
+          "finish_reason": "stop",
+          "body_length": 961,
+          "transport_attempts": 1,
+          "structured_correction_count": 0,
+          "corrected": false
+        }
+      ],
+      "execution": "planning only; no ORCA run"
+    },
+    {
+      "message": "优化水并报告偶极矩",
+      "entrypoint": "semantic",
+      "proposal": {
+        "mode": "compute",
+        "intent_items": [
+          {
+            "evidence": "优化水",
+            "kind": "compute",
+            "task_keys": [
+              "t1"
+            ],
+            "requested_property": "molecular_geometry"
+          },
+          {
+            "evidence": "报告偶极矩",
+            "kind": "report",
+            "task_keys": [
+              "t1"
+            ],
+            "requested_property": "dipole_moment"
+          }
+        ],
+        "subjects": [
+          {
+            "key": "subject_1",
+            "query": "water",
+            "history_geometry_ref": null,
+            "input_kind": "name",
+            "evidence": "水"
+          }
+        ],
+        "tasks": [
+          {
+            "key": "t1",
+            "subject_key": "subject_1",
+            "capability": "optimize_geometry",
+            "method_request": null,
+            "parameters": {},
+            "requested_properties": [
+              "molecular_geometry"
+            ],
+            "report_queries": [
+              {
+                "evidence": "报告偶极矩",
+                "search_terms": [
+                  "DIPOLE MOMENT",
+                  "Magnitude (Debye)"
+                ]
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "modification": null,
+        "query_selection": null,
+        "clarification": null,
+        "unsupported_requirements": []
+      },
+      "request": {
+        "id": "live_dipole",
+        "description": "优化水并报告偶极矩",
+        "source": "chat",
+        "original_text": "优化水并报告偶极矩",
+        "subjects": {
+          "sub_4268fcd2bdfa05be": {
+            "key": "subject_1",
+            "molecule_query": "water",
+            "molecule_input_kind": "name",
+            "molecule_name_evidence": "水",
+            "structure_input": {
+              "molecule_identity": {
+                "input_kind": "name",
+                "raw_query": "水",
+                "lookup_query": "water",
+                "selected_cid": null
+              }
+            }
+          }
+        },
+        "requirements": [
+          {
+            "id": "req_3dcf4bce436b22ce",
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "capability": "optimize_geometry",
+            "parameters": {},
+            "outputs": [
+              "optimized_geometry"
+            ],
+            "input_bindings": {},
+            "constraints": {
+              "report_queries": [
+                {
+                  "evidence": "报告偶极矩",
+                  "search_terms": [
+                    "DIPOLE MOMENT",
+                    "Magnitude (Debye)"
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "answer_goals": [],
+        "missing_fields": [],
+        "output_preferences": {
+          "layout": "auto",
+          "file_content": "auto",
+          "detail": "normal"
+        }
+      },
+      "plan": {
+        "id": "live_dipole",
+        "revision": 1,
+        "request_id": "live_dipole",
+        "steps": [
+          {
+            "id": "s01_resolve_molecule_subject_1",
+            "tool": "resolve_molecule",
+            "parameters": {
+              "query": "water",
+              "input_kind": "name"
+            },
+            "inputs": {},
+            "goal_checks": [],
+            "requirement_id": null,
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s01_resolve_molecule_subject_1"
+          },
+          {
+            "id": "s02_generate_geometry_subject_1",
+            "tool": "generate_geometry",
+            "parameters": {},
+            "inputs": {
+              "molecule": {
+                "artifact_id": null,
+                "step_id": "s01_resolve_molecule_subject_1",
+                "port": "molecule"
+              }
+            },
+            "goal_checks": [],
+            "requirement_id": null,
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s02_generate_geometry_subject_1"
+          },
+          {
+            "id": "s03_optimize_geometry",
+            "tool": "optimize_geometry",
+            "parameters": {},
+            "inputs": {
+              "geometry": {
+                "artifact_id": null,
+                "step_id": "s02_generate_geometry_subject_1",
+                "port": "geometry"
+              }
+            },
+            "goal_checks": [],
+            "requirement_id": "req_3dcf4bce436b22ce",
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s03_optimize_geometry"
+          }
+        ],
+        "requested_results": [
+          {
+            "step_id": "s03_optimize_geometry",
+            "requirement_id": "req_3dcf4bce436b22ce",
+            "field": null,
+            "port": "optimized_geometry",
+            "check": null
+          }
+        ]
+      },
+      "llm_calls": [
+        {
+          "purpose": "semantic",
+          "request_model": "deepseek-flash",
+          "schema_version": "619eff4bbf70c33e",
+          "elapsed_seconds": 1.3440000000409782,
+          "usage": {
+            "prompt_tokens": 6873,
+            "completion_tokens": 241,
+            "total_tokens": 7114,
+            "prompt_tokens_details": {
+              "cached_tokens": 4864
+            },
+            "prompt_cache_hit_tokens": 4864,
+            "prompt_cache_miss_tokens": 2009
+          },
+          "response_model": "deepseek-flash",
+          "category": "success",
+          "finish_reason": "stop",
+          "body_length": 733,
+          "transport_attempts": 1,
+          "structured_correction_count": 0,
+          "corrected": false
+        }
+      ],
+      "execution": "planning only; no ORCA run"
+    },
+    {
+      "message": "优化水并报告偶极矩",
+      "entrypoint": "intake",
+      "proposal": {
+        "intent": "chemistry_compute",
+        "intent_items": [
+          {
+            "evidence": "优化水",
+            "kind": "compute",
+            "task_keys": [
+              "opt"
+            ],
+            "requested_property": "molecular_geometry"
+          },
+          {
+            "evidence": "报告偶极矩",
+            "kind": "report",
+            "task_keys": [
+              "opt"
+            ],
+            "requested_property": "dipole_moment"
+          }
+        ],
+        "answer": null,
+        "requirements": [
+          {
+            "key": "opt",
+            "subject_key": "subject_1",
+            "capability": "optimize_geometry",
+            "parameters": {},
+            "outputs": [
+              "optimized_geometry"
+            ],
+            "input_bindings": {
+              "geometry": {
+                "requirement_key": null,
+                "port": null,
+                "artifact_alias": "initial_geometry"
+              }
+            },
+            "parameter_evidence": [],
+            "constraints": {},
+            "report_queries": [
+              {
+                "evidence": "报告偶极矩",
+                "search_terms": [
+                  "DIPOLE MOMENT",
+                  "Magnitude (Debye)"
+                ]
+              }
+            ]
+          }
+        ],
+        "subjects": {
+          "subject_1": {
+            "key": "subject_1",
+            "molecule_query": "water",
+            "molecule_input_kind": "name",
+            "molecule_name_evidence": "水",
+            "inline_xyz": null,
+            "history_geometry_alias": null
+          }
+        },
+        "answer_goals": [],
+        "unresolved_requirements": [],
+        "parameter_target_requirement_key": null,
+        "parameter_patch": {},
+        "pending_action": "none",
+        "pending_action_evidence": null,
+        "missing_fields": [],
+        "query_selection": null,
+        "output_preferences": {
+          "layout": "auto",
+          "file_content": "auto",
+          "detail": "normal"
+        }
+      },
+      "request": {
+        "id": "live_dipole",
+        "description": "优化水并报告偶极矩",
+        "source": "chat",
+        "original_text": "优化水并报告偶极矩",
+        "subjects": {
+          "sub_4268fcd2bdfa05be": {
+            "key": "subject_1",
+            "molecule_query": "water",
+            "molecule_input_kind": "name",
+            "molecule_name_evidence": "水",
+            "structure_input": {
+              "molecule_identity": {
+                "input_kind": "name",
+                "raw_query": "水",
+                "lookup_query": "water",
+                "selected_cid": null
+              }
+            }
+          }
+        },
+        "requirements": [
+          {
+            "id": "req_272255b6fa9c0dbe",
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "capability": "optimize_geometry",
+            "parameters": {},
+            "outputs": [
+              "optimized_geometry"
+            ],
+            "input_bindings": {
+              "geometry": {
+                "source_requirement_id": null,
+                "source_port": null,
+                "artifact_alias": "initial_geometry"
+              }
+            },
+            "constraints": {
+              "report_queries": [
+                {
+                  "evidence": "报告偶极矩",
+                  "search_terms": [
+                    "DIPOLE MOMENT",
+                    "Magnitude (Debye)"
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "answer_goals": [],
+        "missing_fields": [],
+        "output_preferences": {
+          "layout": "auto",
+          "file_content": "auto",
+          "detail": "normal"
+        }
+      },
+      "plan": {
+        "id": "live_dipole",
+        "revision": 1,
+        "request_id": "live_dipole",
+        "steps": [
+          {
+            "id": "s01_resolve_molecule_subject_1",
+            "tool": "resolve_molecule",
+            "parameters": {
+              "query": "water",
+              "input_kind": "name"
+            },
+            "inputs": {},
+            "goal_checks": [],
+            "requirement_id": null,
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s01_resolve_molecule_subject_1"
+          },
+          {
+            "id": "s02_generate_geometry_subject_1",
+            "tool": "generate_geometry",
+            "parameters": {},
+            "inputs": {
+              "molecule": {
+                "artifact_id": null,
+                "step_id": "s01_resolve_molecule_subject_1",
+                "port": "molecule"
+              }
+            },
+            "goal_checks": [],
+            "requirement_id": null,
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s02_generate_geometry_subject_1"
+          },
+          {
+            "id": "s03_optimize_geometry",
+            "tool": "optimize_geometry",
+            "parameters": {},
+            "inputs": {
+              "geometry": {
+                "artifact_id": null,
+                "step_id": "s02_generate_geometry_subject_1",
+                "port": "geometry"
+              }
+            },
+            "goal_checks": [],
+            "requirement_id": "req_272255b6fa9c0dbe",
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s03_optimize_geometry"
+          }
+        ],
+        "requested_results": [
+          {
+            "step_id": "s03_optimize_geometry",
+            "requirement_id": "req_272255b6fa9c0dbe",
+            "field": null,
+            "port": "optimized_geometry",
+            "check": null
+          }
+        ]
+      },
+      "llm_calls": [
+        {
+          "purpose": "intake",
+          "request_model": "deepseek-flash",
+          "schema_version": "5dd9a430637e8ff9",
+          "elapsed_seconds": 1.406999999890104,
+          "usage": {
+            "prompt_tokens": 7122,
+            "completion_tokens": 272,
+            "total_tokens": 7394,
+            "prompt_tokens_details": {
+              "cached_tokens": 5248
+            },
+            "prompt_cache_hit_tokens": 5248,
+            "prompt_cache_miss_tokens": 1874
+          },
+          "response_model": "deepseek-flash",
+          "category": "success",
+          "finish_reason": "stop",
+          "body_length": 969,
+          "transport_attempts": 1,
+          "structured_correction_count": 0,
+          "corrected": false
+        }
+      ],
+      "execution": "planning only; no ORCA run"
+    },
+    {
+      "message": "优化水，然后给出它的偶极矩",
+      "entrypoint": "intake",
+      "proposal": {
+        "intent": "chemistry_compute",
+        "intent_items": [
+          {
+            "evidence": "优化水",
+            "kind": "compute",
+            "task_keys": [
+              "opt_water"
+            ],
+            "requested_property": "molecular_geometry"
+          },
+          {
+            "evidence": "偶极矩",
+            "kind": "report",
+            "task_keys": [
+              "opt_water"
+            ],
+            "requested_property": "dipole_moment"
+          }
+        ],
+        "answer": null,
+        "requirements": [
+          {
+            "key": "opt_water",
+            "subject_key": "subject_1",
+            "capability": "optimize_geometry",
+            "parameters": {},
+            "outputs": [
+              "optimized_geometry"
+            ],
+            "input_bindings": {},
+            "parameter_evidence": [],
+            "constraints": {},
+            "report_queries": [
+              {
+                "evidence": "偶极矩",
+                "search_terms": [
+                  "DIPOLE MOMENT",
+                  "Magnitude (Debye)"
+                ]
+              }
+            ]
+          }
+        ],
+        "subjects": {
+          "subject_1": {
+            "key": "subject_1",
+            "molecule_query": "water",
+            "molecule_input_kind": "name",
+            "molecule_name_evidence": "水",
+            "inline_xyz": null,
+            "history_geometry_alias": null
+          }
+        },
+        "answer_goals": [],
+        "unresolved_requirements": [],
+        "parameter_target_requirement_key": null,
+        "parameter_patch": {},
+        "pending_action": "none",
+        "pending_action_evidence": null,
+        "missing_fields": [
+          "charge",
+          "multiplicity"
+        ],
+        "query_selection": null,
+        "output_preferences": {
+          "layout": "auto",
+          "file_content": "auto",
+          "detail": "normal"
+        }
+      },
+      "request": {
+        "id": "live_dipole",
+        "description": "优化水，然后给出它的偶极矩",
+        "source": "chat",
+        "original_text": "优化水，然后给出它的偶极矩",
+        "subjects": {
+          "sub_4268fcd2bdfa05be": {
+            "key": "subject_1",
+            "molecule_query": "water",
+            "molecule_input_kind": "name",
+            "molecule_name_evidence": "水",
+            "structure_input": {
+              "molecule_identity": {
+                "input_kind": "name",
+                "raw_query": "水",
+                "lookup_query": "water",
+                "selected_cid": null
+              }
+            }
+          }
+        },
+        "requirements": [
+          {
+            "id": "req_54d4f21a9dd5920a",
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "capability": "optimize_geometry",
+            "parameters": {},
+            "outputs": [
+              "optimized_geometry"
+            ],
+            "input_bindings": {},
+            "constraints": {
+              "report_queries": [
+                {
+                  "evidence": "偶极矩",
+                  "search_terms": [
+                    "DIPOLE MOMENT",
+                    "Magnitude (Debye)"
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "answer_goals": [],
+        "missing_fields": [
+          "charge",
+          "multiplicity"
+        ],
+        "output_preferences": {
+          "layout": "auto",
+          "file_content": "auto",
+          "detail": "normal"
+        }
+      },
+      "plan": {
+        "id": "live_dipole",
+        "revision": 1,
+        "request_id": "live_dipole",
+        "steps": [
+          {
+            "id": "s01_resolve_molecule_subject_1",
+            "tool": "resolve_molecule",
+            "parameters": {
+              "query": "water",
+              "input_kind": "name"
+            },
+            "inputs": {},
+            "goal_checks": [],
+            "requirement_id": null,
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s01_resolve_molecule_subject_1"
+          },
+          {
+            "id": "s02_generate_geometry_subject_1",
+            "tool": "generate_geometry",
+            "parameters": {},
+            "inputs": {
+              "molecule": {
+                "artifact_id": null,
+                "step_id": "s01_resolve_molecule_subject_1",
+                "port": "molecule"
+              }
+            },
+            "goal_checks": [],
+            "requirement_id": null,
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s02_generate_geometry_subject_1"
+          },
+          {
+            "id": "s03_optimize_geometry",
+            "tool": "optimize_geometry",
+            "parameters": {},
+            "inputs": {
+              "geometry": {
+                "artifact_id": null,
+                "step_id": "s02_generate_geometry_subject_1",
+                "port": "geometry"
+              }
+            },
+            "goal_checks": [],
+            "requirement_id": "req_54d4f21a9dd5920a",
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s03_optimize_geometry"
+          }
+        ],
+        "requested_results": [
+          {
+            "step_id": "s03_optimize_geometry",
+            "requirement_id": "req_54d4f21a9dd5920a",
+            "field": null,
+            "port": "optimized_geometry",
+            "check": null
+          }
+        ]
+      },
+      "llm_calls": [
+        {
+          "purpose": "intake",
+          "request_model": "deepseek-flash",
+          "schema_version": "5dd9a430637e8ff9",
+          "elapsed_seconds": 1.2649999998975545,
+          "usage": {
+            "prompt_tokens": 7124,
+            "completion_tokens": 321,
+            "total_tokens": 7445,
+            "prompt_tokens_details": {
+              "cached_tokens": 4992
+            },
+            "prompt_cache_hit_tokens": 4992,
+            "prompt_cache_miss_tokens": 2132
+          },
+          "response_model": "deepseek-flash",
+          "category": "success",
+          "finish_reason": "stop",
+          "body_length": 1049,
+          "transport_attempts": 1,
+          "structured_correction_count": 0,
+          "corrected": false
+        }
+      ],
+      "execution": "planning only; no ORCA run"
+    },
+    {
+      "message": "优化水，然后告诉我偶极矩",
+      "entrypoint": "intake",
+      "proposal": {
+        "intent": "chemistry_compute",
+        "intent_items": [
+          {
+            "evidence": "优化水",
+            "kind": "compute",
+            "task_keys": [
+              "opt_water"
+            ],
+            "requested_property": "molecular_geometry"
+          },
+          {
+            "evidence": "偶极矩",
+            "kind": "report",
+            "task_keys": [
+              "opt_water"
+            ],
+            "requested_property": "dipole_moment"
+          }
+        ],
+        "answer": null,
+        "requirements": [
+          {
+            "key": "opt_water",
+            "subject_key": "subject_1",
+            "capability": "optimize_geometry",
+            "parameters": {},
+            "outputs": [
+              "optimized_geometry"
+            ],
+            "input_bindings": {},
+            "parameter_evidence": [],
+            "constraints": {},
+            "report_queries": [
+              {
+                "evidence": "偶极矩",
+                "search_terms": [
+                  "DIPOLE MOMENT",
+                  "Magnitude (Debye)"
+                ]
+              }
+            ]
+          }
+        ],
+        "subjects": {
+          "subject_1": {
+            "key": "subject_1",
+            "molecule_query": "water",
+            "molecule_input_kind": "name",
+            "molecule_name_evidence": "水",
+            "inline_xyz": null,
+            "history_geometry_alias": null
+          }
+        },
+        "answer_goals": [],
+        "unresolved_requirements": [],
+        "parameter_target_requirement_key": null,
+        "parameter_patch": {},
+        "pending_action": "none",
+        "pending_action_evidence": null,
+        "missing_fields": [
+          "charge",
+          "multiplicity"
+        ],
+        "query_selection": null,
+        "output_preferences": {
+          "layout": "auto",
+          "file_content": "auto",
+          "detail": "normal"
+        }
+      },
+      "request": {
+        "id": "live_dipole",
+        "description": "优化水，然后告诉我偶极矩",
+        "source": "chat",
+        "original_text": "优化水，然后告诉我偶极矩",
+        "subjects": {
+          "sub_4268fcd2bdfa05be": {
+            "key": "subject_1",
+            "molecule_query": "water",
+            "molecule_input_kind": "name",
+            "molecule_name_evidence": "水",
+            "structure_input": {
+              "molecule_identity": {
+                "input_kind": "name",
+                "raw_query": "水",
+                "lookup_query": "water",
+                "selected_cid": null
+              }
+            }
+          }
+        },
+        "requirements": [
+          {
+            "id": "req_54d4f21a9dd5920a",
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "capability": "optimize_geometry",
+            "parameters": {},
+            "outputs": [
+              "optimized_geometry"
+            ],
+            "input_bindings": {},
+            "constraints": {
+              "report_queries": [
+                {
+                  "evidence": "偶极矩",
+                  "search_terms": [
+                    "DIPOLE MOMENT",
+                    "Magnitude (Debye)"
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "answer_goals": [],
+        "missing_fields": [
+          "charge",
+          "multiplicity"
+        ],
+        "output_preferences": {
+          "layout": "auto",
+          "file_content": "auto",
+          "detail": "normal"
+        }
+      },
+      "plan": {
+        "id": "live_dipole",
+        "revision": 1,
+        "request_id": "live_dipole",
+        "steps": [
+          {
+            "id": "s01_resolve_molecule_subject_1",
+            "tool": "resolve_molecule",
+            "parameters": {
+              "query": "water",
+              "input_kind": "name"
+            },
+            "inputs": {},
+            "goal_checks": [],
+            "requirement_id": null,
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s01_resolve_molecule_subject_1"
+          },
+          {
+            "id": "s02_generate_geometry_subject_1",
+            "tool": "generate_geometry",
+            "parameters": {},
+            "inputs": {
+              "molecule": {
+                "artifact_id": null,
+                "step_id": "s01_resolve_molecule_subject_1",
+                "port": "molecule"
+              }
+            },
+            "goal_checks": [],
+            "requirement_id": null,
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s02_generate_geometry_subject_1"
+          },
+          {
+            "id": "s03_optimize_geometry",
+            "tool": "optimize_geometry",
+            "parameters": {},
+            "inputs": {
+              "geometry": {
+                "artifact_id": null,
+                "step_id": "s02_generate_geometry_subject_1",
+                "port": "geometry"
+              }
+            },
+            "goal_checks": [],
+            "requirement_id": "req_54d4f21a9dd5920a",
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s03_optimize_geometry"
+          }
+        ],
+        "requested_results": [
+          {
+            "step_id": "s03_optimize_geometry",
+            "requirement_id": "req_54d4f21a9dd5920a",
+            "field": null,
+            "port": "optimized_geometry",
+            "check": null
+          }
+        ]
+      },
+      "llm_calls": [
+        {
+          "purpose": "intake",
+          "request_model": "deepseek-flash",
+          "schema_version": "5dd9a430637e8ff9",
+          "elapsed_seconds": 1.531999999890104,
+          "usage": {
+            "prompt_tokens": 7123,
+            "completion_tokens": 321,
+            "total_tokens": 7444,
+            "prompt_tokens_details": {
+              "cached_tokens": 5248
+            },
+            "prompt_cache_hit_tokens": 5248,
+            "prompt_cache_miss_tokens": 1875
+          },
+          "response_model": "deepseek-flash",
+          "category": "success",
+          "finish_reason": "stop",
+          "body_length": 1049,
+          "transport_attempts": 1,
+          "structured_correction_count": 0,
+          "corrected": false
+        }
+      ],
+      "execution": "planning only; no ORCA run"
+    },
+    {
+      "message": "优化水，然后告诉我偶极矩",
+      "entrypoint": "semantic",
+      "proposal": {
+        "mode": "compute",
+        "intent_items": [
+          {
+            "evidence": "优化水",
+            "kind": "compute",
+            "task_keys": [
+              "t1"
+            ],
+            "requested_property": "molecular_geometry"
+          },
+          {
+            "evidence": "偶极矩",
+            "kind": "report",
+            "task_keys": [
+              "t1"
+            ],
+            "requested_property": "dipole_moment"
+          }
+        ],
+        "subjects": [
+          {
+            "key": "subject_1",
+            "query": "water",
+            "history_geometry_ref": null,
+            "input_kind": "name",
+            "evidence": "水"
+          }
+        ],
+        "tasks": [
+          {
+            "key": "t1",
+            "subject_key": "subject_1",
+            "capability": "optimize_geometry",
+            "method_request": null,
+            "parameters": {},
+            "requested_properties": [
+              "molecular_geometry"
+            ],
+            "report_queries": [
+              {
+                "evidence": "偶极矩",
+                "search_terms": [
+                  "DIPOLE MOMENT",
+                  "Magnitude (Debye)"
+                ]
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "modification": null,
+        "query_selection": null,
+        "clarification": null,
+        "unsupported_requirements": []
+      },
+      "request": {
+        "id": "live_dipole",
+        "description": "优化水，然后告诉我偶极矩",
+        "source": "chat",
+        "original_text": "优化水，然后告诉我偶极矩",
+        "subjects": {
+          "sub_4268fcd2bdfa05be": {
+            "key": "subject_1",
+            "molecule_query": "water",
+            "molecule_input_kind": "name",
+            "molecule_name_evidence": "水",
+            "structure_input": {
+              "molecule_identity": {
+                "input_kind": "name",
+                "raw_query": "水",
+                "lookup_query": "water",
+                "selected_cid": null
+              }
+            }
+          }
+        },
+        "requirements": [
+          {
+            "id": "req_3dcf4bce436b22ce",
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "capability": "optimize_geometry",
+            "parameters": {},
+            "outputs": [
+              "optimized_geometry"
+            ],
+            "input_bindings": {},
+            "constraints": {
+              "report_queries": [
+                {
+                  "evidence": "偶极矩",
+                  "search_terms": [
+                    "DIPOLE MOMENT",
+                    "Magnitude (Debye)"
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "answer_goals": [],
+        "missing_fields": [],
+        "output_preferences": {
+          "layout": "auto",
+          "file_content": "auto",
+          "detail": "normal"
+        }
+      },
+      "plan": {
+        "id": "live_dipole",
+        "revision": 1,
+        "request_id": "live_dipole",
+        "steps": [
+          {
+            "id": "s01_resolve_molecule_subject_1",
+            "tool": "resolve_molecule",
+            "parameters": {
+              "query": "water",
+              "input_kind": "name"
+            },
+            "inputs": {},
+            "goal_checks": [],
+            "requirement_id": null,
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s01_resolve_molecule_subject_1"
+          },
+          {
+            "id": "s02_generate_geometry_subject_1",
+            "tool": "generate_geometry",
+            "parameters": {},
+            "inputs": {
+              "molecule": {
+                "artifact_id": null,
+                "step_id": "s01_resolve_molecule_subject_1",
+                "port": "molecule"
+              }
+            },
+            "goal_checks": [],
+            "requirement_id": null,
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s02_generate_geometry_subject_1"
+          },
+          {
+            "id": "s03_optimize_geometry",
+            "tool": "optimize_geometry",
+            "parameters": {},
+            "inputs": {
+              "geometry": {
+                "artifact_id": null,
+                "step_id": "s02_generate_geometry_subject_1",
+                "port": "geometry"
+              }
+            },
+            "goal_checks": [],
+            "requirement_id": "req_3dcf4bce436b22ce",
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s03_optimize_geometry"
+          }
+        ],
+        "requested_results": [
+          {
+            "step_id": "s03_optimize_geometry",
+            "requirement_id": "req_3dcf4bce436b22ce",
+            "field": null,
+            "port": "optimized_geometry",
+            "check": null
+          }
+        ]
+      },
+      "llm_calls": [
+        {
+          "purpose": "semantic",
+          "request_model": "deepseek-flash",
+          "schema_version": "619eff4bbf70c33e",
+          "elapsed_seconds": 1.297000000020489,
+          "usage": {
+            "prompt_tokens": 6874,
+            "completion_tokens": 291,
+            "total_tokens": 7165,
+            "prompt_tokens_details": {
+              "cached_tokens": 4864
+            },
+            "prompt_cache_hit_tokens": 4864,
+            "prompt_cache_miss_tokens": 2010
+          },
+          "response_model": "deepseek-flash",
+          "category": "success",
+          "finish_reason": "stop",
+          "body_length": 961,
+          "transport_attempts": 1,
+          "structured_correction_count": 0,
+          "corrected": false
+        }
+      ],
+      "execution": "planning only; no ORCA run"
+    },
+    {
+      "message": "优化水，然后给出它的偶极矩",
+      "entrypoint": "semantic",
+      "proposal": {
+        "mode": "compute",
+        "intent_items": [
+          {
+            "evidence": "优化水",
+            "kind": "compute",
+            "task_keys": [
+              "t1"
+            ],
+            "requested_property": "molecular_geometry"
+          },
+          {
+            "evidence": "偶极矩",
+            "kind": "report",
+            "task_keys": [
+              "t1"
+            ],
+            "requested_property": "dipole_moment"
+          }
+        ],
+        "subjects": [
+          {
+            "key": "subject_1",
+            "query": "water",
+            "history_geometry_ref": null,
+            "input_kind": "name",
+            "evidence": "水"
+          }
+        ],
+        "tasks": [
+          {
+            "key": "t1",
+            "subject_key": "subject_1",
+            "capability": "optimize_geometry",
+            "method_request": null,
+            "parameters": {},
+            "requested_properties": [
+              "molecular_geometry"
+            ],
+            "report_queries": [
+              {
+                "evidence": "偶极矩",
+                "search_terms": [
+                  "DIPOLE MOMENT",
+                  "Magnitude (Debye)"
+                ]
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "modification": null,
+        "query_selection": null,
+        "clarification": null,
+        "unsupported_requirements": []
+      },
+      "request": {
+        "id": "live_dipole",
+        "description": "优化水，然后给出它的偶极矩",
+        "source": "chat",
+        "original_text": "优化水，然后给出它的偶极矩",
+        "subjects": {
+          "sub_4268fcd2bdfa05be": {
+            "key": "subject_1",
+            "molecule_query": "water",
+            "molecule_input_kind": "name",
+            "molecule_name_evidence": "水",
+            "structure_input": {
+              "molecule_identity": {
+                "input_kind": "name",
+                "raw_query": "水",
+                "lookup_query": "water",
+                "selected_cid": null
+              }
+            }
+          }
+        },
+        "requirements": [
+          {
+            "id": "req_3dcf4bce436b22ce",
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "capability": "optimize_geometry",
+            "parameters": {},
+            "outputs": [
+              "optimized_geometry"
+            ],
+            "input_bindings": {},
+            "constraints": {
+              "report_queries": [
+                {
+                  "evidence": "偶极矩",
+                  "search_terms": [
+                    "DIPOLE MOMENT",
+                    "Magnitude (Debye)"
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "answer_goals": [],
+        "missing_fields": [],
+        "output_preferences": {
+          "layout": "auto",
+          "file_content": "auto",
+          "detail": "normal"
+        }
+      },
+      "plan": {
+        "id": "live_dipole",
+        "revision": 1,
+        "request_id": "live_dipole",
+        "steps": [
+          {
+            "id": "s01_resolve_molecule_subject_1",
+            "tool": "resolve_molecule",
+            "parameters": {
+              "query": "water",
+              "input_kind": "name"
+            },
+            "inputs": {},
+            "goal_checks": [],
+            "requirement_id": null,
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s01_resolve_molecule_subject_1"
+          },
+          {
+            "id": "s02_generate_geometry_subject_1",
+            "tool": "generate_geometry",
+            "parameters": {},
+            "inputs": {
+              "molecule": {
+                "artifact_id": null,
+                "step_id": "s01_resolve_molecule_subject_1",
+                "port": "molecule"
+              }
+            },
+            "goal_checks": [],
+            "requirement_id": null,
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s02_generate_geometry_subject_1"
+          },
+          {
+            "id": "s03_optimize_geometry",
+            "tool": "optimize_geometry",
+            "parameters": {},
+            "inputs": {
+              "geometry": {
+                "artifact_id": null,
+                "step_id": "s02_generate_geometry_subject_1",
+                "port": "geometry"
+              }
+            },
+            "goal_checks": [],
+            "requirement_id": "req_3dcf4bce436b22ce",
+            "subject_id": "sub_4268fcd2bdfa05be",
+            "origin_step_id": "s03_optimize_geometry"
+          }
+        ],
+        "requested_results": [
+          {
+            "step_id": "s03_optimize_geometry",
+            "requirement_id": "req_3dcf4bce436b22ce",
+            "field": null,
+            "port": "optimized_geometry",
+            "check": null
+          }
+        ]
+      },
+      "llm_calls": [
+        {
+          "purpose": "semantic",
+          "request_model": "deepseek-flash",
+          "schema_version": "619eff4bbf70c33e",
+          "elapsed_seconds": 1.4840000001713634,
+          "usage": {
+            "prompt_tokens": 6875,
+            "completion_tokens": 300,
+            "total_tokens": 7175,
+            "prompt_tokens_details": {
+              "cached_tokens": 4736
+            },
+            "prompt_cache_hit_tokens": 4736,
+            "prompt_cache_miss_tokens": 2139
+          },
+          "response_model": "deepseek-flash",
+          "category": "success",
+          "finish_reason": "stop",
+          "body_length": 997,
+          "transport_attempts": 1,
+          "structured_correction_count": 0,
+          "corrected": false
+        }
+      ],
+      "execution": "planning only; no ORCA run"
+    }
+  ],
+  "case_count": 8,
+  "scope": "Live LLM planning only; no scientific result inferred from model output."
+}
