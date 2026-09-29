@@ -166,7 +166,7 @@ def test_result_answer_bounds_explanations_and_renders_verified_file_content() -
             )
         ],
     )
-    with pytest.raises(ValueError, match="numbers present in cited verified values"):
+    with pytest.raises(ValueError, match="free scientific text"):
         validate_result_answer(injected, outputs, ["out_1"])
 
     verified_number = {
@@ -191,7 +191,8 @@ def test_result_answer_bounds_explanations_and_renders_verified_file_content() -
             )
         ],
     )
-    validate_result_answer(grounded, verified_number, ["out_energy"])
+    with pytest.raises(ValueError, match="free scientific text"):
+        validate_result_answer(grounded, verified_number, ["out_energy"])
 
     safe = AnswerOutput(
         action="respond",
@@ -199,7 +200,7 @@ def test_result_answer_bounds_explanations_and_renders_verified_file_content() -
             AnswerSection(
                 format="auto",
                 output_refs=["out_1"],
-                text="该文件保留了所选结构的逐原子坐标记录。",
+                text=None,
             )
         ],
     )
@@ -210,7 +211,7 @@ def test_result_answer_bounds_explanations_and_renders_verified_file_content() -
         preferences={"file_content": "show", "detail": "normal"},
     )
     assert "atom_index,element" in rendered
-    assert "所选结构" in rendered
+    assert "原子坐标" in rendered
     assert "-999" not in rendered
 
 

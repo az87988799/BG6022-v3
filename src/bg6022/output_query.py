@@ -11,7 +11,14 @@ from threading import Event
 from bg6022.models import InputReference, Result, Step
 from bg6022.orca.profiles import get_profile
 from bg6022.output_contracts import public_source_context
-from bg6022.session import ArtifactReadError, load_run, new_id, registered_read_path
+from bg6022.session import (
+    ArtifactReadError,
+    load_run,
+    new_id,
+    new_metadata_budget,
+    read_metadata_json,
+    registered_read_path,
+)
 from bg6022.tools.orca_output import (
     MAX_FILE_BYTES,
     MAX_LINES,
@@ -106,11 +113,13 @@ def validate_raw_query_targets(targets, message, catalog):
         raise ValueError("at most three raw questions per selection")
 
 
-def _load_source_result(data_root, run, relative):
+def _load_source_result(data_root, run, relative, metadata_budget=None):
     path = registered_read_path(data_root, run, relative)
     if path.name != "result.json" or path.stat().st_size > 4 * 1024 * 1024:
         raise ValueError("invalid source result")
-    result = Result.model_validate_json(path.read_bytes(), strict=True)
+    result = Result.model_validate(
+        read_metadata_json(path, metadata_budget or new_metadata_budget()), strict=True
+    )
     if (
         relative != f"{result.attempt_relative_path}/result.json"
         or result.run_id != run.id
@@ -124,107 +133,110 @@ def _fingerprint(result):
     return hashlib.sha256(result.model_dump_json().encode()).hexdigest()
 
 
-def collect_raw_output_sources(data_root, run, session_id):
-    if run.session_id not in {None, session_id}:
-        return []
+def _raw_sources_for_result(run, result, relative, session_id):
     sources = []
-    steps = {step.id: step for step in run.plan.steps}
-    for relative in reversed(run.result_index):
-        try:
-            result = _load_source_result(data_root, run, relative)
-        except (OSError, ValueError):
-            continue
-        step = steps.get(result.step_id)
-        if step is None or step.tool not in ORCA_CAPABILITIES:
-            continue
-        attempts = [
-            a
-            for a in run.attempts
-            if a.get("step_id") == result.step_id and a.get("attempt") == result.attempt
-        ]
-        if len(attempts) != 1:
-            continue
-        attempt = attempts[0]
+    step = next((step for step in run.plan.steps if step.id == result.step_id), None)
+    if step is None or step.tool not in ORCA_CAPABILITIES:
+        return []
+    attempts = [
+        a
+        for a in run.attempts
+        if a.get("step_id") == result.step_id and a.get("attempt") == result.attempt
+    ]
+    if len(attempts) != 1:
+        return []
+    attempt = attempts[0]
+    if (
+        attempt.get("phase") != "finished"
+        or attempt.get("status") != result.status
+        or attempt.get("result_relative_path") != result.attempt_relative_path
+    ):
+        return []
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            step.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    parameters = step.parameters if result.step_fingerprint == fingerprint else {}
+    try:
+        method_label = get_profile(parameters.get("method_profile", "")).display_name
+    except ValueError:
+        method_label = "unknown"
+    subject = run.request.subjects.get(
+        step.subject_id
+        or next((r.subject_id for r in run.request.requirements if r.id == step.requirement_id), "")
+    )
+    context = public_source_context(
+        {
+            "subject_label": (subject.molecule_query or subject.key) if subject else None,
+            "method_label": method_label,
+            "operation_label": step.tool,
+            "task_label": run.request.description,
+            "attempt": result.attempt,
+            "source_status": result.status,
+        }
+    )
+    for artifact in run.artifact_index:
         if (
-            attempt.get("phase") != "finished"
-            or attempt.get("status") != result.status
-            or attempt.get("result_relative_path") != result.attempt_relative_path
+            artifact.artifact_type != "orca_output"
+            or artifact.role != "stdout"
+            or artifact.run_id != run.id
+            or artifact.step_id != result.step_id
+            or artifact.attempt != result.attempt
+            or artifact.id not in result.artifact_ids
+            or artifact.id not in attempt.get("artifact_ids", [])
         ):
             continue
-        fingerprint = hashlib.sha256(
-            json.dumps(
-                step.model_dump(mode="json"),
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
-        parameters = step.parameters if result.step_fingerprint == fingerprint else {}
-        try:
-            method_label = get_profile(parameters.get("method_profile", "")).display_name
-        except ValueError:
-            method_label = "unknown"
-        subject = run.request.subjects.get(
-            step.subject_id
-            or next(
-                (r.subject_id for r in run.request.requirements if r.id == step.requirement_id), ""
-            )
-        )
-        context = public_source_context(
+        sources.append(
             {
-                "subject_label": (subject.molecule_query or subject.key) if subject else None,
-                "method_label": method_label,
-                "operation_label": step.tool,
-                "task_label": run.request.description,
+                "access": "raw_output",
+                "source_context": context,
+                "session_id": session_id,
+                "run_id": run.id,
+                "source_step_id": result.step_id,
                 "attempt": result.attempt,
+                "source_result_path": relative,
+                "source_result_fingerprint": _fingerprint(result),
+                "artifact_id": artifact.id,
+                "artifact_sha256": artifact.sha256,
+                "artifact_size": artifact.size_bytes,
+                "artifact_role": artifact.role,
                 "source_status": result.status,
+                "is_current_attempt": (
+                    run.current_results.get(step.id) == relative
+                    if result.status == "succeeded"
+                    else result.attempt
+                    == max(
+                        (a.get("attempt", 0) for a in run.attempts if a.get("step_id") == step.id),
+                        default=0,
+                    )
+                    and step.id not in run.current_results
+                ),
+                "task_description": run.request.description[:240],
+                "tool": step.tool,
+                "run_status": run.status,
             }
         )
-        for artifact in run.artifact_index:
-            if (
-                artifact.artifact_type != "orca_output"
-                or artifact.role != "stdout"
-                or artifact.run_id != run.id
-                or artifact.step_id != result.step_id
-                or artifact.attempt != result.attempt
-                or artifact.id not in result.artifact_ids
-                or artifact.id not in attempt.get("artifact_ids", [])
-            ):
-                continue
-            sources.append(
-                {
-                    "access": "raw_output",
-                    "source_context": context,
-                    "session_id": session_id,
-                    "run_id": run.id,
-                    "source_step_id": result.step_id,
-                    "attempt": result.attempt,
-                    "source_result_path": relative,
-                    "source_result_fingerprint": _fingerprint(result),
-                    "artifact_id": artifact.id,
-                    "artifact_sha256": artifact.sha256,
-                    "artifact_size": artifact.size_bytes,
-                    "artifact_role": artifact.role,
-                    "source_status": result.status,
-                    "is_current_attempt": (
-                        run.current_results.get(step.id) == relative
-                        if result.status == "succeeded"
-                        else result.attempt
-                        == max(
-                            (
-                                a.get("attempt", 0)
-                                for a in run.attempts
-                                if a.get("step_id") == step.id
-                            ),
-                            default=0,
-                        )
-                        and step.id not in run.current_results
-                    ),
-                    "task_description": run.request.description[:240],
-                    "tool": step.tool,
-                    "run_status": run.status,
-                }
-            )
+    return sources
+
+
+def collect_raw_output_sources(data_root, run, session_id, *, metadata_budget=None, cancel=None):
+    if run.session_id not in {None, session_id}:
+        return []
+    budget = metadata_budget or new_metadata_budget(cancel)
+    sources = []
+    for relative in reversed(run.result_index):
+        try:
+            result = _load_source_result(data_root, run, relative, budget)
+        except ArtifactReadError as error:
+            budget["diagnostic"] = error.category
+            break
+        except (OSError, ValueError):
+            continue
+        sources.extend(_raw_sources_for_result(run, result, relative, session_id))
     return sources
 
 
@@ -285,21 +297,27 @@ def build_raw_catalog_entries(sources, recent):
     return entries, bindings
 
 
-def resolve_raw_output_source(data_root, binding, session_id, indexed_ids):
+def resolve_raw_output_source(data_root, binding, session_id, indexed_ids, *, metadata_budget=None):
     if binding.get("session_id") != session_id or binding.get("run_id") not in indexed_ids:
         raise ValueError("source is outside this session")
-    run = load_run(data_root, binding["run_id"])
+    budget = metadata_budget or new_metadata_budget()
+    run = load_run(data_root, binding["run_id"], metadata_budget=budget)
+    if (
+        run.session_id not in {None, session_id}
+        or binding["source_result_path"] not in run.result_index
+    ):
+        raise ValueError("source is outside this session")
+    result = _load_source_result(data_root, run, binding["source_result_path"], budget)
     current = next(
         (
             s
-            for s in collect_raw_output_sources(data_root, run, session_id)
+            for s in _raw_sources_for_result(run, result, binding["source_result_path"], session_id)
             if same_source(s, binding)
         ),
         None,
     )
     if current != binding:
         raise ValueError("source binding has changed")
-    result = _load_source_result(data_root, run, binding["source_result_path"])
     artifact = next(a for a in run.artifact_index if a.id == binding["artifact_id"])
     return run, result, artifact
 
@@ -325,6 +343,7 @@ def query_output_sources(
     if sum(len(q) for _, q in grouped.values()) > MAX_QUERIES:
         raise ValueError("at most three raw questions per turn")
     reports = []
+    metadata_budget = new_metadata_budget(cancel)
     for binding, queries in grouped.values():
         base = {**binding, "queries": queries}
         try:
@@ -337,6 +356,7 @@ def query_output_sources(
                 binding,
                 session_id,
                 indexed_ids,
+                metadata_budget=metadata_budget,
             )
             before_limits = dict(limits)
             tool = make_orca_output_tool(

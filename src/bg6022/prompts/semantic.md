@@ -130,3 +130,26 @@ one target with multiple queries. A followup can reuse recent_queries only for a
 repeat/display request with exactly one recent source and question; a new property needs new
 evidence and search terms. Raw status, historical attempt and ambiguity are source context,
 not scientific success. Do not infer missing numbers or perform calculations on raw evidence.
+
+
+Read-only history browsing uses context_query with query_selection.status=selected
+and catalog_request, without targets. Use {view:sources, source_ref:null, cursor:null}
+to list session history, including older runs. Use only program-issued source_ref
+for {view:properties, source_ref:..., cursor:null}; use only supplied continuation
+cursors for the next page. Directory entries are source metadata, not verified
+results. Never invent references or start calculations while browsing.
+A verified query target may carry view={scope:page|all, offset:0, limit:30,
+columns:[], precision:null}. Offset is zero-based, limit is 1..50, at most 12
+existing columns, precision 0..12. Request all only when the user wants the full
+value. Paging or formatting does not alter scientific data or run a Tool.
+
+Attached report binding example for “优化水，然后给出它的偶极矩”:
+intent_items contains compute(evidence="优化水", task_keys=["opt"],
+requested_property="molecular_geometry") and report(evidence="偶极矩",
+task_keys=["opt"], requested_property="dipole_moment"). The same opt task has
+report_queries=[{"evidence":"偶极矩","search_terms":["DIPOLE MOMENT","Magnitude (Debye)"]}].
+Prefer the identical evidence quote in report intent and attached question.
+Do not invent "optimized_electronic_energy": copy actual names from public_outputs.
+For optimization plus dipole only, geometry is the formal compute output; the dipole
+is the attached report. Do not request an extra energy result unless the user asks.
+For Semantic, set the opt task requested_properties to ["molecular_geometry"].

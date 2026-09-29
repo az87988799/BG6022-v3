@@ -252,8 +252,8 @@ def validate_result_answer(
             ):
                 raise ValueError("link view requires an explicit link-only file request")
             used.append(ref)
-        if section.text is not None:
-            _validate_output_explanation(section.text, section.output_refs, outputs_by_ref)
+        if section.text and section.text.strip():
+            raise ValueError("verified result sections cannot contain free scientific text")
     if len(used) != len(set(used)):
         raise ValueError("duplicate output rendering")
     required = {str(ref) for ref in required_refs}
@@ -302,8 +302,6 @@ def render_answer_output(
                 )
                 if rendered:
                     lines.append(rendered)
-            if section.text and section.text.strip():
-                lines.append(section.text.strip())
         return "\n".join(lines)
     sections = [
         section.text.strip()
@@ -313,64 +311,6 @@ def render_answer_output(
     if output.clarification and output.clarification.strip():
         sections.insert(0, output.clarification.strip())
     return "\n\n".join(sections)
-
-
-def _validate_output_explanation(
-    text: str,
-    references: Sequence[str],
-    outputs_by_ref: Mapping[str, Mapping[str, Any]],
-) -> None:
-    if not text.strip() or len(text) > 800:
-        raise ValueError("result explanations must contain 1 to 800 characters")
-    if re.search(r"[A-Za-z]:[\\/]|https?://|\\\\", text):
-        raise ValueError("result explanations cannot introduce paths or URLs")
-    cited_facts = [
-        _mapping(outputs_by_ref[ref].get("fact"))
-        for ref in references
-        if outputs_by_ref[ref].get("fact") is not None
-    ]
-    unverified_numbers = [
-        token
-        for token in re.findall(r"(?<![A-Za-z])[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", text)
-        if not any(_number_is_in_fact(token, fact) for fact in cited_facts)
-    ]
-    if unverified_numbers:
-        raise ValueError(
-            "result explanations may use only numbers present in cited verified values"
-        )
-    cited_checks = [
-        _mapping(outputs_by_ref[ref].get("fact"))
-        for ref in references
-        if outputs_by_ref[ref].get("kind") == "check"
-    ]
-    negative_status = any(
-        _mapping(item.get("value")).get("status") in {"not_met", "unverified"}
-        for item in cited_checks
-    )
-    if negative_status:
-        raise ValueError("program-rendered check status must carry unmet or unverified results")
-
-
-def _number_is_in_fact(token: str, fact: Mapping[str, Any]) -> bool:
-    try:
-        target = float(token)
-    except (TypeError, ValueError, OverflowError):
-        return False
-    if not math.isfinite(target):
-        return False
-
-    def contains(value: Any) -> bool:
-        if isinstance(value, bool) or value is None:
-            return False
-        if type(value) in {int, float}:
-            return math.isfinite(float(value)) and float(value) == target
-        if isinstance(value, Mapping):
-            return any(contains(item) for item in value.values())
-        if isinstance(value, (list, tuple)):
-            return any(contains(item) for item in value)
-        return False
-
-    return contains(fact.get("value")) or contains(fact.get("task_context"))
 
 
 def _check_supported_view(entry: Mapping[str, Any], requested: str) -> None:
@@ -431,16 +371,31 @@ def _render_public_output(
             body = f"{label}：\n```json\n{json.dumps(value, ensure_ascii=False, indent=2)}\n```"
         elif view == "table":
             body = (
-                _render_record_value(label, value)
+                _render_record_value(
+                    label, value, precision=_mapping(fact.get("view")).get("precision")
+                )
                 if expected_type in {"record_list", "record"}
-                else _render_scalar_table(label, value)
+                else _render_scalar_table(
+                    label, value, precision=_mapping(fact.get("view")).get("precision")
+                )
             )
         elif expected_type in {"record_list", "record"}:
-            body = _render_record_value(label, value)
+            body = _render_record_value(
+                label, value, precision=_mapping(fact.get("view")).get("precision")
+            )
         else:
             body = _fact_sentence(fact)
     context = _fact_context(fact, include_task_identity=bool(fact.get("_include_task_identity")))
     lines = [f"{context}：", body] if context else [body]
+    page = _mapping(fact.get("view_metadata"))
+    if page and (page.get("total_rows", 0) > 1 or not page.get("full_value_shown")):
+        lines.append(
+            f"显示第 {page['offset'] + 1}–{page['offset'] + page['shown_rows']} 行，"
+            f"共 {page['total_rows']} 行。"
+            + ("其余内容可继续分页查询。" if page.get("has_more") else "")
+        )
+        if not page.get("requested_scope_complete"):
+            lines.append("本次未完整交付所请求范围。")
     caveat = _string_or_none(_mapping(fact.get("metadata")).get("caveat"))
     if caveat:
         lines.append(f"说明：{caveat}。")
@@ -489,7 +444,7 @@ def _render_file_output(
     return "\n".join(lines)
 
 
-def _render_record_value(label: str, value: Any) -> str:
+def _render_record_value(label: str, value: Any, *, precision=None) -> str:
     records = value if isinstance(value, list) else [value]
     if not records or not all(isinstance(item, Mapping) for item in records):
         return f"{label}：{_format_scalar(value)}"
@@ -500,15 +455,31 @@ def _render_record_value(label: str, value: Any) -> str:
                 keys.append(str(key))
     header = " | ".join(keys)
     divider = " | ".join("---" for _ in keys)
-    rows = [" | ".join(_format_scalar(record.get(key)) for key in keys) for record in records]
+    rows = [
+        " | ".join(
+            format_verified_value(record.get(key), precision)
+            if precision is not None and type(record.get(key)) in {int, float}
+            else _format_scalar(record.get(key))
+            for key in keys
+        )
+        for record in records
+    ]
     return f"{label}：\n| {header} |\n| {divider} |\n" + "\n".join(f"| {row} |" for row in rows)
 
 
-def _render_scalar_table(label: str, value: Any) -> str:
+def _render_scalar_table(label: str, value: Any, *, precision=None) -> str:
     """Render a scalar or scalar-shaped value as a stable two-column table."""
 
     if isinstance(value, Mapping):
-        rows = [(str(key), _format_scalar(item)) for key, item in value.items()]
+        rows = [
+            (
+                str(key),
+                format_verified_value(item, precision)
+                if precision is not None and type(item) in {int, float}
+                else _format_scalar(item),
+            )
+            for key, item in value.items()
+        ]
     else:
         rows = [("值", _format_scalar(value))]
     body = "\n".join(f"| {key} | {item} |" for key, item in rows)
@@ -1235,6 +1206,18 @@ def _fact_sentence(fact: Mapping[str, Any]) -> str:
         reason = _string_or_none(value.get("reason"))
         suffix = f"；{reason}" if reason else ""
         return f"{label}{status_label}{suffix}。"
+    precision = _mapping(fact.get("view")).get("precision")
+    if precision is not None and (
+        type(fact.get("value")) in {int, float}
+        or isinstance(fact.get("value"), Mapping)
+        and "value" in fact["value"]
+    ):
+        unit = (
+            _mapping(fact.get("value")).get("unit")
+            or public_type_info(str(fact.get("expected_type")), kind="field").get("unit")
+            or ""
+        )
+        return f"{label}为 **{format_verified_value(fact['value'], precision)} {unit}**。"
     if fact.get("expected_type") == "angstrom" and isinstance(fact.get("value"), Mapping):
         distance = _mapping(fact.get("value"))
         raw = distance.get("value")
@@ -1521,13 +1504,27 @@ def _status_label(status: Any) -> str:
     }.get(str(status), str(status))
 
 
+def format_verified_value(value: Any, precision: int | None = None) -> str:
+    if precision is not None and (type(precision) is not int or not 0 <= precision <= 12):
+        raise ValueError("precision must be an integer from 0 to 12")
+    if isinstance(value, Mapping) and "value" in value:
+        if precision is None and isinstance(value.get("token"), str):
+            return value["token"]
+        value = value["value"]
+    if precision is not None and type(value) in {int, float}:
+        if not math.isfinite(float(value)):
+            raise ValueError("cannot render a nonfinite verified value")
+        return f"{value:.{precision}f}"
+    return _format_scalar(value)
+
+
 def _format_scalar(value: Any) -> str:
     if isinstance(value, bool):
         return "是" if value else "否"
     if isinstance(value, float):
         if not math.isfinite(value):
             return "不可用"
-        return f"{value:.12f}".rstrip("0").rstrip(".")
+        return str(value)
     return str(value)
 
 

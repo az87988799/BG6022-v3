@@ -40,6 +40,9 @@ from .molecule_identity import (
     normalize_formula_token,
 )
 from .output_contracts import (
+    MAX_TURN_VALUE_BYTES,
+    MAX_VALUE_BYTES,
+    bounded_verified_value,
     is_compatible_value,
     public_source_context,
     public_type_info,
@@ -74,14 +77,19 @@ from .repair import apply_repair_proposal, propose_repair
 from .semantic import semantic_message
 from .session import (
     MAX_RECENT_RUNS,
+    ArtifactReadError,
     artifact_path,
     create_run,
     execution_fingerprint,
     find_artifact,
+    index_session_run,
+    list_session_run_summaries,
     load_run,
     load_session,
     new_id,
+    new_metadata_budget,
     publish_step_result,
+    read_metadata_json,
     register_bytes_artifact,
     register_file_artifact,
     run_directory,
@@ -209,9 +217,11 @@ class Agent:
         self._query_bindings: dict[tuple[str, str], dict[str, Any]] = {}
         self._request_sequence = 0
         self._active_request: tuple[int, Event] | None = None
+        self._session_readonly = False
         try:
             self._session = load_session(config.data_root_path, self.session_id)
         except ValueError:
+            self._session_readonly = True
             # A corrupt session is not overwritten.  The caller can use /new.
             self._session = {
                 "session_id": self.session_id,
@@ -219,7 +229,8 @@ class Agent:
                 "recent_results": [],
                 "last_delivery": [],
                 "active_run_id": None,
-                "pending_prompt": "session record is invalid; use /new or /exit",
+                "pending_prompt": "session record is invalid or limited; use /new or /exit",
+                "history_diagnostic": "session_read_limited_or_invalid",
             }
         self._session.setdefault("last_delivery", [])
 
@@ -262,6 +273,8 @@ class Agent:
             updated_at=utc_now(),
         )
         create_run(self.config.data_root_path, run)
+        index_session_run(self._session, run)
+        self._save_session()
         initial_artifact = register_file_artifact(
             self.config.data_root_path,
             run,
@@ -306,6 +319,7 @@ class Agent:
             return self.new_session()
 
         request_token, request_cancel = self._begin_request()
+        self._query_cancel = request_cancel
         self._append_message("user", text)
         llm_call_cursor = self._llm_call_count()
         llm_stage = "intake"
@@ -429,7 +443,13 @@ class Agent:
 
             answer_stage_eligible = intake.intent in {"chemistry_qa", "daily_qa"} or (
                 intake.intent == "context_query"
-                and (intake.query_selection is None or intake.query_selection.status != "selected")
+                and (
+                    intake.query_selection is None
+                    or (
+                        intake.query_selection.status != "selected"
+                        and intake.query_selection.catalog_request is None
+                    )
+                )
             )
             if answer_stage_eligible:
                 llm_stage = "answer"
@@ -917,7 +937,9 @@ class Agent:
                     save_run(self.config.data_root_path, run)
                     return last_result
                 tool = self.registry.get(step.tool)
-                if tool.requires_compute_permission and not run.execution_permission:
+                if tool.requires_compute_permission and (
+                    not run.execution_permission or not run.accepted_snapshot
+                ):
                     try:
                         self._validate_known_plan_parameters(run)
                     except (TypeError, ValueError, OSError) as error:
@@ -933,7 +955,9 @@ class Agent:
                 if tool.preparation_function is not None:
                     preparing_step_id = step.id
                     try:
-                        if tool.requires_compute_permission and not run.execution_permission:
+                        if tool.requires_compute_permission and (
+                            not run.execution_permission or not run.accepted_snapshot
+                        ):
                             # Resolve every prepared Tool Step before one confirmation
                             # for the whole Plan. Later operations often consume a
                             # future output port, so structure facts are traced
@@ -1168,6 +1192,7 @@ class Agent:
 
     def confirm(self, run: Run | str | None = None) -> AgentResponse:
         request_token, request_cancel = self._begin_request()
+        self._query_cancel = request_cancel
         origin_session = self.session_id
         try:
             current = self._coerce_run(run)
@@ -1303,6 +1328,13 @@ class Agent:
         self._active_request = None
         self.session_id = new_id("session")
         self._query_bindings = {}
+        self._catalog_sources = {}
+        self._catalog_cursors = {}
+        self._catalog_page = []
+        self._catalog_page_bindings = {}
+        self._catalog_next = None
+        self._catalog_metadata_budget = None
+        self._session_readonly = False
         self._session = {
             "session_id": self.session_id,
             "recent_messages": [],
@@ -1358,6 +1390,8 @@ class Agent:
             updated_at=utc_now(),
         )
         create_run(self.config.data_root_path, run)
+        index_session_run(self._session, run)
+        self._save_session()
         alias_replacements: dict[str, str] = {}
         for history_alias, verified_source in verified_history.items():
             (
@@ -2930,6 +2964,22 @@ class Agent:
         }
 
     @staticmethod
+    def _bounded_answer_facts(facts):
+        remaining = MAX_TURN_VALUE_BYTES
+        bounded = []
+        for fact in facts:
+            item = dict(fact)
+            if item.get("kind") != "port" and "view_metadata" not in item:
+                item["value"], item["view_metadata"] = bounded_verified_value(
+                    item.get("value"),
+                    item.get("view"),
+                    budget_bytes=min(MAX_VALUE_BYTES, max(0, remaining - 512)),
+                )
+            remaining -= len(json.dumps(item.get("value"), ensure_ascii=False).encode()) + 512
+            bounded.append(item)
+        return bounded
+
+    @staticmethod
     def _public_answer_outputs(
         facts: list[Mapping[str, Any]], files: list[Mapping[str, Any]]
     ) -> list[dict[str, Any]]:
@@ -2939,7 +2989,7 @@ class Agent:
             if item.get("output_ref") or item.get("ref")
         }
         outputs: list[dict[str, Any]] = []
-        for fact in facts:
+        for fact in Agent._bounded_answer_facts(facts):
             metadata = fact.get("metadata") if isinstance(fact.get("metadata"), Mapping) else {}
             expected_type = fact.get("expected_type")
             kind = str(fact.get("kind") or "field")
@@ -2960,6 +3010,7 @@ class Agent:
                     "description": metadata.get("description"),
                     "caveat": metadata.get("caveat"),
                     "verified_value": (fact.get("value") if kind in {"field", "check"} else None),
+                    "view_metadata": fact.get("view_metadata"),
                     "task_context": {
                         key: fact.get(key)
                         for key in (
@@ -2982,7 +3033,16 @@ class Agent:
                     ),
                 }
             )
-        return outputs
+        # Include descriptor overhead in the model allowance, not just values.
+        bounded = []
+        size = 2
+        for output in outputs:
+            encoded = len(json.dumps(output, ensure_ascii=False).encode("utf-8")) + 2
+            if size + encoded > MAX_TURN_VALUE_BYTES:
+                break
+            bounded.append(output)
+            size += encoded
+        return bounded
 
     @staticmethod
     def _answer_draft_covers_outputs(
@@ -3013,7 +3073,7 @@ class Agent:
             str(fact.get("task_key")) for fact in facts if fact.get("task_key") is not None
         }
         outputs: dict[str, dict[str, Any]] = {}
-        for fact in facts:
+        for fact in Agent._bounded_answer_facts(facts):
             ref = fact.get("output_ref")
             if not isinstance(ref, str) or not ref:
                 continue
@@ -3107,6 +3167,7 @@ class Agent:
         preferences: Mapping[str, Any] | None = None,
         status_override: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
+        facts = self._bounded_answer_facts(facts)
         for index, fact in enumerate(facts, start=1):
             fact.setdefault("output_ref", f"out_{index}")
         file_refs = {
@@ -3274,7 +3335,9 @@ class Agent:
             locators.append(locator)
         if cancelled:
             status = "cancelled"
-        elif unavailable_targets:
+        elif unavailable_targets or any(
+            not f.get("view_metadata", {}).get("requested_scope_complete", True) for f in renderable
+        ):
             status = "partial"
         else:
             status = "complete"
@@ -3283,6 +3346,9 @@ class Agent:
             "rendered_refs": [str(fact["output_ref"]) for fact in renderable],
             "unavailable_targets": unavailable_targets,
             "outputs": locators,
+            "views": {
+                str(f["output_ref"]): f["view_metadata"] for f in renderable if "view_metadata" in f
+            },
         }
 
     def _files_for_facts(
@@ -3427,8 +3493,11 @@ class Agent:
             if shown and delivery.get("status") != "cancelled":
                 self._session["last_delivery"] = shown[-8:]
         self._save_session()
+        if self._session.get("history_diagnostic"):
+            response.delivery["history_diagnostic"] = self._session["history_diagnostic"]
 
     def _record_result_summary(self, run: Run, result: Result) -> None:
+        index_session_run(self._session, run)
         summaries = self._session.get("recent_results", [])
         recent_by_run: list[dict[str, Any]] = []
         if isinstance(summaries, list):
@@ -3455,10 +3524,12 @@ class Agent:
         self._save_session()
 
     def _save_session(self) -> None:
+        if getattr(self, "_session_readonly", False):
+            return
         try:
             save_session(self.config.data_root_path, self.session_id, self._session)
-        except OSError:
-            pass
+        except (OSError, ValueError) as error:
+            self._session["history_diagnostic"] = f"session_save_failed:{type(error).__name__}"
 
     def _persist_llm_diagnostics(
         self,
@@ -3489,7 +3560,7 @@ class Agent:
         calls = getattr(self.llm, "calls", [])
         return len(calls) if isinstance(calls, list) else 0
 
-    def _build_query_catalog(self) -> list[dict[str, Any]]:
+    def _build_query_catalog(self, *, run_ids=None, return_all=False) -> list[dict[str, Any]]:
         """Build short, public references for valid facts in this session.
 
         The catalog deliberately contains no Run IDs, paths, hashes, or
@@ -3498,6 +3569,8 @@ class Agent:
         """
 
         self._query_bindings = {}
+        budget = new_metadata_budget(getattr(self, "_query_cancel", None))
+        self._catalog_metadata_budget = budget
         subject_refs: dict[str, str] = {}
         last_delivery = [
             item for item in self._session.get("last_delivery", []) if isinstance(item, Mapping)
@@ -3554,15 +3627,19 @@ class Agent:
             if isinstance(run_id, str) and run_id and run_id not in indexed_ids:
                 indexed_ids.append(run_id)
 
+        if run_ids is not None:
+            indexed_ids = list(run_ids)
+        indexed_ids = indexed_ids[:24]
         raw_sources = []
         for run_id in indexed_ids:
             try:
-                source_run = load_run(self.config.data_root_path, run_id)
+                source_run = load_run(self.config.data_root_path, run_id, metadata_budget=budget)
                 raw_sources.extend(
                     collect_raw_output_sources(
                         self.config.data_root_path,
                         source_run,
                         self.session_id,
+                        metadata_budget=budget,
                     )
                 )
             except ValueError:
@@ -3575,7 +3652,7 @@ class Agent:
         catalog: list[dict[str, Any]] = list(raw_catalog)
         for run_id in indexed_ids:
             try:
-                run = load_run(self.config.data_root_path, run_id)
+                run = load_run(self.config.data_root_path, run_id, metadata_budget=budget)
             except ValueError:
                 continue
             # A missing session_id is tolerated only because this Run was
@@ -3584,19 +3661,21 @@ class Agent:
             if run.session_id not in {None, self.session_id}:
                 continue
             for step in _ordered_steps(run):
-                if len(catalog) >= MAX_QUERY_CATALOG_ITEMS:
-                    return catalog
                 relative = run.current_results.get(step.id)
                 if not isinstance(relative, str):
                     continue
-                result = _load_bound_result(self.config.data_root_path, run, relative)
-                if result is None or not self._query_result_is_valid(run, step, result, relative):
+                result = _load_bound_result(
+                    self.config.data_root_path, run, relative, metadata_budget=budget
+                )
+                if result is None or not self._query_result_is_valid(
+                    run, step, result, relative, metadata_only=True
+                ):
                     continue
                 try:
                     tool = self.registry.get(step.tool)
                 except ValueError:
                     continue
-                structure = self._query_structure(run, step, result)
+                structure = self._query_structure(run, step, result, metadata_budget=budget)
                 for output in tool.public_outputs():
                     kind = str(output["kind"])
                     name = str(output["name"])
@@ -3606,26 +3685,16 @@ class Agent:
                     if kind == "field":
                         if name not in result.values:
                             continue
-                        if not _query_value_is_compatible(result.values[name], expected_type):
-                            continue
                     elif kind == "port":
-                        artifact = self._query_port_artifact(run, step, result, name, expected_type)
+                        artifact = self._query_port_artifact(
+                            run, step, result, name, expected_type, metadata_only=True
+                        )
                         if artifact is None:
                             continue
                     elif kind == "check":
                         check = result.scientific_checks.get(name)
                         if check is None or not is_compatible_value(
                             check.model_dump(mode="python"), "scientific_check"
-                        ):
-                            continue
-                        if not _result_check_input_is_bound(
-                            self.config.data_root_path,
-                            run,
-                            step,
-                            result,
-                            name,
-                            check,
-                            self.registry,
                         ):
                             continue
                     else:
@@ -3679,9 +3748,44 @@ class Agent:
                             recently_delivered=recently_delivered,
                         )
                     )
-                    if len(catalog) >= MAX_QUERY_CATALOG_ITEMS:
-                        return catalog
-        return catalog
+        # Round-robin properties across sources so one large Tool cannot hide others.
+        groups = {}
+        for entry in catalog:
+            groups.setdefault(entry["subject_ref"], []).append(entry)
+        catalog = [
+            group[index]
+            for index in range(max((len(g) for g in groups.values()), default=0))
+            for group in groups.values()
+            if index < len(group)
+        ]
+        if budget.get("diagnostic"):
+            self._session["history_diagnostic"] = budget["diagnostic"]
+        for entry in catalog:
+            if entry.get("access") != "raw_output":
+                entry["result"]["validity"] = "metadata_only"
+        if return_all:
+            return catalog
+        page = getattr(self, "_catalog_page", [])
+        self._query_bindings.update(getattr(self, "_catalog_page_bindings", {}))
+        source_entries = [
+            {
+                "subject_ref": ref,
+                "source_ref": ref,
+                "access": "directory",
+                "result": {"property": "source_directory", "label": item["description"]},
+                "source_context": {"task_label": item["description"]},
+            }
+            for ref, item in getattr(self, "_catalog_sources", {}).items()
+        ]
+        continuation = getattr(self, "_catalog_next", None)
+        if continuation and source_entries:
+            source_entries[-1]["catalog_next_cursor"] = continuation
+        shown = (page + source_entries + catalog)[:MAX_QUERY_CATALOG_ITEMS]
+        allowed = {(entry["subject_ref"], entry["result"]["property"]) for entry in shown}
+        self._query_bindings = {
+            key: value for key, value in self._query_bindings.items() if key in allowed
+        }
+        return shown
 
     @staticmethod
     def _delivery_locator_matches(
@@ -3713,7 +3817,12 @@ class Agent:
     def _build_geometry_catalog(self) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
         """Expose bounded aliases for verified molecular-geometry outputs."""
 
-        indexed_ids: list[str] = []
+        indexed_ids: list[str] = list(
+            dict.fromkeys(item["run_id"] for item in getattr(self, "_catalog_sources", {}).values())
+        )
+        budget = getattr(self, "_catalog_metadata_budget", None) or new_metadata_budget(
+            getattr(self, "_query_cancel", None)
+        )
         active_run_id = self._session.get("active_run_id")
         if isinstance(active_run_id, str) and active_run_id:
             indexed_ids.append(active_run_id)
@@ -3728,7 +3837,7 @@ class Agent:
         bindings: dict[str, dict[str, Any]] = {}
         for run_id in indexed_ids:
             try:
-                run = load_run(self.config.data_root_path, run_id)
+                run = load_run(self.config.data_root_path, run_id, metadata_budget=budget)
             except ValueError:
                 continue
             if run.session_id not in {None, self.session_id}:
@@ -3743,21 +3852,22 @@ class Agent:
                 relative = run.current_results.get(step.id)
                 if not isinstance(relative, str):
                     continue
-                result = _load_bound_result(self.config.data_root_path, run, relative)
-                if result is None or not self._query_result_is_valid(run, step, result, relative):
+                result = _load_bound_result(
+                    self.config.data_root_path, run, relative, metadata_budget=budget
+                )
+                if result is None or not self._query_result_is_valid(
+                    run, step, result, relative, metadata_only=True
+                ):
                     continue
                 for port, expected_type in tool.output_ports.items():
                     if len(catalog) >= MAX_HISTORY_GEOMETRIES:
                         return catalog, bindings
                     if expected_type != "molecular_geometry":
                         continue
-                    artifact = self._query_port_artifact(run, step, result, port, expected_type)
+                    artifact = self._query_port_artifact(
+                        run, step, result, port, expected_type, metadata_only=True
+                    )
                     if artifact is None or artifact.role == "restart_candidate":
-                        continue
-                    try:
-                        geometry_path = artifact_path(self.config.data_root_path, run, artifact)
-                        geometry = parse_xyz_bytes(geometry_path.read_bytes())
-                    except (OSError, ValueError):
                         continue
                     alias = f"geometry_{len(catalog) + 1}"
                     binding = {
@@ -3773,7 +3883,7 @@ class Agent:
                         "role": artifact.role,
                     }
                     bindings[alias] = binding
-                    system = self._query_structure(run, step, result)
+                    system = self._query_structure(run, step, result, metadata_budget=budget)
                     catalog.append(
                         {
                             "alias": alias,
@@ -3782,9 +3892,10 @@ class Agent:
                             "run_status": run.status,
                             "system": system,
                             "geometry": {
-                                "role": f"verified {artifact.role}",
+                                "role": artifact.role,
                                 "port": port,
-                                "atom_count": geometry.atom_count,
+                                "atom_count": artifact.metadata.get("atom_count"),
+                                "validity": "metadata_only",
                             },
                             "calculation": {
                                 "tool": tool.name,
@@ -3956,8 +4067,9 @@ class Agent:
         run_id = resolved.get("run_id")
         if not isinstance(run_id, str):
             return None
+        budget = new_metadata_budget(getattr(self, "_query_cancel", None))
         try:
-            run = load_run(self.config.data_root_path, run_id)
+            run = load_run(self.config.data_root_path, run_id, metadata_budget=budget)
         except ValueError:
             return None
         if run.session_id not in {None, self.session_id}:
@@ -3967,7 +4079,9 @@ class Agent:
         if not isinstance(relative, str) or not isinstance(step_id, str):
             return None
         step = next((item for item in run.plan.steps if item.id == step_id), None)
-        result = _load_bound_result(self.config.data_root_path, run, relative)
+        result = _load_bound_result(
+            self.config.data_root_path, run, relative, metadata_budget=budget
+        )
         if step is None or result is None:
             return None
         if not self._query_result_is_valid(run, step, result, relative):
@@ -4230,7 +4344,9 @@ class Agent:
                 labels.insert(0, operation_label)
         return list(dict.fromkeys(labels))
 
-    def _query_result_is_valid(self, run: Run, step: Step, result: Result, relative: str) -> bool:
+    def _query_result_is_valid(
+        self, run: Run, step: Step, result: Result, relative: str, *, metadata_only=False
+    ) -> bool:
         if (
             result.run_id != run.id
             or result.step_id != step.id
@@ -4272,7 +4388,11 @@ class Agent:
             if result.input_bindings.get(input_name) != artifact.id:
                 return False
         tool = self.registry.get(step.tool)
-        if tool.scientific_checks and not tool.validate_result(run, step, result):
+        if (
+            not metadata_only
+            and tool.scientific_checks
+            and not tool.validate_result(run, step, result)
+        ):
             return False
         return True
 
@@ -4283,6 +4403,8 @@ class Agent:
         result: Result,
         name: str,
         expected_type: str,
+        *,
+        metadata_only=False,
     ) -> Any | None:
         artifact_id = result.output_ports.get(name)
         if (
@@ -4301,6 +4423,8 @@ class Agent:
                 or artifact.role == "restart_candidate"
             ):
                 return None
+            if metadata_only:
+                return artifact
             path = artifact_path(self.config.data_root_path, run, artifact)
             if not _artifact_integrity_matches(path, artifact):
                 return None
@@ -4310,7 +4434,9 @@ class Agent:
         except (OSError, ValueError):
             return None
 
-    def _query_structure(self, run: Run, step: Step, result: Result) -> dict[str, Any]:
+    def _query_structure(
+        self, run: Run, step: Step, result: Result, *, metadata_budget=None
+    ) -> dict[str, Any]:
         artifacts: list[Any] = []
         for reference in step.inputs.values():
             artifact = self._artifact_from_reference(run, reference)
@@ -4332,10 +4458,9 @@ class Agent:
             if molecule is None:
                 continue
             try:
-                payload = json.loads(
-                    artifact_path(self.config.data_root_path, run, molecule).read_text(
-                        encoding="utf-8"
-                    )
+                payload = read_metadata_json(
+                    artifact_path(self.config.data_root_path, run, molecule),
+                    metadata_budget or new_metadata_budget(getattr(self, "_query_cancel", None)),
                 )
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
@@ -4435,6 +4560,86 @@ class Agent:
         self._record_response(response, cancel=cancel)
         return response
 
+    def _answer_catalog(self, request, cancel=None):
+        if not hasattr(self, "_catalog_sources"):
+            self._catalog_sources = {}
+            self._catalog_cursors = {}
+        try:
+            if request.view == "sources":
+                page = list_session_run_summaries(
+                    self.config.data_root_path, self._session, cursor=request.cursor, cancel=cancel
+                )
+                items = []
+                self._catalog_sources = {}
+                for item in page["items"]:
+                    ref = new_id("source")
+                    self._catalog_sources[ref] = item
+                    items.append(
+                        {
+                            "source_ref": ref,
+                            "description": item["description"],
+                            "created_at": item["created_at"],
+                        }
+                    )
+                self._catalog_page = []
+                self._catalog_page_bindings = {}
+                self._catalog_next = page["cursor"]
+                payload = {**page, "items": items}
+            else:
+                source = self._catalog_sources.get(request.source_ref)
+                if source is None:
+                    raise ValueError("source_ref was not issued by this directory")
+                offset = 0
+                if request.cursor is not None:
+                    state = self._catalog_cursors.get(request.cursor)
+                    if state is None or state[0] != request.source_ref:
+                        raise ValueError("property cursor was not issued for this source")
+                    offset = state[1]
+                catalog = self._build_query_catalog(run_ids=[source["run_id"]], return_all=True)
+                items = catalog[offset : offset + MAX_QUERY_CATALOG_ITEMS]
+                bindings = self._query_bindings
+                self._catalog_page = []
+                self._catalog_page_bindings = {}
+                refs = {}
+                for entry in items:
+                    old_ref = entry["subject_ref"]
+                    ref = refs.setdefault(old_ref, new_id("saved"))
+                    prop = entry["result"]["property"]
+                    self._catalog_page.append({**entry, "subject_ref": ref})
+                    self._catalog_page_bindings[(ref, prop)] = bindings[(old_ref, prop)]
+                self._query_bindings.update(self._catalog_page_bindings)
+                cursor = None
+                if offset + len(items) < len(catalog):
+                    cursor = new_id("page")
+                    self._catalog_cursors[cursor] = (request.source_ref, offset + len(items))
+                self._catalog_next = cursor
+                if cursor and self._catalog_page:
+                    self._catalog_page[-1]["catalog_next_cursor"] = cursor
+                    self._catalog_page[-1]["source_ref"] = request.source_ref
+                payload = {
+                    "items": self._catalog_page,
+                    "cursor": cursor,
+                    "complete": cursor is None,
+                    "status": "ok",
+                }
+            self._save_session()
+            diagnostic = self._session.get("history_diagnostic")
+            if diagnostic:
+                payload["history_diagnostic"] = diagnostic
+            self._save_session()
+            text = "历史目录（只读，未运行计算）：\n" + json.dumps(
+                payload, ensure_ascii=False, indent=2
+            )
+            response = AgentResponse(
+                text, delivery={"status": "catalog", "rendered_refs": [], "outputs": []}
+            )
+        except (OSError, ValueError) as error:
+            response = AgentResponse(
+                f"历史目录暂不可用：{getattr(error, 'category', str(error))}。未运行计算。"
+            )
+        self._record_response(response, cancel=cancel)
+        return response
+
     def _answer_context(
         self,
         question: str,
@@ -4459,6 +4664,8 @@ class Agent:
             response = AgentResponse(text)
             self._record_response(response, cancel=cancel)
             return response
+        if selection.catalog_request is not None:
+            return self._answer_catalog(selection.catalog_request, cancel)
         if selection.status != "selected":
             text = render_clarification(selection.model_dump(mode="python"))
             response = AgentResponse(text)
@@ -4501,11 +4708,20 @@ class Agent:
             if fact is None:
                 unavailable.append(_query_target_label(target, catalog))
                 continue
+            if target.view is not None:
+                fact["view"] = target.view.model_dump()
+                try:
+                    bounded_verified_value(fact.get("value"), fact["view"])
+                except ValueError as error:
+                    response = AgentResponse(f"结果视图无法应用：{error}；未重新计算。")
+                    self._record_response(response, cancel=cancel)
+                    return response
             selected_facts.append(fact)
         indexed_ids = [self._session.get("active_run_id")]
         indexed_ids.extend(
             item.get("run_id")
-            for item in self._session.get("recent_results", [])
+            for item in self._session.get("run_history", [])
+            + self._session.get("recent_results", [])
             if isinstance(item, Mapping)
         )
         raw_reports = query_output_sources(
@@ -5677,13 +5893,21 @@ def _requested_results_satisfied(data_root: str, run: Run, registry: ToolRegistr
     return True
 
 
-def _load_bound_result(data_root: str, run: Run, relative: str) -> Result | None:
+def _load_bound_result(
+    data_root: str, run: Run, relative: str, *, metadata_budget=None
+) -> Result | None:
     root = run_directory(data_root, run.id).resolve()
     path = (root / relative).resolve()
     if root not in path.parents or path.name != "result.json":
         return None
     try:
-        return Result.model_validate(json.loads(path.read_text(encoding="utf-8")), strict=True)
+        return Result.model_validate(
+            read_metadata_json(path, metadata_budget or new_metadata_budget()), strict=True
+        )
+    except ArtifactReadError as error:
+        if metadata_budget is not None:
+            metadata_budget["diagnostic"] = error.category
+        return None
     except (OSError, ValueError, json.JSONDecodeError):
         return None
 

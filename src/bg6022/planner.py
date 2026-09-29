@@ -12,6 +12,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictInt,
     StrictStr,
     create_model,
     field_validator,
@@ -139,7 +140,12 @@ def validate_intent_items(
                             raise ValueError("compute goal is not covered by requested outputs")
                         affirmative.add((key, descriptor["property"]))
                 else:
-                    matches = [q for q in task.report_queries if q.evidence == item.evidence]
+                    matches = [
+                        q
+                        for q in task.report_queries
+                        if message.count(q.evidence) == 1
+                        and (q.evidence in item.evidence or item.evidence in q.evidence)
+                    ]
                     if prop is None:
                         raise ValueError("report intent needs a requested property hint")
                     # Prefer a verified contract when one actually exists. Ambiguity
@@ -161,7 +167,7 @@ def validate_intent_items(
                         if not matches:
                             raise ValueError("report intent must bind an attached report question")
                         normalize_report_queries(matches, message, capability=task.capability)
-                        report_evidence.add((key, item.evidence))
+                        report_evidence.update((key, q.evidence) for q in matches)
                     affirmative.add((key, prop))
         elif item.kind == "query":
             targets = query_selection.targets if query_selection is not None else []
@@ -200,6 +206,24 @@ class ElectronicStateCandidate(BaseModel):
     evidence: StrictStr
 
 
+class OutputView(BaseModel):
+    """Turn-local display request; cannot change stored scientific values."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    scope: Literal["page", "all"] = "page"
+    offset: StrictInt = Field(default=0, ge=0)
+    limit: StrictInt = Field(default=30, ge=1, le=50)
+    columns: list[StrictStr] = Field(default_factory=list, max_length=12)
+    precision: StrictInt | None = Field(default=None, ge=0, le=12)
+
+    @field_validator("columns")
+    @classmethod
+    def _unique_columns(cls, value):
+        if len(value) != len(set(value)) or any(not name or len(name) > 160 for name in value):
+            raise ValueError("columns must be unique bounded field names")
+        return value
+
+
 class QueryTarget(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -208,6 +232,20 @@ class QueryTarget(BaseModel):
     evidence: StrictStr
     reference_mode: Literal["explicit", "followup"] = "explicit"
     queries: list[OutputQuerySpec] = Field(default_factory=list, max_length=3)
+    view: OutputView | None = None
+
+
+class CatalogRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    view: Literal["sources", "properties"]
+    source_ref: StrictStr | None = None
+    cursor: StrictStr | None = None
+
+    @model_validator(mode="after")
+    def _source_matches_view(self):
+        if (self.view == "properties") != (self.source_ref is not None):
+            raise ValueError("properties directory needs an issued source_ref")
+        return self
 
 
 class QuerySelection(BaseModel):
@@ -221,6 +259,7 @@ class QuerySelection(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     status: QuerySelectionStatus
+    catalog_request: CatalogRequest | None = None
     targets: list[QueryTarget] = Field(default_factory=list)
     clarification: StrictStr | None = None
     missing_description: StrictStr | None = None
@@ -240,7 +279,9 @@ class QuerySelection(BaseModel):
 
     @model_validator(mode="after")
     def _status_matches_refs(self) -> QuerySelection:
-        if self.status == "selected" and not self.targets:
+        if self.catalog_request is not None and self.targets:
+            raise ValueError("directory browsing and result targets are mutually exclusive")
+        if self.status == "selected" and not self.targets and self.catalog_request is None:
             raise ValueError("selected query result must contain at least one target")
         if self.status != "selected" and self.targets:
             raise ValueError("clarify/unavailable query results cannot contain targets")
@@ -3572,6 +3613,8 @@ def _validate_query_selection(
         return output
     if selection is None:
         raise ValueError("context_query must contain query_selection")
+    if selection.catalog_request is not None:
+        return output
     if output.intent_items:
         try:
             validate_intent_items(

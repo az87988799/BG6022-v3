@@ -264,6 +264,160 @@ def session_path(data_root: str | Path, session_id: str) -> Path:
     return session_directory(data_root) / f"{session_id}.json"
 
 
+MAX_METADATA_FILE_BYTES = 4 * 1024 * 1024
+MAX_METADATA_TURN_BYTES = 16 * 1024 * 1024
+MAX_HISTORY_INDEX_BYTES = 8 * 1024 * 1024
+
+
+def new_metadata_budget(cancel=None):
+    return {
+        "cancel": cancel or Event(),
+        "deadline": time.monotonic() + 2.0,
+        "bytes": 0,
+        "candidates": 0,
+        "cache": {},
+    }
+
+
+def read_metadata_json(path, budget, *, max_file_bytes=MAX_METADATA_FILE_BYTES):
+    """Bound every metadata read before decoding, with a shared turn allowance."""
+    check_read_deadline(budget["cancel"], budget["deadline"])
+    path = Path(path)
+    key = str(path.resolve())
+    if key in budget["cache"]:
+        return budget["cache"][key]
+    if budget["candidates"] >= 64:
+        raise ArtifactReadError("metadata_candidates")
+    budget["candidates"] += 1
+    size = path.stat().st_size
+    if size > max_file_bytes:
+        raise ArtifactReadError("metadata_file_bytes")
+    if size + budget["bytes"] > MAX_METADATA_TURN_BYTES:
+        raise ArtifactReadError("metadata_turn_bytes")
+    chunks = []
+    read = 0
+    with path.open("rb") as handle:
+        while True:
+            check_read_deadline(budget["cancel"], budget["deadline"])
+            chunk = handle.read(64 * 1024)
+            if not chunk:
+                break
+            read += len(chunk)
+            budget["bytes"] += len(chunk)
+            if read > max_file_bytes or budget["bytes"] > MAX_METADATA_TURN_BYTES:
+                raise ArtifactReadError("metadata_turn_bytes")
+            chunks.append(chunk)
+    check_read_deadline(budget["cancel"], budget["deadline"])
+    value = json.loads(b"".join(chunks))
+    check_read_deadline(budget["cancel"], budget["deadline"])
+    budget["cache"][key] = value
+    return value
+
+
+def index_session_run(session, run):
+    if run.session_id not in {None, session.get("session_id")}:
+        return
+    entries = session.setdefault("run_history", [])
+    item = {
+        "run_id": run.id,
+        "created_at": str(run.created_at),
+        "description": run.request.description[:240],
+    }
+    previous = next((i for i, entry in enumerate(entries) if entry.get("run_id") == run.id), None)
+    candidate = list(entries)
+    if previous is None:
+        candidate.append(item)
+    else:
+        candidate[previous] = item
+    if len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) > MAX_HISTORY_INDEX_BYTES:
+        session["history_diagnostic"] = "history_index_bytes"
+        return
+    session["run_history"] = candidate
+
+
+def list_session_run_summaries(data_root, session, *, cursor=None, limit=24, cancel=None):
+    """Browse a session directory, independently of its conversational window."""
+    if type(limit) is not int or not 1 <= limit <= 24:
+        raise ValueError("directory page limit must be between 1 and 24")
+    cursors = session.setdefault("history_cursors", {})
+    if cursor is not None and cursor not in cursors:
+        raise ValueError("directory cursor was not issued by this session")
+    state = dict(cursors[cursor]) if cursor else {"offset": 0, "scanned": []}
+    budget = new_metadata_budget(cancel)
+    diagnostic = None
+    unavailable = []
+    overflow = list(state.get("pending", []))
+    history = session.setdefault("run_history", [])
+    indexed = {item.get("run_id") for item in history}
+    indexed.update(item.get("run_id") for item in session.get("recent_results", []))
+    if session.get("active_run_id"):
+        indexed.add(session["active_run_id"])
+    scanned = set(state.get("scanned", []))
+    try:
+        check_read_deadline(budget["cancel"], budget["deadline"])
+        root = Path(data_root).resolve() / "runs"
+        if root.exists():
+            with os.scandir(root) as directories:
+                for entry in directories:
+                    check_read_deadline(budget["cancel"], budget["deadline"])
+                    if entry.name in scanned:
+                        continue
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    try:
+                        run = load_run(data_root, entry.name, metadata_budget=budget)
+                        if run.session_id == session.get("session_id") or (
+                            run.session_id is None and run.id in indexed
+                        ):
+                            index_session_run(session, run)
+                            if not any(item["run_id"] == run.id for item in session["run_history"]):
+                                overflow.append(
+                                    {
+                                        "run_id": run.id,
+                                        "created_at": str(run.created_at),
+                                        "description": run.request.description[:240],
+                                    }
+                                )
+                    except ArtifactReadError as error:
+                        if error.category == "metadata_file_bytes":
+                            unavailable.append(
+                                "metadata_file_bytes: controlled large-record reading required"
+                            )
+                        else:
+                            raise
+                    except (OSError, ValueError):
+                        pass
+                    scanned.add(entry.name)
+    except ArtifactReadError as error:
+        diagnostic = error.category
+    history = session.get("run_history", []) + overflow
+    offset = state["offset"]
+    items = history[offset : offset + limit] if diagnostic != "cancelled" else []
+    next_offset = offset + len(items)
+    more = next_offset < len(history) or diagnostic is not None
+    next_cursor = None
+    if more:
+        next_cursor = uuid.uuid4().hex
+        cursors[next_cursor] = {
+            "offset": next_offset,
+            "scanned": sorted(scanned),
+            "pending": overflow,
+        }
+        # Cursors are capabilities issued for this directory, never paths.
+        while len(cursors) > 64:
+            del cursors[next(iter(cursors))]
+    return {
+        "items": items,
+        "cursor": next_cursor,
+        "complete": not more,
+        "status": diagnostic or ("limited" if unavailable else "ok"),
+        "unavailable": unavailable,
+        "metadata_bytes": budget["bytes"],
+        "metadata_candidates": budget["candidates"],
+        "indexed_count": len(history),
+    }
+
+
 def save_session(data_root: str | Path, session_id: str, payload: dict[str, Any]) -> Path:
     """Persist only bounded conversational context, never full ORCA output."""
 
@@ -286,6 +440,8 @@ def save_session(data_root: str | Path, session_id: str, payload: dict[str, Any]
     delivery = bounded.get("last_delivery")
     if isinstance(delivery, list):
         bounded["last_delivery"] = [dict(item) for item in delivery[-8:] if isinstance(item, dict)]
+    if len(json.dumps(bounded, ensure_ascii=False).encode("utf-8")) > MAX_HISTORY_INDEX_BYTES:
+        raise ArtifactReadError("session_index_bytes")
     path = session_path(data_root, session_id)
     atomic_write_json(path, bounded)
     return path
@@ -298,16 +454,20 @@ def load_session(data_root: str | Path, session_id: str) -> dict[str, Any]:
             "session_id": session_id,
             "recent_messages": [],
             "recent_results": [],
+            "run_history": [],
             "last_delivery": [],
             "active_run_id": None,
             "pending_prompt": None,
         }
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = read_metadata_json(
+            path, new_metadata_budget(), max_file_bytes=MAX_HISTORY_INDEX_BYTES
+        )
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"session file is invalid: {path}: {error}") from error
     if not isinstance(payload, dict):
         raise ValueError(f"session file is not a JSON object: {path}")
+    payload.setdefault("run_history", [])
     return payload
 
 
@@ -335,11 +495,19 @@ def save_run(data_root: str | Path, run: Run) -> None:
     atomic_write_json(directory / "run.json", run.model_dump(mode="json"))
 
 
-def load_run(data_root: str | Path, run_id: str) -> Run:
+def load_run(data_root: str | Path, run_id: str, *, metadata_budget=None) -> Run:
+    if not run_id or "/" in run_id or "\\" in run_id or run_id in {".", ".."}:
+        raise ValueError("invalid run id")
     path = run_directory(data_root, run_id) / "run.json"
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = (
+            read_metadata_json(path, metadata_budget)
+            if metadata_budget is not None
+            else json.loads(path.read_text(encoding="utf-8"))
+        )
         return Run.model_validate(payload, strict=True)
+    except ArtifactReadError:
+        raise
     except FileNotFoundError as error:
         raise ValueError(f"Run does not exist: {run_id}") from error
     except (json.JSONDecodeError, ValueError) as error:

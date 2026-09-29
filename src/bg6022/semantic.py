@@ -324,7 +324,13 @@ def compact_result_catalog(catalog: list[Mapping[str, Any]]) -> list[dict[str, A
                 ),
                 **{
                     key: item[key]
-                    for key in ("access", "recently_delivered", "recent_queries")
+                    for key in (
+                        "access",
+                        "recently_delivered",
+                        "recent_queries",
+                        "source_ref",
+                        "catalog_next_cursor",
+                    )
                     if key in item
                 },
                 **(
@@ -474,7 +480,11 @@ def semantic_schema(
                 if "method_profile" not in target_tool.request_parameters:
                     raise ValueError("selected Tool does not accept methods")
         if value.query_selection is not None:
-            if value.query_selection.status == "selected" and not candidate_refs:
+            if (
+                value.query_selection.status == "selected"
+                and not candidate_refs
+                and value.query_selection.catalog_request is None
+            ):
                 raise ValueError("cannot select a result from an empty result catalog")
         # Relation-specific type derivation is completed by the program Canonicalizer.
         if set(requirements_by_key) != {item.key for item in value.tasks}:

@@ -7,6 +7,7 @@ query/answer paths; it does not execute Tools or persist Run state.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections.abc import Mapping, Sequence
@@ -19,6 +20,116 @@ PROPERTY_ALIASES = {
     "geometry": "molecular_geometry",
     "frequencies": "frequency",
 }
+
+MAX_VALUE_BYTES = 8 * 1024
+MAX_TURN_VALUE_BYTES = 16 * 1024
+MAX_VIEW_ROWS = 50
+MAX_VIEW_COLUMNS = 12
+
+
+def bounded_verified_value(
+    value: Any, view: Mapping[str, Any] | None = None, *, budget_bytes: int = MAX_VALUE_BYTES
+):
+    """Take a bounded view before serialization, never walking the entire table."""
+    view = dict(view or {})
+    offset, limit = view.get("offset", 0), view.get("limit", 30)
+    columns = view.get("columns") or []
+    if (
+        type(offset) is not int
+        or offset < 0
+        or type(limit) is not int
+        or not 1 <= limit <= MAX_VIEW_ROWS
+    ):
+        raise ValueError("invalid page range")
+    if len(columns) > MAX_VIEW_COLUMNS:
+        raise ValueError("too many columns")
+    table = isinstance(value, list)
+    total = len(value) if table else 1
+    if offset >= total and (total or offset):
+        raise ValueError("page offset is outside the verified value")
+    sample = value[:30] if table else [value]
+    declared = []
+    for row in sample:
+        if isinstance(row, Mapping):
+            for key in row:
+                if key not in declared:
+                    declared.append(key)
+                if len(declared) >= MAX_VIEW_COLUMNS:
+                    break
+        if len(declared) >= MAX_VIEW_COLUMNS:
+            break
+    if columns and any(key not in declared for key in columns):
+        raise ValueError("column is not in the bounded declared/sample view")
+    remaining = [min(MAX_VALUE_BYTES, max(0, budget_bytes)) - 32]
+    clipped = [False]
+
+    def take(item, depth=0):
+        if remaining[0] < 32 or depth > 6:
+            clipped[0] = True
+            return None
+        if isinstance(item, Mapping):
+            result = {}
+            for index, (key, child) in enumerate(item.items()):
+                if index >= MAX_VIEW_COLUMNS or remaining[0] < 32:
+                    clipped[0] = True
+                    break
+                original_key = str(key)
+                key = original_key[:160]
+                clipped[0] |= len(key) < len(original_key)
+                cost = len(json.dumps(key, ensure_ascii=False).encode()) + 4
+                if cost + 4 > remaining[0]:
+                    clipped[0] = True
+                    break
+                remaining[0] -= cost
+                result[key] = take(child, depth + 1)
+            return result
+        if isinstance(item, list):
+            result = []
+            for child in item[:MAX_VIEW_ROWS]:
+                if remaining[0] < 32:
+                    break
+                result.append(take(child, depth + 1))
+            clipped[0] |= len(result) < len(item)
+            return result
+        if isinstance(item, str):
+            # Bound the input to the encoder too: a single cell may be enormous.
+            prefix = item[: max(0, remaining[0] // 6)]
+            clipped[0] |= len(prefix) < len(item)
+            item = prefix
+        size = len(json.dumps(item, ensure_ascii=False).encode()) + 2
+        if size > remaining[0]:
+            clipped[0] = True
+            return None
+        remaining[0] -= size
+        return item
+
+    chosen = value[offset : offset + limit] if table else [value]
+    preview = []
+    for row in chosen:
+        if remaining[0] < 32:
+            clipped[0] = True
+            break
+        if columns and isinstance(row, Mapping):
+            row = {key: row.get(key) for key in columns}
+        preview.append(take(row))
+    shown = len(preview)
+    full = (
+        offset == 0
+        and shown == total
+        and not clipped[0]
+        and (not columns or set(columns) == set(declared))
+    )
+    meta = {
+        "total_rows": total,
+        "offset": offset,
+        "shown_rows": shown,
+        "has_more": offset + shown < total,
+        "full_value_shown": full,
+        "requested_scope_complete": (offset == 0 and shown == total and not clipped[0])
+        if view.get("scope", "page") == "all"
+        else shown == len(chosen) and not clipped[0],
+    }
+    return (preview if table else preview[0] if preview else None), meta
 
 
 def resolve_output_selector(tool: Any, selector: str, *, kind: str | None = None) -> dict[str, Any]:

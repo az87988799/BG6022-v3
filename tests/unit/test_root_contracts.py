@@ -409,3 +409,131 @@ def test_dependency_requires_port_and_explicit_choice_for_multiple_inputs():
         "water", SemanticProposal.model_validate(payload), registry=registry
     )
     assert intake.requirements[1].input_bindings["left"].port == "data"
+
+
+def test_automatic_permission_prepares_all_steps_before_acceptance(tmp_path, monkeypatch):
+    from test_context_query import _config
+
+    from bg6022.agent import Agent
+    from bg6022.models import Request
+    from bg6022.plan_builder import build_plan
+
+    config = _config(tmp_path)
+    config.runtime.confirm_before_compute = False
+    registry = build_registry(config)
+    agent = Agent(config, registry)
+    request = Request(
+        id="auto",
+        description="two SPs",
+        subjects={
+            "water": {
+                "key": "water",
+                "structure_input": {"xyz_text": "3\nwater\nO 0 0 0\nH 0 0 1\nH 1 0 0\n"},
+            }
+        },
+        requirements=[
+            {
+                "id": key,
+                "subject_id": "water",
+                "capability": "single_point",
+                "parameters": {"charge": 0, "multiplicity": 1, "method_profile": method},
+                "outputs": ["sp_electronic_energy"],
+            }
+            for key, method in [("a", "pbe0_d3bj_def2svp"), ("b", "b3lyp_d3bj_def2svp")]
+        ],
+    )
+    run = agent._create_chat_run(request, build_plan(request, registry=registry, plan_id="auto"))
+    captured = []
+
+    def stop_before_execution(run, step, tool, cancel):
+        captured.append(run.accepted_snapshot)
+        raise ValueError("test stop before ORCA")
+
+    monkeypatch.setattr(agent, "_invoke_step", stop_before_execution)
+    agent.advance(run)
+    assert len(captured) == 1
+    assert all(s["parameters"]["environment"] == "gas" for s in captured[0]["plan"]["steps"])
+    assert all(s.parameters["environment"] == "gas" for s in run.plan.steps)
+
+
+@pytest.mark.parametrize(
+    "excluded,capability,requested",
+    [("Gibbs自由能", "single_point", "energy"), ("全局构象搜索", "optimize_geometry", "geometry")],
+)
+def test_exclusion_does_not_swallow_supported_positive_goal(excluded, capability, requested):
+    from bg6022.semantic import semantic_schema
+
+    message = f"不要{excluded}，只对水执行此计算"
+    value = semantic_schema(build_registry(), message=message).model_validate(
+        {
+            "mode": "compute",
+            "subjects": [{"key": "w", "query": "water", "evidence": "水"}],
+            "tasks": [
+                {
+                    "key": "t",
+                    "subject_key": "w",
+                    "capability": capability,
+                    "requested_properties": [requested],
+                }
+            ],
+            "intent_items": [
+                {"kind": "exclude", "evidence": f"不要{excluded}", "requested_property": excluded},
+                {
+                    "kind": "compute",
+                    "evidence": "只对水执行此计算",
+                    "task_keys": ["t"],
+                    "requested_property": requested,
+                },
+            ],
+        }
+    )
+    assert len(value.tasks) == 1 and value.tasks[0].capability == capability
+
+
+@pytest.mark.parametrize(
+    "message", ["沿用这个结构计算单点能", "沿用这个结构，\n在气相条件下计算单点能"]
+)
+def test_subject_history_selection_does_not_need_recency_keywords(message):
+    from bg6022.semantic import semantic_schema
+
+    schema = semantic_schema(
+        build_registry(), message=message, geometry_catalog=[{"alias": "geometry_1"}]
+    )
+    payload = {
+        "mode": "compute",
+        "subjects": [{"key": "w", "history_geometry_ref": "geometry_1", "evidence": "这个结构"}],
+        "tasks": [{"key": "t", "subject_key": "w", "capability": "single_point"}],
+        "intent_items": [{"kind": "compute", "evidence": "计算单点能", "task_keys": ["t"]}],
+    }
+    assert schema.model_validate(payload).subjects[0].history_geometry_ref == "geometry_1"
+    payload["subjects"][0]["history_geometry_ref"] = "invented"
+    with pytest.raises(ValueError):
+        schema.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "intent_quote,query_quote", [("给出它的偶极矩", "偶极矩"), ("偶极矩", "给出它的偶极矩")]
+)
+def test_attached_report_allows_uniquely_nested_evidence(intent_quote, query_quote):
+    from bg6022.planner import IntentItem, RequirementProposal, validate_intent_items
+
+    task = RequirementProposal(
+        key="opt",
+        capability="optimize_geometry",
+        outputs=["optimized_geometry"],
+        report_queries=[{"evidence": query_quote, "search_terms": ["DIPOLE MOMENT"]}],
+    )
+    items = [
+        IntentItem(kind="compute", evidence="优化水", task_keys=["opt"]),
+        IntentItem(
+            kind="report",
+            evidence=intent_quote,
+            task_keys=["opt"],
+            requested_property="dipole_moment",
+        ),
+    ]
+    validate_intent_items(items, "优化水，然后给出它的偶极矩", [task], registry=build_registry())
+    with pytest.raises(ValueError):
+        validate_intent_items(
+            items, "优化水，然后给出它的偶极矩；偶极矩", [task], registry=build_registry()
+        )

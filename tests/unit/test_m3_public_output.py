@@ -157,7 +157,8 @@ def test_verified_initial_geometry_is_delivered_and_reindexed(tmp_path: Path) ->
 
     agent._session["active_run_id"] = run.id
     catalog, bindings = agent._build_geometry_catalog()
-    assert catalog[0]["geometry"]["role"] == "verified initial_geometry"
+    assert catalog[0]["geometry"]["role"] == "initial_geometry"
+    assert catalog[0]["geometry"]["validity"] == "metadata_only"
     assert bindings[catalog[0]["alias"]]["port"] == "geometry"
     verified = agent._verify_history_geometry_binding(bindings[catalog[0]["alias"]])
     assert verified[-1] == "geometry"

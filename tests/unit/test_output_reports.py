@@ -619,3 +619,22 @@ def test_title_and_multiple_candidates_never_claim_final_scientific_value(tmp_pa
     assert "不能据此确定唯一最终科学值" in text
     assert len(reports[0]["evidence"][0]["snippets"]) <= 3
     assert delivery["outputs"] == []
+
+
+def test_report_waiting_fixture_from_b9eced9_restores_without_reclassification():
+    fixture = Path(__file__).parents[1] / "fixtures/output_query_report_acceptance.json"
+    payload = json.loads(fixture.read_text(encoding="utf-8"))
+    assert payload["baseline_commit"] == "b9eced9cb30dc951bdbcdf63390482ad6d416be3"
+    run = Run.model_validate(payload["run"], strict=True)
+    before = run.model_dump(mode="json")
+    reports = read_report_queries(run.request)
+    assert reports[0][1][0]["search_terms"] == ["Total Dipole Moment"]
+    assert run.waiting_for == "confirmation"
+    assert run.request.requirements[0].outputs
+    assert (
+        execution_fingerprint(
+            run.plan, run.resources, run.artifact_index, snapshot=run.accepted_snapshot
+        )
+        == payload["expected_hash"]
+    )
+    assert run.model_dump(mode="json") == before
