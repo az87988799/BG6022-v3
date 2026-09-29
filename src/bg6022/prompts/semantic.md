@@ -8,6 +8,33 @@ user-facing method requests, explicit user parameters, and high-level relations.
 Use only capabilities in `tool_catalog`. Do not select preparation tools; the
 program adds molecule resolution and geometry generation when needed.
 
+Supply `intent_items` for every newly interpreted compute task and attached report.
+Each item has a unique verbatim evidence quote, kind (compute/report/query/explain/
+exclude/unresolved), task_keys from this proposal, and requested_property (or null
+for a task-only operation). Classify meaning in context; a word such as “计算” does
+not itself determine kind. Include excluded goals as exclude, explanations as
+explain, and unimplemented independent calculations as unresolved/unsupported.
+Unresolved positive goals block the remaining computation; do not hide them by
+requesting a default energy. Report items must bind the exact report_queries quote.
+Requested compute properties must be actual outputs of the selected Tool.
+
+“优化水，然后给出它的偶极矩”, “优化水，然后告诉我偶极矩”, “优化水并报告偶极矩”,
+and “优化水，然后计算它的偶极矩” all mean one water optimization plus its dipole
+report when no separate job, method/settings or downstream formal use is requested.
+Use compute evidence="优化水", requested_property="geometry" and report
+evidence="偶极矩", requested_property="dipole_moment", both bound to the Opt task;
+attach report_queries with that quote and DIPOLE MOMENT/Magnitude literal terms.
+If that Tool declares a verified dipole property, request that output instead.
+Raw evidence is never a verified property or a downstream scientific input.
+
+“不要计算 Gibbs 自由能，只算单点能” has an exclude item and a supported SP task.
+“解释为什么计算 Gibbs 需要频率” is qa/explain with no tasks.
+“Show Gibbs from the previously computed output.” is a query of a provided raw
+source, or unavailable if none exists. Past calculation is not new permission.
+“计算 Gibbs，另报告输出中的偶极矩” retains the unsupported independent Gibbs goal;
+the report cannot erase it. Source labels distinguish molecule/method/operation;
+never infer a new binding from a short ref's spelling.
+
 For compute requests:
 - Give every subject a short local key and an input query grounded in this turn or
   recent conversation. `evidence` must quote the user's original wording exactly.
@@ -25,8 +52,8 @@ For compute requests:
 - If a parameter concept could map to more than one Tool parameter, use `clarify`
   instead of choosing one. In particular, a generic "iteration limit" on a
   geometry optimization does not say whether to change geometry or SCF iterations.
-- Express requested values using `energy`, `geometry`, `frequencies`, `distance`,
-  or `angle`. Do not name output ports, fields, checks, or ResultTarget kinds.
+- Express requested values using properties from each Tool's public_outputs.
+  Legacy aliases energy, geometry and frequencies are accepted; there is no fixed property list.
 - Use `compare` for side-by-side results. Use `difference` only when a numeric
   difference is explicitly requested. The program derives outputs and energy
   wiring from Tool contracts.
@@ -62,7 +89,7 @@ Use `qa` for ordinary explanations and questions. Use `unsupported` for
 computational capabilities absent from the registered task catalog.
 
 Never output or copy internal execution details. Do not output canonical method
-profile IDs, Requirement IDs, Step IDs, Artifact IDs, field/port/check names,
+profile IDs, Requirement IDs, Step IDs, Artifact IDs,
 ResultTarget identifiers, execution wiring, ORCA keywords, repair rules,
 success conditions, Result metadata, scientific conclusions, arbitrary paths,
 commands, or source-code changes. Do not make up a calculation result or claim
@@ -85,8 +112,8 @@ Raw output protocol (also used by legacy Intake):
 
 At most three questions across the turn; at most four ordinary literal search terms of 1–80
 characters per question. Unknown titles are searchable; this is not a property whitelist.
-Every evidence is a verbatim nonblank quote from the current user message. Reports must quote
-an explicit output-reading clause, not a new computation requirement. No paths, Artifact IDs,
+Every evidence is a verbatim nonblank quote from the current user message.
+Reports need not contain output/log wording. No paths, Artifact IDs,
 commands, regex options, budgets, or final-occurrence selection. Same-source questions share
 one target with multiple queries. A followup can reuse recent_queries only for an explicit
 repeat/display request with exactly one recent source and question; a new property needs new

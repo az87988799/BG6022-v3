@@ -49,13 +49,16 @@ from bg6022.molecule_identity import (
     validate_resolve_binding,
 )
 from bg6022.orca.profiles import resolve_method_request
-from bg6022.output_contracts import property_evidence_matches
+from bg6022.output_contracts import (
+    PROPERTY_ALIASES,
+    property_evidence_matches,
+    resolve_output_selector,
+)
 from bg6022.output_query import (
     merge_report_constraints,
     normalize_report_queries,
     read_report_queries,
     validate_raw_query_targets,
-    validate_report_scope,
 )
 from bg6022.tools.orca_output import OutputQuerySpec
 from bg6022.tools.registry import ToolRegistry, build_registry, merge_explicit_step_parameters
@@ -72,6 +75,119 @@ QuerySelectionReason = Literal[
 ]
 ElectronicStateField = Literal["charge", "multiplicity"]
 ElectronicStateStatus = Literal["absent", "set", "ambiguous", "invalid"]
+
+
+class IntentItem(BaseModel):
+    """Untrusted, turn-local interpretation; never stored on Request or Run."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    evidence: StrictStr
+    kind: Literal["compute", "report", "query", "explain", "exclude", "unresolved"]
+    task_keys: list[StrictStr] = Field(default_factory=list)
+    requested_property: StrictStr | None = None
+
+
+def validate_intent_items(
+    items, message, tasks, *, registry, query_selection=None, result_catalog=()
+):
+    """Check interpreted goals against exact quotes and actual Tool/source bindings.
+
+    Language meaning belongs to the model. This boundary checks that its proposed
+    execution covers the goals it identified; it never classifies words itself.
+    """
+    by_key = {task.key: task for task in tasks}
+    covered = set()
+    report_evidence = set()
+    affirmative = set()
+    excluded = set()
+    for item in items:
+        if not item.evidence.strip() or message.count(item.evidence) != 1:
+            raise ValueError(
+                "intent evidence must uniquely quote the user's message; use a fuller quote"
+            )
+        if len(set(item.task_keys)) != len(item.task_keys) or set(item.task_keys) - set(by_key):
+            raise ValueError("intent task_keys must identify actual proposal tasks")
+        prop = PROPERTY_ALIASES.get(item.requested_property, item.requested_property)
+        if item.kind == "unresolved" and tasks:
+            raise ValueError("unresolved positive requirement blocks execution")
+        if item.kind == "exclude":
+            if query_selection is not None and any(
+                t.property == prop for t in query_selection.targets
+            ):
+                raise ValueError("excluded query property cannot be selected")
+            excluded.update((key, prop) for key in (item.task_keys or by_key))
+            continue
+        if item.kind in {"compute", "report"}:
+            if not item.task_keys:
+                raise ValueError("compute/report intent requires task bindings")
+            for key in item.task_keys:
+                task = by_key[key]
+                tool = registry.get(task.capability)
+                if item.kind == "compute":
+                    covered.add(key)
+                    if prop is not None:
+                        descriptor = resolve_output_selector(tool, prop)
+                        selectors = (
+                            task.requested_properties
+                            if hasattr(task, "requested_properties")
+                            else task.outputs
+                        )
+                        requested = [
+                            resolve_output_selector(tool, name)["name"] for name in selectors
+                        ]
+                        if descriptor["name"] not in requested:
+                            raise ValueError("compute goal is not covered by requested outputs")
+                        affirmative.add((key, descriptor["property"]))
+                else:
+                    matches = [q for q in task.report_queries if q.evidence == item.evidence]
+                    if prop is None:
+                        raise ValueError("report intent needs a requested property hint")
+                    # Prefer a verified contract when one actually exists. Ambiguity
+                    # remains an error; absence alone permits the raw-text fallback.
+                    possible = [
+                        o
+                        for o in tool.public_outputs()
+                        if o["name"] == prop or o["property"] == prop
+                    ]
+                    if possible:
+                        descriptor = resolve_output_selector(tool, prop)
+                        if hasattr(task, "requested_properties"):
+                            if descriptor["property"] not in task.requested_properties:
+                                task.requested_properties.append(descriptor["property"])
+                        elif descriptor["name"] not in task.outputs:
+                            task.outputs.append(descriptor["name"])
+                        task.report_queries = [q for q in task.report_queries if q not in matches]
+                    else:
+                        if not matches:
+                            raise ValueError("report intent must bind an attached report question")
+                        normalize_report_queries(matches, message, capability=task.capability)
+                        report_evidence.add((key, item.evidence))
+                    affirmative.add((key, prop))
+        elif item.kind == "query":
+            targets = query_selection.targets if query_selection is not None else []
+            pairs = {
+                (entry.get("subject_ref"), entry.get("result", entry).get("property"))
+                for entry in result_catalog
+            }
+            if item.task_keys or not any(
+                t.evidence == item.evidence
+                and (t.subject_ref, t.property) in pairs
+                and (t.property == "orca_output" or t.property == prop)
+                for t in targets
+            ):
+                raise ValueError(
+                    "query intent requires a provided source; it cannot authorize execution"
+                )
+        elif item.kind == "explain" and item.task_keys:
+            raise ValueError("explanation cannot authorize execution tasks")
+    if set(by_key) - covered:
+        raise ValueError("new compute tasks require corresponding intent_items")
+    if any((key, prop) in affirmative or (key, None) in excluded for key, prop in excluded):
+        raise ValueError("excluded and affirmative goals conflict")
+    for task in tasks:
+        for query in task.report_queries:
+            if (task.key, query.evidence) not in report_evidence:
+                raise ValueError("attached report requires corresponding intent_items")
 
 
 class ElectronicStateCandidate(BaseModel):
@@ -252,6 +368,7 @@ class IntakeOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     intent: Intent
+    intent_items: list[IntentItem] = Field(default_factory=list, max_length=32)
     answer: StrictStr | None = None
     requirements: list[RequirementProposal] = Field(default_factory=list)
     subjects: dict[StrictStr, IntakeSubjectProposal] = Field(default_factory=dict)
@@ -823,6 +940,14 @@ def intake_message(
         purpose="intake",
         example={
             "intent": "chemistry_compute",
+            "intent_items": [
+                {
+                    "kind": "compute",
+                    "evidence": "water",
+                    "task_keys": ["opt_water"],
+                    "requested_property": "electronic_energy",
+                }
+            ],
             "subjects": {
                 "subject_1": {
                     "key": "subject_1",
@@ -1069,7 +1194,7 @@ def proposal_to_plan(
                 if target.step_key in requirement_for_key
                 and any(
                     item.requirement_id == requirement_for_key[target.step_key].id
-                    for item in request.requested_results
+                    for item in registry.result_targets_for_request(request)
                 )
                 else None
             ),
@@ -1148,10 +1273,20 @@ def validate_plan_against_request(
     # Chat requests always receive this full coverage check. An empty list is
     # meaningful for operation-free Tools: an operation-based Tool cannot be
     # added without changing the requested operation list.
-    if not request.requirements and (request.source == "chat" or request.operations):
-        if proposed_operations != request.operations:
-            missing = [item for item in request.operations if item not in proposed_operations]
-            extra = [item for item in proposed_operations if item not in request.operations]
+    if not request.requirements and (
+        request.source == "chat" or registry.operations_for_request(request)
+    ):
+        if proposed_operations != registry.operations_for_request(request):
+            missing = [
+                item
+                for item in registry.operations_for_request(request)
+                if item not in proposed_operations
+            ]
+            extra = [
+                item
+                for item in proposed_operations
+                if item not in registry.operations_for_request(request)
+            ]
             if missing:
                 if len(missing) == 1:
                     label = {"SP": "SP", "Opt": "Opt", "Freq": "frequency"}[missing[0]]
@@ -1184,7 +1319,7 @@ def validate_plan_against_request(
                             (
                                 operation
                                 for operation in requested_operations
-                                if operation in request.operations
+                                if operation in registry.operations_for_request(request)
                             ),
                             requested_operations[0],
                         )
@@ -1266,7 +1401,7 @@ def validate_plan_against_request(
                 )
 
     plan_targets = plan.requested_results
-    for request_target in request.requested_results:
+    for request_target in registry.result_targets_for_request(request):
         matches = [
             target
             for target in plan_targets
@@ -1374,7 +1509,9 @@ def _validate_requested_check_prerequisites(
     """Enforce Tool-declared check gates when a Request also asks for that check."""
 
     requested_checks = {
-        target.check for target in request.requested_results if target.check is not None
+        target.check
+        for target in registry.result_targets_for_request(request)
+        if target.check is not None
     }
     if not requested_checks:
         return
@@ -2214,7 +2351,9 @@ def _request_target_matches(
     elif request_target.port is not None:
         request_kind, request_name = "port", request_target.port
     else:
-        canonical = registry.resolve_result_target(request_target.field or "", request.operations)
+        canonical = registry.resolve_result_target(
+            request_target.field or "", registry.operations_for_request(request)
+        )
         request_kind, request_name = _target_identity(canonical)
     plan_kind = (
         "check"
@@ -2293,7 +2432,7 @@ def _validate_required_geometry_contract(request: Request, registry: ToolRegistr
                 raise ValueError("geometry binding consumer requirement is not requested")
             consumer = registry.get(consumer_requirement.capability)
         elif binding.consumer_operation is not None:
-            if binding.consumer_operation not in request.operations:
+            if binding.consumer_operation not in registry.operations_for_request(request):
                 raise ValueError(
                     f"geometry binding consumer {binding.consumer_operation!r} "
                     "is not a requested operation"
@@ -2312,7 +2451,8 @@ def _validate_required_geometry_contract(request: Request, registry: ToolRegistr
             if not consumer.available:
                 raise ValueError(f"geometry binding consumer Tool {consumer_name!r} is unavailable")
             if consumer not in registry.tools_for_request(
-                request.operations, request.requested_results
+                registry.operations_for_request(request),
+                registry.result_targets_for_request(request),
             ):
                 raise ValueError(
                     f"geometry binding consumer Tool {consumer_name!r} is not involved "
@@ -2348,7 +2488,7 @@ def _validate_required_geometry_contract(request: Request, registry: ToolRegistr
                     "an initial-geometry binding must use source_port='initial_geometry'"
                 )
             continue
-        if binding.source_operation not in request.operations:
+        if binding.source_operation not in registry.operations_for_request(request):
             raise ValueError(
                 f"geometry binding source {binding.source_operation!r} is not a requested operation"
             )
@@ -2408,7 +2548,7 @@ def _require_composite_geometry_sources(request: Request, registry: ToolRegistry
                 f"请明确 {labels} 使用优化后的结构还是初始结构；我没有让 Planner 自行选择几何来源。"
             )
         return
-    operations = set(request.operations)
+    operations = set(registry.operations_for_request(request))
     if "Opt" not in operations:
         return
     bindings = _required_geometry_bindings(request)
@@ -2417,7 +2557,9 @@ def _require_composite_geometry_sources(request: Request, registry: ToolRegistry
     }
     bound_tools = {item.consumer_tool for item in bindings if item.consumer_tool is not None}
     consumers: list[tuple[str, str]] = []
-    for tool in registry.tools_for_request(request.operations, request.requested_results):
+    for tool in registry.tools_for_request(
+        registry.operations_for_request(request), registry.result_targets_for_request(request)
+    ):
         if "geometry" not in tool.input_ports:
             continue
         if "Opt" in tool.operations:
@@ -3045,7 +3187,15 @@ def _intake_schema(
             )
         if len(reports) > 3:
             raise ValueError("at most three report questions per Request")
-        validate_report_scope(message or "", reports)
+        if message is not None:
+            validate_intent_items(
+                value.intent_items,
+                message,
+                value.requirements,
+                registry=registry,
+                query_selection=value.query_selection,
+                result_catalog=result_catalog or [],
+            )
         if value.parameter_patch and value.parameter_target_requirement_key is None:
             pending_requirements = [
                 item
@@ -3355,6 +3505,26 @@ def _validate_query_selection(
         return output
     if selection is None:
         raise ValueError("context_query must contain query_selection")
+    if output.intent_items:
+        try:
+            validate_intent_items(
+                output.intent_items,
+                message,
+                [],
+                registry=None,
+                query_selection=selection,
+                result_catalog=result_catalog or [],
+            )
+        except ValueError:
+            return output.model_copy(
+                update={
+                    "query_selection": QuerySelection(
+                        status="clarify",
+                        reason="invalid_binding",
+                        clarification="所选来源与识别的查询目标不一致，请明确来源和性质。",
+                    )
+                }
+            )
     candidate_set = set(candidate_refs)
     unknown = sorted({target.subject_ref for target in selection.targets} - candidate_set)
     if unknown:
@@ -3405,32 +3575,12 @@ def _validate_query_selection(
         )
     if selection.status == "selected":
         for target in selection.targets:
-            if any(
-                item.get("access") == "raw_output"
-                and item.get("subject_ref") == target.subject_ref
-                and item.get("result", {}).get("property") == target.property
-                for item in result_catalog or []
-            ):
-                continue
-            if target.reference_mode == "followup":
-                followup = (
-                    target.subject_ref,
-                    target.property,
-                ) in recent_pairs and _followup_reference_is_safe(
-                    target,
-                    message,
-                    result_catalog,
-                    capability_catalog=capability_catalog,
-                )
-                if not followup:
-                    invalid_evidence = True
-                    break
-                continue
-            if not _query_property_evidence_matches(
-                target.property,
-                target.evidence,
-                message,
-                metadata=_query_property_metadata(target.property, result_catalog),
+            if not target.evidence.strip() or message.count(target.evidence) != 1:
+                invalid_evidence = True
+                break
+            if target.reference_mode == "followup" and (
+                (target.subject_ref, target.property) not in recent_pairs
+                or len({ref for ref, _ in recent_pairs}) != 1
             ):
                 invalid_evidence = True
                 break

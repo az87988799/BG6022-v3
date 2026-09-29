@@ -52,6 +52,7 @@ class _SemanticClient:
         return schema.model_validate(
             {
                 "mode": "compute",
+                "intent_items": [{"kind": "compute", "evidence": "water", "task_keys": ["t1"]}],
                 "subjects": [
                     {
                         "key": "subject_1",

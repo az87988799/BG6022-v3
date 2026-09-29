@@ -73,6 +73,35 @@ class ToolRegistry:
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self._tools))
 
+    def operations_for_request(self, request: Request) -> list[str]:
+        return [
+            operation
+            for requirement in request.requirements
+            for operation in self.get(requirement.capability).operations
+        ]
+
+    def result_targets_for_request(self, request: Request) -> list[ResultTarget]:
+        """Project using this runtime directory, preserving legacy target ordering."""
+        counts: dict[str, int] = {}
+        for requirement in request.requirements:
+            counts[requirement.capability] = counts.get(requirement.capability, 0) + 1
+        targets: list[ResultTarget] = []
+        for requirement in request.requirements:
+            tool = self.get(requirement.capability)
+            for name in requirement.outputs:
+                descriptor = next(
+                    (item for item in tool.public_outputs() if item["name"] == name), None
+                )
+                if descriptor is None:
+                    raise ValueError(f"unknown requested output {tool.name}.{name}")
+                identity = {descriptor["kind"]: name}
+                if counts[requirement.capability] > 1:
+                    identity["requirement_id"] = requirement.id
+                target = ResultTarget(**identity)
+                if target not in targets:
+                    targets.append(target)
+        return sorted(targets, key=lambda target: target.port != "geometry")
+
     def describe(self) -> list[dict[str, Any]]:
         return [self._tools[name].description_json() for name in self.names()]
 

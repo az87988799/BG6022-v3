@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import time
 from pathlib import Path
 from threading import Event
@@ -39,15 +38,6 @@ def normalize_report_queries(queries, message, *, capability=None):
         query = OutputQuerySpec.model_validate(value, strict=True)
         if query.evidence not in message:
             raise ValueError("report evidence must quote the user's message")
-        if not re.search(r"输出|原文|日志|文件|stdout|output|log\b", query.evidence, re.I):
-            raise ValueError("report evidence must explicitly request output text")
-        if re.search(
-            r"(?:计算|求取|算出|calculate|compute|determine)\s*.{0,12}"
-            r"(?:Gibbs|自由能|偶极矩|dipole)",
-            query.evidence,
-            re.I,
-        ):
-            raise ValueError("a calculation requirement cannot be demoted to a text report")
         normalized.append(query.model_dump(mode="json"))
     return normalized
 
@@ -74,19 +64,7 @@ def read_report_queries(request):
             result.append((requirement, queries))
     if sum(len(queries) for _, queries in result) > MAX_QUERIES:
         raise ValueError("a Request may contain at most three output report questions")
-    validate_report_scope(request.original_text, [q for _, queries in result for q in queries])
     return result
-
-
-def validate_report_scope(message, queries):
-    """A report clause cannot erase a separate unsupported computation goal."""
-    if not queries:
-        return
-    remaining = message
-    for query in queries:
-        remaining = remaining.replace(query["evidence"], "")
-    if re.search(r"Gibbs|自由能", remaining, re.I):
-        raise ValueError("Gibbs calculation needs an implemented scientific contract, not a report")
 
 
 def validate_raw_query_targets(targets, message, catalog):
@@ -109,14 +87,9 @@ def validate_raw_query_targets(targets, message, catalog):
         if target.get("reference_mode", "explicit") == "followup":
             recent = item.get("recent_queries", [])
             recent_sources = [x for x in catalog if x.get("recent_queries")]
-            repeat = re.fullmatch(
-                r"\s*(?:再(?:显示|展示|说|给我看)(?:一遍|一次)?(?:刚才的?|那个|原文|输出)?|"
-                r"刚才那个|repeat(?: that)?|show (?:it|that) again)[。！!?？\s]*",
-                message,
-                re.I,
-            )
             if (
-                not repeat
+                not target.get("evidence", "").strip()
+                or message.count(target["evidence"]) != 1
                 or len(recent_sources) != 1
                 or len(recent) != 1
                 or queries != recent

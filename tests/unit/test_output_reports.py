@@ -378,6 +378,7 @@ def test_followup_reuses_only_one_unchanged_question(tmp_path):
     agent.handle_message("偶极矩")
     catalog = agent._build_query_catalog()
     target = selected(catalog, followup=True)["targets"]
+    target[0]["evidence"] = "再显示一遍"
     validate_raw_query_targets(target, "再显示一遍", catalog)
     with pytest.raises(ValueError):
         validate_raw_query_targets(target, "那Mayer键级呢", catalog)
@@ -395,8 +396,6 @@ def test_followup_reuses_only_one_unchanged_question(tmp_path):
     "message, reports",
     [
         ("Optimize water", [query(evidence="报告输出中的偶极矩")]),
-        ("Optimize water, 计算Gibbs并输出", [query("GIBBS", "计算Gibbs并输出")]),
-        ("Optimize water, 给出Gibbs", [query("GIBBS", "给出Gibbs")]),
     ],
 )
 def test_fabricated_or_demoted_report_requirements_rejected(message, reports):
@@ -422,6 +421,10 @@ def test_history_gibbs_routes_but_new_gibbs_remains_unsupported(tmp_path):
 
         def complete_json(self, messages, schema, **kwargs):
             self.calls += 1
+            if self.calls > 1:
+                return schema.model_validate(
+                    {"mode": "unsupported", "unsupported_requirements": ["Gibbs free energy"]}
+                )
             return schema.model_validate(
                 {
                     "mode": "context_query",
@@ -439,13 +442,22 @@ def test_history_gibbs_routes_but_new_gibbs_remains_unsupported(tmp_path):
         client, "计算水的 Gibbs 自由能", registry=agent.registry, result_catalog=catalog
     )
     assert value.mode == "unsupported"
-    assert client.calls == 1
+    assert client.calls == 2
 
 
 def test_legacy_intake_keeps_report_requirement(tmp_path):
     payload = IntakeOutput.model_validate(
         {
             "intent": "chemistry_compute",
+            "intent_items": [
+                {"kind": "compute", "evidence": "Optimize water", "task_keys": ["opt"]},
+                {
+                    "kind": "report",
+                    "evidence": "报告输出中的偶极矩",
+                    "task_keys": ["opt"],
+                    "requested_property": "dipole_moment",
+                },
+            ],
             "subjects": {
                 "water": {
                     "key": "water",

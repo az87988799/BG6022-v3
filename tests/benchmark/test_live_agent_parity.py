@@ -46,6 +46,13 @@ def test_live_llm_uses_real_agent_and_never_invokes_tools(monkeypatch, tmp_path:
         if purpose == "intake":
             return {
                 "intent": "chemistry_compute",
+                "intent_items": [
+                    {
+                        "kind": "compute",
+                        "evidence": "\u4f18\u5316\u6c34\u5206\u5b50",
+                        "task_keys": ["opt_water"],
+                    }
+                ],
                 "subjects": {
                     "water": {"key": "water", "inline_xyz": _WATER_XYZ},
                 },
@@ -128,6 +135,7 @@ def test_fresh_session_separates_results_from_capabilities_and_blocks_unsupporte
             captured.append(context)
             return {
                 "intent": "chemistry_compute",
+                "intent_items": [],
                 "unresolved_requirements": [unresolved],
             }
         raise AssertionError("an unsupported requirement must not reach the Planner")
@@ -158,6 +166,13 @@ def test_live_agent_retries_a_locally_invalid_planner_proposal(monkeypatch, tmp_
         if purpose == "intake":
             return {
                 "intent": "chemistry_compute",
+                "intent_items": [
+                    {
+                        "kind": "compute",
+                        "evidence": "\u4f18\u5316\u6c34\u5206\u5b50",
+                        "task_keys": ["opt_water"],
+                    }
+                ],
                 "subjects": {"water": {"key": "water", "inline_xyz": _WATER_XYZ}},
                 "requirements": [
                     {

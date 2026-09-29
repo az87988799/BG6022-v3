@@ -227,10 +227,12 @@ def test_compact_semantic_catalogs_hide_internal_execution_identifiers():
     assert "method_profile" not in serialized
 
 
-def test_gibbs_calculation_is_stopped_as_known_unsupported_without_llm_call():
+def test_model_classifies_unimplemented_gibbs_as_unsupported():
     class NoCallClient:
-        def complete_json(self, *_args, **_kwargs):
-            raise AssertionError("known unsupported request should be stopped in code")
+        def complete_json(self, messages, schema, **kwargs):
+            return schema.model_validate(
+                {"mode": "unsupported", "unsupported_requirements": ["Gibbs free energy"]}
+            )
 
     proposal = semantic_message(
         NoCallClient(),
@@ -242,10 +244,12 @@ def test_gibbs_calculation_is_stopped_as_known_unsupported_without_llm_call():
     assert proposal.unsupported_requirements == ["Gibbs free energy"]
 
 
-def test_global_conformer_search_is_stopped_as_known_unsupported_without_llm_call():
+def test_model_classifies_unimplemented_global_search_as_unsupported():
     class NoCallClient:
-        def complete_json(self, *_args, **_kwargs):
-            raise AssertionError("known unsupported request should be stopped in code")
+        def complete_json(self, messages, schema, **kwargs):
+            return schema.model_validate(
+                {"mode": "unsupported", "unsupported_requirements": ["global conformer search"]}
+            )
 
     proposal = semantic_message(
         NoCallClient(),

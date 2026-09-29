@@ -425,6 +425,13 @@ def test_query_property_must_match_the_user_cited_property_phrase() -> None:
         def complete_json(self, *_args, **_kwargs):
             return {
                 "intent": "context_query",
+                "intent_items": [
+                    {
+                        "kind": "query",
+                        "evidence": "零点能",
+                        "requested_property": "zero_point_energy",
+                    }
+                ],
                 "query_selection": {
                     "status": "selected",
                     "targets": [
@@ -491,6 +498,13 @@ def test_generic_energy_phrase_cannot_stand_in_for_free_energy() -> None:
         def complete_json(self, *_args, **_kwargs):
             return {
                 "intent": "context_query",
+                "intent_items": [
+                    {
+                        "kind": "query",
+                        "evidence": "energy",
+                        "requested_property": "gibbs_free_energy",
+                    }
+                ],
                 "query_selection": {
                     "status": "selected",
                     "targets": [
@@ -752,6 +766,13 @@ def test_llm_planner_failure_names_stage_without_creating_a_run(tmp_path: Path) 
                 return schema.model_validate(
                     {
                         "intent": "chemistry_compute",
+                        "intent_items": [
+                            {
+                                "kind": "compute",
+                                "evidence": "优化水分子，电荷为0，多重度为1",
+                                "task_keys": ["requirement_1"],
+                            }
+                        ],
                         "operations": ["Opt"],
                         "molecule_query": "water",
                         "molecule_input_kind": "name",

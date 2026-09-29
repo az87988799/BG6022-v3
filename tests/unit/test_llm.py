@@ -590,6 +590,7 @@ def test_intake_corrects_non_normalized_name_lookup_with_one_structured_retry() 
     registry = build_registry()
     rejected = {
         "intent": "chemistry_compute",
+        "intent_items": [{"kind": "compute", "evidence": "优化水", "task_keys": ["requirement_1"]}],
         "operations": ["Opt"],
         "molecule_query": "水",
         "molecule_input_kind": "name",

@@ -326,8 +326,14 @@ def test_followup_focus_accepts_implicit_question_but_rejects_new_request() -> N
     assert implicit.query_selection.status == "selected"
 
     for message in ("不要刚才的内容，我要自由能", "把刚才的结果改成乙醇的XYZ给我"):
+        from bg6022.planner import IntentItem
+
+        excluded = output("刚才的内容")
+        excluded.intent_items = [
+            IntentItem(kind="exclude", evidence=message, requested_property="molecular_geometry")
+        ]
         rejected = _validate_query_selection(
-            output("刚才的内容"),
+            excluded,
             ("t1",),
             message=message,
             result_catalog=catalog,

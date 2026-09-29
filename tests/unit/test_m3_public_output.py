@@ -95,7 +95,7 @@ def test_verified_initial_geometry_is_delivered_and_reindexed(tmp_path: Path) ->
     request = Request(
         id="request_geometry_delivery",
         description="return the initial XYZ file",
-        requested_results=[ResultTarget(port="geometry")],
+        requirements=[{"id": "req", "capability": tool.name, "outputs": ["geometry"]}],
         source="chat",
     )
     step = Step(id="geometry", tool=tool.name)

@@ -38,6 +38,13 @@ def test_llm_schema_diagnostics_and_structured_outputs_reach_report(
             )
         return {
             "intent": "chemistry_compute",
+            "intent_items": [
+                {
+                    "kind": "compute",
+                    "evidence": "\u4f18\u5316\u6c34\u5206\u5b50",
+                    "task_keys": ["opt_water"],
+                }
+            ],
             "subjects": {"water": {"key": "water", "inline_xyz": _WATER_XYZ}},
             "requirements": [
                 {

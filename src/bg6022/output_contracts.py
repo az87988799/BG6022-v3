@@ -14,6 +14,28 @@ from typing import Any
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
 
+PROPERTY_ALIASES = {
+    "energy": "electronic_energy",
+    "geometry": "molecular_geometry",
+    "frequencies": "frequency",
+}
+
+
+def resolve_output_selector(tool: Any, selector: str, *, kind: str | None = None) -> dict[str, Any]:
+    """Resolve a field name or semantic property without directory-order guesses."""
+    property_name = PROPERTY_ALIASES.get(selector, selector)
+    matches = [
+        item
+        for item in tool.public_outputs()
+        if (kind is None or item["kind"] == kind)
+        and (item["name"] == selector or item["property"] == property_name)
+    ]
+    if not matches:
+        raise ValueError(f"{tool.name} does not provide requested property {selector!r}")
+    if len(matches) != 1:
+        raise ValueError(f"ambiguous output selector {selector!r} on {tool.name}")
+    return matches[0]
+
 
 def public_source_context(source: Mapping[str, Any]) -> dict[str, Any]:
     """Whitelist bounded, program-derived labels; never expose paths or values."""

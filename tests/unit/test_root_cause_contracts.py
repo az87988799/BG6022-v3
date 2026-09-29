@@ -190,6 +190,13 @@ def test_agent_preserves_trailing_newline_in_inline_xyz(tmp_path: Path) -> None:
     xyz = "3\nwater\nO 0 0 0\nH 0 1 0\nH 1 0 0\n"
     intake_body = {
         "intent": "chemistry_compute",
+        "intent_items": [
+            {
+                "kind": "compute",
+                "evidence": "run SP on this geometry\n\n",
+                "task_keys": ["requirement_1"],
+            }
+        ],
         "operations": ["SP"],
         "requested_results": ["sp_electronic_energy"],
         "molecule_query": None,
@@ -408,6 +415,9 @@ def test_intake_corrects_parameter_name_once_using_real_tool_catalog() -> None:
     registry = build_registry()
     base = {
         "intent": "chemistry_compute",
+        "intent_items": [
+            {"kind": "compute", "evidence": "几何优化迭代上限为100", "task_keys": ["requirement_1"]}
+        ],
         "operations": ["Opt"],
         "molecule_query": None,
         "molecule_input_kind": None,
@@ -525,6 +535,13 @@ def test_intake_preserves_inline_xyz_bytes_without_sending_coordinates_for_reaso
     )
     returned = {
         "intent": "chemistry_compute",
+        "intent_items": [
+            {
+                "kind": "compute",
+                "evidence": message,
+                "task_keys": ["requirement_1", "requirement_2", "requirement_3"],
+            }
+        ],
         "operations": ["Opt", "Freq", "SP"],
         "molecule_query": "ethanol",
         "molecule_input_kind": "name",
@@ -674,6 +691,13 @@ def test_intake_corrects_free_text_sp_energy_before_request_creation() -> None:
     registry = build_registry()
     base = {
         "intent": "chemistry_compute",
+        "intent_items": [
+            {
+                "kind": "compute",
+                "evidence": "对水分子做 SP 并返回 SP electronic energy",
+                "task_keys": ["requirement_1"],
+            }
+        ],
         "operations": ["SP"],
         "molecule_query": "water",
         "molecule_input_kind": "name",
@@ -731,6 +755,13 @@ def test_intake_registry_binding_error_uses_bounded_structured_correction() -> N
     registry = build_registry()
     base = {
         "intent": "chemistry_compute",
+        "intent_items": [
+            {
+                "kind": "compute",
+                "evidence": "优化水分子后在优化结构上做 SP",
+                "task_keys": ["requirement_1", "requirement_2"],
+            }
+        ],
         "operations": ["Opt", "SP"],
         "molecule_query": "water",
         "molecule_input_kind": "name",
@@ -818,6 +849,13 @@ def test_intake_preserves_explicit_initial_geometry_binding_from_user_semantics(
     registry = build_registry()
     body = {
         "intent": "chemistry_compute",
+        "intent_items": [
+            {
+                "kind": "compute",
+                "evidence": "优化水分子，然后对原始结构做 SP",
+                "task_keys": ["requirement_1", "requirement_2"],
+            }
+        ],
         "operations": ["Opt", "SP"],
         "molecule_query": "water",
         "molecule_input_kind": "name",

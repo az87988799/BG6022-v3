@@ -121,7 +121,7 @@ def _is_waiting_for_identity(run: Run | None) -> bool:
     )
 
 
-def _pending_intake_context(run: Run | None) -> dict[str, Any]:
+def _pending_intake_context(run: Run | None, registry: ToolRegistry) -> dict[str, Any]:
     if run is None or run.status != "waiting":
         return {}
     waiting_step = next(
@@ -157,7 +157,7 @@ def _pending_intake_context(run: Run | None) -> dict[str, Any]:
         "pending_subject_id": subject_id,
         "raw_query": str(identity.get("raw_query") or "")[:128],
         "lookup_query": str(identity.get("lookup_query") or "")[:128],
-        "operations": list(run.request.operations),
+        "operations": list(registry.operations_for_request(run.request)),
         "requirements": [
             {
                 "requirement_id": item.id,
@@ -169,7 +169,7 @@ def _pending_intake_context(run: Run | None) -> dict[str, Any]:
         ],
         "requested_results": [
             target.port or target.field or target.check
-            for target in run.request.requested_results[:24]
+            for target in registry.result_targets_for_request(run.request)[:24]
         ],
         "candidates": public_candidates,
     }
@@ -413,7 +413,7 @@ class Agent:
                     geometry_catalog=geometry_catalog,
                     capability_catalog=capability_catalog,
                     registry=self.registry,
-                    pending_context=_pending_intake_context(current),
+                    pending_context=_pending_intake_context(current, self.registry),
                     cancel=request_cancel,
                 )
                 self._persist_llm_diagnostics(llm_call_cursor, stage="intake")
@@ -500,7 +500,7 @@ class Agent:
                                 geometry_catalog=geometry_catalog,
                                 capability_catalog=capability_catalog,
                                 registry=self.registry,
-                                pending_context=_pending_intake_context(current),
+                                pending_context=_pending_intake_context(current, self.registry),
                                 validation_feedback=validation_feedback,
                                 cancel=request_cancel,
                             )
@@ -2206,9 +2206,10 @@ class Agent:
         return {
             "request": {
                 "description": run.request.description,
-                "operations": list(run.request.operations),
+                "operations": list(self.registry.operations_for_request(run.request)),
                 "requested_results": [
-                    target.model_dump(mode="json") for target in run.request.requested_results
+                    target.model_dump(mode="json")
+                    for target in self.registry.result_targets_for_request(run.request)
                 ],
             },
             "operation": (self.registry.get(step.tool).operations or ["Tool"])[0],
@@ -4177,7 +4178,7 @@ class Agent:
             name = target.port or target.field
             if name is None:
                 continue
-            requested_operations = set(run.request.operations)
+            requested_operations = set(self.registry.operations_for_request(run.request))
             if (
                 name == "energy"
                 and "SP" in requested_operations
@@ -4230,7 +4231,7 @@ class Agent:
             if label not in labels:
                 labels.append(label)
 
-        for operation in run.request.operations:
+        for operation in self.registry.operations_for_request(run.request):
             expected_steps = [
                 step
                 for step in run.plan.steps
@@ -4740,9 +4741,6 @@ def _is_parameter_continuation(
         or compatibility_updates.get("requested_results")
     ):
         return False
-    if intake.operations and run.request.operations:
-        if intake.operations != run.request.operations:
-            return False
     if (
         intake.parameter_target_requirement_id is not None
         and intake.parameter_target_requirement_id
@@ -5553,7 +5551,7 @@ def _normalized_run_target(
     name = target.port or target.field
     if name is None:
         return None, None
-    operations = set(run.request.operations)
+    operations = set(registry.operations_for_request(run.request))
     if name == "energy":
         if operations == {"SP"}:
             return "field", "sp_electronic_energy"
@@ -5586,7 +5584,7 @@ def _normalized_run_target(
 
 
 def _requested_results_satisfied(data_root: str, run: Run, registry: ToolRegistry) -> bool:
-    for operation in run.request.operations:
+    for operation in registry.operations_for_request(run.request):
         required_steps = [
             step for step in run.plan.steps if operation in registry.get(step.tool).operations
         ]

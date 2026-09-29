@@ -331,6 +331,9 @@ class ParameterContinuationClient:
                 value = {
                     "intent": "chemistry_compute",
                     "operation": "Opt",
+                    "intent_items": [
+                        {"kind": "compute", "evidence": message, "task_keys": ["requirement_1"]}
+                    ],
                     "molecule_query": "O",
                     "molecule_input_kind": "smiles",
                     "explicit_parameters": {"charge": 0, "multiplicity": 1},

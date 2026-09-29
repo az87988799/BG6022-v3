@@ -397,6 +397,13 @@ def test_production_intake_path_normalizes_empty_structure_for_parameter_continu
     )
     initial_intake: dict[str, Any] = {
         "intent": "chemistry_compute",
+        "intent_items": [
+            {
+                "kind": "compute",
+                "evidence": initial_message,
+                "task_keys": ["requirement_1", "requirement_2"],
+            }
+        ],
         "operations": ["Opt", "SP"],
         "molecule_query": None,
         "molecule_input_kind": None,
@@ -571,6 +578,9 @@ def test_unresolved_goal_blocks_pending_parameter_update_before_planning(
     initial_message = "用这个水分子结构做 Opt，几何优化步数为1，电荷为0，多重度为1。"
     initial_intake = {
         "intent": "chemistry_compute",
+        "intent_items": [
+            {"kind": "compute", "evidence": initial_message, "task_keys": ["requirement_1"]}
+        ],
         "operations": ["Opt"],
         "structure_input": {"xyz_text": WATER_XYZ},
         "explicit_parameters": {"geom_maxiter": 1},

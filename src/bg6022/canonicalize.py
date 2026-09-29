@@ -9,6 +9,7 @@ from typing import Any
 from bg6022.intake_utils import extract_single_inline_xyz, mentions_computation
 from bg6022.models import Request
 from bg6022.orca.profiles import resolve_method_request
+from bg6022.output_contracts import PROPERTY_ALIASES, resolve_output_selector
 from bg6022.planner import (
     AnswerGoalProposal,
     IntakeOutput,
@@ -26,13 +27,6 @@ from bg6022.semantic import (
 )
 from bg6022.tools.registry import ToolRegistry
 
-_SEMANTIC_PROPERTY = {
-    "energy": "electronic_energy",
-    "geometry": "molecular_geometry",
-    "frequencies": "frequency",
-    "distance": "distance",
-    "angle": "angle",
-}
 _ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 
 
@@ -128,7 +122,9 @@ def semantic_to_intake(
         }
         for requested_property in task.requested_properties:
             outputs_by_task[task.key].append(
-                _output_for_property(tool, _SEMANTIC_PROPERTY[requested_property])
+                _output_for_property(
+                    tool, PROPERTY_ALIASES.get(requested_property, requested_property)
+                )
             )
 
     consumed: set[str] = set()
@@ -144,7 +140,7 @@ def semantic_to_intake(
         elif isinstance(relation, CompareRelation):
             common_output = _common_output(
                 relation.tasks,
-                _SEMANTIC_PROPERTY[relation.property],
+                PROPERTY_ALIASES.get(relation.property, relation.property),
                 task_by_key,
                 registry,
             )
@@ -163,7 +159,7 @@ def semantic_to_intake(
             consumed.update(relation.tasks)
             energy_output = _common_output(
                 relation.tasks,
-                _SEMANTIC_PROPERTY[relation.property],
+                PROPERTY_ALIASES.get(relation.property, relation.property),
                 task_by_key,
                 registry,
             )
@@ -191,6 +187,7 @@ def semantic_to_intake(
     ]
     return IntakeOutput(
         intent="chemistry_compute",
+        intent_items=semantic.intent_items,
         requirements=requirements,
         subjects=subject_proposals,
         answer_goals=answer_goals,
@@ -263,15 +260,7 @@ def canonicalize_modification(
 
 
 def _output_for_property(tool: Any, property_name: str) -> str:
-    matches = [
-        str(item["name"]) for item in tool.public_outputs() if item["property"] == property_name
-    ]
-    if len(matches) != 1:
-        raise ValueError(
-            "requested property is not uniquely derivable from the Tool contract: "
-            f"{tool.name}.{property_name} -> {sorted(matches)}"
-        )
-    return matches[0]
+    return str(resolve_output_selector(tool, property_name)["name"])
 
 
 def _common_output(

@@ -41,6 +41,13 @@ class FakePlanner:
             return schema.model_validate(
                 {
                     "intent": "chemistry_compute",
+                    "intent_items": [
+                        {
+                            "kind": "compute",
+                            "evidence": json.loads(_messages[-1]["content"])["message"],
+                            "task_keys": ["requirement_1"],
+                        }
+                    ],
                     "operation": "Opt",
                     "molecule_query": "O",
                     "molecule_input_kind": "smiles",
@@ -153,6 +160,9 @@ def test_invalid_parameter_intake_does_not_create_a_run(tmp_path: Path) -> None:
                 "molecule_query": "water",
                 "molecule_input_kind": "name",
                 "molecule_name_evidence": "水",
+                "intent_items": [
+                    {"kind": "compute", "evidence": "优化水", "task_keys": ["requirement_1"]}
+                ],
                 "explicit_parameters": {"multiplicity": 1.5},
             }
 
@@ -173,7 +183,7 @@ def test_ambiguous_parameter_cannot_mutate_a_waiting_request(tmp_path: Path) -> 
         def complete_json(self, *_args, **_kwargs):
             return {
                 "intent": "chemistry_compute",
-                "operation": "Opt",
+                "operations": [],
                 "explicit_parameters": {"multiplicity": 3},
             }
 

@@ -18,9 +18,16 @@ from pydantic import (
 
 from bg6022.intake_utils import extract_single_inline_xyz, mentions_computation
 from bg6022.llm import LlmClient
-from bg6022.output_contracts import public_source_context
+from bg6022.output_contracts import public_source_context, resolve_output_selector
 from bg6022.output_query import normalize_report_queries, validate_raw_query_targets
-from bg6022.planner import QuerySelection, QueryTarget, _bounded_context, load_prompt
+from bg6022.planner import (
+    IntentItem,
+    QuerySelection,
+    QueryTarget,
+    _bounded_context,
+    load_prompt,
+    validate_intent_items,
+)
 from bg6022.tools.orca_output import OutputQuerySpec
 from bg6022.tools.registry import ToolRegistry
 
@@ -32,7 +39,7 @@ SemanticMode = Literal[
     "clarify",
     "unsupported",
 ]
-SemanticProperty = Literal["energy", "geometry", "frequencies", "distance", "angle"]
+SemanticProperty = StrictStr
 
 _FORBIDDEN_PARAMETER_KEYS = {
     "subject_id",
@@ -42,13 +49,7 @@ _FORBIDDEN_PARAMETER_KEYS = {
     "method_profile",
 }
 _PROGRAM_DERIVED_CAPABILITIES = frozenset({"same_geometry_method_energy_difference"})
-_PROPERTY_NAMES = {
-    "energy": "electronic_energy",
-    "geometry": "molecular_geometry",
-    "frequencies": "frequency",
-    "distance": "distance",
-    "angle": "angle",
-}
+
 _HAN_NAME = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 
 
@@ -192,6 +193,7 @@ class TaskModification(SemanticModel):
 
 class SemanticProposal(SemanticModel):
     mode: SemanticMode
+    intent_items: list[IntentItem] = Field(default_factory=list, max_length=32)
     subjects: list[SemanticSubject] = Field(default_factory=list)
     tasks: list[SemanticTask] = Field(default_factory=list)
     relations: list[SemanticRelation] = Field(default_factory=list)
@@ -270,6 +272,7 @@ def compact_tool_catalog(registry: ToolRegistry) -> list[dict[str, Any]]:
                 ],
                 "input_types": sorted(set(tool.input_ports.values())),
                 "default_outputs": list(tool.default_outputs),
+                "public_outputs": tool.public_outputs(),
             }
         )
     return result
@@ -345,6 +348,7 @@ def semantic_schema(
     *,
     result_catalog: list[Mapping[str, Any]] | None = None,
     pending_tasks: list[Mapping[str, Any]] | None = None,
+    message: str | None = None,
 ) -> type[BaseModel]:
     """Create a strict response type whose task names match current Tools."""
 
@@ -419,11 +423,16 @@ def semantic_schema(
                 if "method_profile" not in tool.request_parameters:
                     raise ValueError(f"{tool.name} does not accept methods")
             for requested_property in task.requested_properties:
-                wanted = _PROPERTY_NAMES[requested_property]
-                if not any(item["property"] == wanted for item in tool.public_outputs()):
-                    raise ValueError(
-                        f"{tool.name} does not provide requested property {requested_property!r}"
-                    )
+                resolve_output_selector(tool, requested_property)
+        if message is not None:
+            validate_intent_items(
+                value.intent_items,
+                message,
+                value.tasks,
+                registry=registry,
+                query_selection=value.query_selection,
+                result_catalog=result_catalog or [],
+            )
         if value.modification is not None:
             pending = pending_by_ref.get(value.modification.target_task_ref)
             if pending is None:
@@ -477,12 +486,6 @@ def semantic_message(
 ) -> SemanticProposal:
     if not message.strip():
         raise ValueError("message must not be empty")
-    unsupported_requirement = _known_unsupported_requirement(message)
-    if unsupported_requirement is not None and not _output_reading_context(message):
-        return SemanticProposal(
-            mode="unsupported",
-            unsupported_requirements=[unsupported_requirement],
-        )
     inline_xyz = extract_single_inline_xyz(message)
     model_message = message
     if inline_xyz is not None and mentions_computation(message):
@@ -513,9 +516,18 @@ def semantic_message(
         registry,
         result_catalog=results,
         pending_tasks=tasks,
+        message=message,
     )
     example = {
         "mode": "compute",
+        "intent_items": [
+            {
+                "kind": "compute",
+                "evidence": "water",
+                "task_keys": ["t1"],
+                "requested_property": "energy",
+            }
+        ],
         "subjects": [
             {
                 "key": "subject_1",
@@ -583,65 +595,7 @@ def semantic_message(
         )
     if len(reports) > 3:
         raise ValueError("at most three report questions per Request")
-    if value.mode == "compute":
-        compute_text = message
-        for report in reports:
-            compute_text = compute_text.replace(report["evidence"], "")
-        unsupported = _known_unsupported_requirement(compute_text)
-        if unsupported or (
-            re.search(r"Gibbs|自由能", compute_text, re.I) and mentions_computation(compute_text)
-        ):
-            return SemanticProposal(
-                mode="unsupported", unsupported_requirements=[unsupported or "Gibbs free energy"]
-            )
-    elif unsupported_requirement and value.mode == "context_query":
-        if not _historical_output_read(message):
-            return SemanticProposal(
-                mode="unsupported", unsupported_requirements=[unsupported_requirement]
-            )
     return value
-
-
-def _historical_output_read(message: str) -> bool:
-    if not re.search(r"刚才|上次|之前|先前|previous|last|earlier", message, re.I):
-        return False
-    reading = re.sub(r"(?:刚才|上次|之前|先前)(?:那次)?(?:计算|算出)(?:的|结果)?", "", message)
-    return not bool(re.search(r"计算|求取|算出|calculate|compute|determine", reading, re.I))
-
-
-def _output_reading_context(message: str) -> bool:
-    return _historical_output_read(message) or bool(
-        re.search(
-            r"(?:读取|报告|查找|展示|给出).{0,12}(?:输出|原文|日志)|"
-            r"(?:输出|原文|日志).{0,12}(?:中|里)|read.{0,20}output|report.{0,20}output",
-            message,
-            re.I,
-        )
-    )
-
-
-def _known_unsupported_requirement(message: str) -> str | None:
-    asks_for_gibbs = re.search(
-        r"(?:gibbs(?:\s*[- ]?free\s*[- ]?energy|\s*自由能)?|自由能|Δ\s*g|delta\s*g)",
-        message,
-        flags=re.IGNORECASE,
-    )
-    asks_to_calculate = re.search(
-        r"(?:计算|求取|算出|calculate|compute|determine|evaluate)",
-        message,
-        flags=re.IGNORECASE,
-    )
-    if asks_for_gibbs is not None and asks_to_calculate is not None:
-        return "Gibbs free energy"
-    asks_for_global_conformer_search = re.search(
-        r"(?:全局|全球|global|systematic).{0,12}(?:构象|conformer)|"
-        r"(?:构象|conformer).{0,12}(?:全局|全球|global|lowest[ -]?energy|最低能)",
-        message,
-        flags=re.IGNORECASE,
-    )
-    if asks_for_global_conformer_search is not None:
-        return "global conformer search"
-    return None
 
 
 def _semantic_context(context: Mapping[str, Any] | None) -> dict[str, Any]:
