@@ -138,7 +138,7 @@ def search_output_bytes(payload, queries, *, deadline, cancel, limits):
                 else ("unavailable" if ranges else "not_found"),
                 "snippets": snippets,
                 "truncated": truncated,
-                "ambiguous": len(candidates[index]) > 1,
+                "ambiguous": len(ranges) > 1,
             }
         )
     return evidence

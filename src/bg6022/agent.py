@@ -39,7 +39,7 @@ from .molecule_identity import (
     identity_matches_facts,
     normalize_formula_token,
 )
-from .output_contracts import is_compatible_value, public_type_info
+from .output_contracts import is_compatible_value, public_source_context, public_type_info
 from .output_query import (
     build_raw_catalog_entries,
     collect_raw_output_sources,
@@ -3433,8 +3433,18 @@ class Agent:
             outputs = [
                 dict(item) for item in delivery.get("outputs", []) if isinstance(item, Mapping)
             ]
-            if delivery.get("verified_status", delivery.get("status")) == "complete":
-                self._session["last_delivery"] = outputs[-8:]
+            rendered = set(delivery.get("rendered_refs", []))
+            shown = [
+                item
+                for item in outputs
+                if item.get("output_ref") in rendered
+                and item.get("run_id")
+                and item.get("step_id")
+                and item.get("step_fingerprint")
+                and item.get("attempt")
+            ]
+            if shown and delivery.get("status") != "cancelled":
+                self._session["last_delivery"] = shown[-8:]
         self._save_session()
 
     def _record_result_summary(self, run: Run, result: Result) -> None:
@@ -3881,6 +3891,44 @@ class Agent:
         contract = public_type_info(expected_type, kind=kind)
         item = {
             "subject_ref": subject_ref,
+            "source_context": public_source_context(
+                {
+                    "subject_label": structure.get("title")
+                    or structure.get("query")
+                    or structure.get("formula")
+                    or next(
+                        (
+                            s.molecule_query or s.key
+                            for key, s in run.request.subjects.items()
+                            if key
+                            == next(
+                                (
+                                    r.subject_id
+                                    for r in run.request.requirements
+                                    if r.id == step.requirement_id
+                                ),
+                                None,
+                            )
+                        ),
+                        None,
+                    ),
+                    "method_label": next(
+                        (
+                            p["display_name"]
+                            for p in self.registry.method_capability_catalog()
+                            if p["name"] == step.parameters.get("method_profile")
+                        ),
+                        None,
+                    ),
+                    "operation_label": tool.display_name or tool.name,
+                    "task_label": run.request.description,
+                    "geometry_label": ", ".join(
+                        ref.port or "saved geometry" for ref in step.inputs.values()
+                    ),
+                    "source_status": "succeeded",
+                    "is_current_attempt": True,
+                }
+            ),
             "active_task": run.id == self._session.get("active_run_id"),
             "recently_delivered": recently_delivered,
             "task": {
@@ -4752,6 +4800,21 @@ def _semantic_pending_tasks(
             "task_ref": ref,
             "capability": requirement.capability,
             "parameters": parameters,
+            "source_context": public_source_context(
+                {
+                    "subject_label": next(
+                        (
+                            s.molecule_query or s.key
+                            for key, s in run.request.subjects.items()
+                            if key == requirement.subject_id
+                        ),
+                        None,
+                    ),
+                    "method_label": method_request,
+                    "operation_label": requirement.capability,
+                    "task_label": run.request.description,
+                }
+            ),
         }
         if method_request is not None:
             task["method_request"] = method_request

@@ -99,6 +99,18 @@ def query(term="DIPOLE MOMENT", evidence="偶极矩"):
     return {"evidence": evidence, "search_terms": [term]}
 
 
+def test_multiple_terms_in_one_window_are_one_candidate():
+    evidence = search_output_bytes(
+        b"DIPOLE MOMENT\nMagnitude 1.25 Debye\n",
+        [OutputQuerySpec(evidence="dipole", search_terms=["DIPOLE MOMENT", "Magnitude"])],
+        deadline=time.monotonic() + 5,
+        cancel=Event(),
+        limits={"snippets": 6, "lines": 120, "bytes": 16384},
+    )
+    assert len(evidence[0]["snippets"]) == 1
+    assert not evidence[0]["ambiguous"]
+
+
 def lookup(root, run, questions=None, **kwargs):
     source = collect_raw_output_sources(root, run, "raw_session")[0]
     return query_output_sources(

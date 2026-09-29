@@ -14,6 +14,28 @@ from typing import Any
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
 
+
+def public_source_context(source: Mapping[str, Any]) -> dict[str, Any]:
+    """Whitelist bounded, program-derived labels; never expose paths or values."""
+    result: dict[str, Any] = {}
+    for key in (
+        "subject_label",
+        "method_label",
+        "operation_label",
+        "geometry_label",
+        "task_label",
+        "source_status",
+    ):
+        value = source.get(key)
+        if isinstance(value, str) and value.strip():
+            result[key] = value[: 240 if key == "task_label" else 160]
+    if type(source.get("attempt")) is int and source["attempt"] > 0:
+        result["attempt"] = source["attempt"]
+    if type(source.get("is_current_attempt")) is bool:
+        result["is_current_attempt"] = source["is_current_attempt"]
+    return result
+
+
 # These are the value/port kinds currently understood by the public result
 # path.  A future Tool may add a kind only after adding its local adapter and
 # tests here; unknown strings must not silently become arbitrary science.

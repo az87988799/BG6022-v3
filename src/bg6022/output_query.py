@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import time
 from pathlib import Path
 from threading import Event
 
 from bg6022.models import InputReference, Result, Step
+from bg6022.orca.profiles import get_profile
+from bg6022.output_contracts import public_source_context
 from bg6022.session import ArtifactReadError, load_run, new_id, registered_read_path
 from bg6022.tools.orca_output import (
     MAX_FILE_BYTES,
@@ -175,6 +178,35 @@ def collect_raw_output_sources(data_root, run, session_id):
             or attempt.get("result_relative_path") != result.attempt_relative_path
         ):
             continue
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                step.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        parameters = step.parameters if result.step_fingerprint == fingerprint else {}
+        try:
+            method_label = get_profile(parameters.get("method_profile", "")).display_name
+        except ValueError:
+            method_label = "unknown"
+        subject = run.request.subjects.get(
+            step.subject_id
+            or next(
+                (r.subject_id for r in run.request.requirements if r.id == step.requirement_id), ""
+            )
+        )
+        context = public_source_context(
+            {
+                "subject_label": (subject.molecule_query or subject.key) if subject else None,
+                "method_label": method_label,
+                "operation_label": step.tool,
+                "task_label": run.request.description,
+                "attempt": result.attempt,
+                "source_status": result.status,
+            }
+        )
         for artifact in run.artifact_index:
             if (
                 artifact.artifact_type != "orca_output"
@@ -189,6 +221,7 @@ def collect_raw_output_sources(data_root, run, session_id):
             sources.append(
                 {
                     "access": "raw_output",
+                    "source_context": context,
                     "session_id": session_id,
                     "run_id": run.id,
                     "source_step_id": result.step_id,
@@ -252,13 +285,19 @@ def build_raw_catalog_entries(sources, recent):
             {
                 "subject_ref": ref,
                 "access": "raw_output",
+                "source_context": public_source_context(
+                    {
+                        **source.get("source_context", {}),
+                        "is_current_attempt": source["is_current_attempt"],
+                    }
+                ),
                 "task": {"description": source["task_description"], "status": source["run_status"]},
                 "step": {
                     "tool": source["tool"],
                     "attempt": source["attempt"],
                     "source_status": source["source_status"],
                     "is_current_attempt": source["is_current_attempt"],
-                    "method": "unknown",
+                    "method": source.get("source_context", {}).get("method_label", "unknown"),
                 },
                 "result": {
                     "property": "orca_output",

@@ -29,6 +29,60 @@ from bg6022.session import execution_fingerprint, load_run, save_result, save_ru
 from bg6022.tools.registry import ToolRegistry, build_registry
 
 
+def test_partial_verified_delivery_updates_only_actually_rendered_focus(tmp_path):
+    from bg6022.agent import AgentResponse
+
+    agent, _, _ = agent_with_output(tmp_path)
+    agent._session["last_delivery"] = [{"output_ref": "old"}]
+    shown = {
+        "output_ref": "out_1",
+        "run_id": "run_raw",
+        "step_id": "opt",
+        "attempt": 1,
+        "step_fingerprint": "verified",
+        "property": "electronic_energy",
+    }
+    agent._record_response(
+        AgentResponse(
+            text="energy shown",
+            delivery={
+                "status": "partial",
+                "rendered_refs": ["out_1"],
+                "outputs": [shown, dict(shown, output_ref="not_shown")],
+            },
+        )
+    )
+    assert agent._session["last_delivery"] == [shown]
+    agent._record_response(
+        AgentResponse(
+            text="cancelled",
+            delivery={
+                "status": "cancelled",
+                "rendered_refs": [],
+                "outputs": [dict(shown, output_ref="new")],
+            },
+        )
+    )
+    assert agent._session["last_delivery"] == [shown]
+
+
+def test_raw_source_does_not_borrow_parameters_from_modified_step(tmp_path):
+    from bg6022.agent import _step_fingerprint
+
+    run, _ = saved_output(tmp_path)
+    step = run.plan.steps[0]
+    step.parameters["method_profile"] = "pbe0_d3bj_def2svp"
+    path = tmp_path / "runs" / run.id / run.result_index[0]
+    result = Result.model_validate_json(path.read_bytes())
+    result.step_fingerprint = _step_fingerprint(step)
+    save_result(tmp_path, run, result)
+    context = collect_raw_output_sources(tmp_path, run, "raw_session")[0]["source_context"]
+    assert "PBE0" in context["method_label"]
+    step.parameters["method_profile"] = "b3lyp_d3bj_def2svp"
+    context = collect_raw_output_sources(tmp_path, run, "raw_session")[0]["source_context"]
+    assert context["method_label"] == "unknown"
+
+
 def agent_with_output(tmp_path, *, semantic=True, payload=None):
     config = _config(tmp_path)
     config.runtime.semantic_planner_v1 = semantic

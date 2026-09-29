@@ -15,6 +15,33 @@ from bg6022.semantic import (
 from bg6022.tools.registry import build_registry
 
 
+def test_source_context_survives_repeated_catalog_compression():
+    entries = [
+        {
+            "subject_ref": "t1",
+            "property": "electronic_energy",
+            "source_context": {
+                "subject_label": "water",
+                "method_label": "PBE0",
+                "operation_label": "single_point",
+            },
+        },
+        {
+            "subject_ref": "t2",
+            "property": "electronic_energy",
+            "source_context": {
+                "subject_label": "ethanol",
+                "method_label": "B3LYP",
+                "operation_label": "single_point",
+            },
+        },
+    ]
+    compact = compact_result_catalog(entries)
+    assert compact[0]["source_context"]["subject_label"] == "water"
+    assert compact[1]["source_context"]["method_label"] == "B3LYP"
+    assert compact_result_catalog(compact) == compact
+
+
 def _compute_payload(**updates):
     value = {
         "mode": "compute",

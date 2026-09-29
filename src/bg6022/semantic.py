@@ -18,6 +18,7 @@ from pydantic import (
 
 from bg6022.intake_utils import extract_single_inline_xyz, mentions_computation
 from bg6022.llm import LlmClient
+from bg6022.output_contracts import public_source_context
 from bg6022.output_query import normalize_report_queries, validate_raw_query_targets
 from bg6022.planner import QuerySelection, QueryTarget, _bounded_context, load_prompt
 from bg6022.tools.orca_output import OutputQuerySpec
@@ -308,6 +309,11 @@ def compact_result_catalog(catalog: list[Mapping[str, Any]]) -> list[dict[str, A
                 "subject_ref": subject_ref,
                 "property": property_name,
                 "label": label if isinstance(label, str) else property_name,
+                **(
+                    {"source_context": public_source_context(item["source_context"])}
+                    if isinstance(item.get("source_context"), Mapping)
+                    else {}
+                ),
                 **{
                     key: item[key]
                     for key in ("access", "recently_delivered", "recent_queries")
@@ -492,6 +498,7 @@ def semantic_message(
             "task_ref": str(item.get("task_ref", "")),
             "capability": str(item.get("capability", "")),
             "parameters": dict(item.get("parameters", {})),
+            "source_context": public_source_context(item.get("source_context", {})),
             **(
                 {"method_request": str(item["method_request"])}
                 if isinstance(item.get("method_request"), str)
