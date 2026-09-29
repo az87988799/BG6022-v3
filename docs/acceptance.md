@@ -231,3 +231,17 @@ live evidence are linked from
 | GitHub Actions | Offline run `35966242920` passed on implementation code commit `547c15330a5dcfbaf5dc637072c376e441ecacbe` | passed |
 | Active ORCA budget | 4 cores / 1024 MB / `%maxcore 192` / one concurrent job, matching generated input | passed |
 | User acceptance | User review has not yet been recorded | pending |
+
+## ORCA raw output queries and attached reports (2026-09-29)
+
+This records implementation verification only; user acceptance remains pending.
+See [the detailed evidence and Q01–Q22 mapping](evidence/orca-output-query.md).
+
+| Item | Evidence | Status |
+|---|---|---|
+| Historical and first-computation reports | Shared private Tool, both routing paths, Requirement-bound producers, independent question status | implemented; offline tested |
+| Scientific contract and no-write boundary | Undeclared publication still rejected; source-file inventories/hashes unchanged; compute and persistence entrypoints forbidden in raw-query tests | offline tested |
+| Original stdout retrieval | Existing ORCA 6.1.1 water fixture, exact lines and Debye token; historical 1-core / 2048 MB provenance retained | retrieval tested |
+| Old confirmation compatibility | Snapshot and fingerprint generated with baseline `6113161`; persisted expected hash unchanged when loaded | offline tested |
+| New scientific properties / JSON export / new real compute | Outside this minimal plan; no new live-compute acceptance claimed | not included |
+| User acceptance | Awaiting the user's explicit review after push | pending |

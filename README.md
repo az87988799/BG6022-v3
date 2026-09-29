@@ -54,6 +54,22 @@ PubChem endpoint. `/confirm`, `/status`, `/cancel`, `/new`, and `/exit` are
 available. The model cannot grant execution permission, edit source code, or
 declare scientific success.
 
+Saved ORCA stdout can also be queried without starting a calculation. For example,
+“上次输出中的偶极矩” selects a session-indexed, finished attempt and displays bounded
+original excerpts with line numbers, status and source hashes. Unknown literal
+titles are searchable; these excerpts are not verified scientific properties.
+“优化水，并报告输出中的偶极矩” attaches the report to that optimization's actual
+output. Missing or ambiguous excerpts make delivery partial without changing the
+scientific Run status or triggering another calculation. Verified energy queries
+continue to use the existing scientific result contract.
+
+Raw queries share a turn budget of three questions/files, 64 MiB (or the smaller
+configured output limit), five cooperative seconds, three excerpts, 120 lines and
+8 KiB of excerpt text. Long lines are searched/displayed only within their first
+4 KiB and are marked truncated. No automatic search retries or extra answer-model
+calls are used. See [output-query evidence](docs/evidence/orca-output-query.md)
+for the tested scope and remaining user acceptance.
+
 ## Evidence and limitations
 
 Every attempt keeps its input, initial geometry, stdout, stderr, result, and

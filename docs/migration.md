@@ -45,3 +45,16 @@ format, compileall, and package build also passed. Detailed run identifiers,
 resource evidence, report locations, and the grading calibration are recorded in
 [`docs/evidence/benchmark1.2.md`](evidence/benchmark1.2.md). This implementation
 is awaiting the user's review and explicit acceptance.
+
+## ORCA raw output queries and attached reports (2026-09-29)
+
+The minimal output-query plan adds a private read-only Tool and transient source
+bindings, while preserving the production ORCA input/runner/parser/check chain.
+Both conversation entrypoints and first-computation report delivery use the same
+bounded reader. Questions persist only in the existing Requirement constraints;
+old Requests and confirmation fingerprints retain their serialized shape.
+Scientific outputs and raw excerpts have separate delivery records. No new
+runtime domain framework, scientific property family, JSON export or compute
+budget change is introduced. Implementation evidence and limitations are in
+[`docs/evidence/orca-output-query.md`](evidence/orca-output-query.md).
+Status: awaiting user acceptance after implementation, validation and Git push.

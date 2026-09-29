@@ -6,9 +6,12 @@ import hashlib
 import json
 import os
 import shutil
+import stat
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 from .models import Artifact, Result, Run, Step, Tool
@@ -538,6 +541,100 @@ def find_artifact(run: Run, artifact_id: str) -> Artifact:
         if artifact.id == artifact_id:
             return artifact
     raise ValueError(f"Run artifact is not registered: {artifact_id}")
+
+
+class ArtifactReadError(ValueError):
+    """A bounded read failed before verified bytes could be delivered."""
+
+    def __init__(self, category: str):
+        self.category = category
+        super().__init__(category)
+
+
+def check_read_deadline(cancel: Event, deadline: float) -> None:
+    if cancel.is_set():
+        raise ArtifactReadError("cancelled")
+    if time.monotonic() >= deadline:
+        raise ArtifactReadError("deadline")
+
+
+def registered_read_path(data_root: str | Path, run: Run, relative: str) -> Path:
+    """Check unresolved components, including Windows junctions, before opening."""
+    root = Path(data_root).absolute()
+    rel = Path(relative)
+    if rel.is_absolute() or rel.drive or any(p in {"..", "."} or ":" in p for p in rel.parts):
+        raise ArtifactReadError("unsafe_path")
+    if not run.id or run.id in {".", ".."} or Path(run.id).name != run.id or ":" in run.id:
+        raise ArtifactReadError("unsafe_path")
+    path = root / "runs" / run.id / rel
+    try:
+        for component in [*reversed(path.parents), path]:
+            info = component.lstat()
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                raise ArtifactReadError("unsafe_path")
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise ArtifactReadError("unsafe_path")
+    except OSError as error:
+        raise ArtifactReadError("missing_file") from error
+    return path
+
+
+def read_registered_artifact_bytes(
+    data_root: str | Path,
+    run: Run,
+    artifact: Artifact,
+    *,
+    max_bytes: int,
+    deadline: float,
+    cancel: Event,
+) -> bytes:
+    """One bounded read/hash pass; consumers use only these verified bytes."""
+    check_read_deadline(cancel, deadline)
+    try:
+        registered = find_artifact(run, artifact.id)
+    except ValueError as error:
+        raise ArtifactReadError("invalid_source") from error
+    if registered != artifact or artifact.run_id != run.id:
+        raise ArtifactReadError("invalid_source")
+    if artifact.size_bytes > max_bytes:
+        raise ArtifactReadError("byte_limit")
+    path = registered_read_path(data_root, run, artifact.relative_path)
+    before = path.stat()
+    if before.st_size > max_bytes:
+        raise ArtifactReadError("byte_limit")
+    if before.st_size != artifact.size_bytes:
+        raise ArtifactReadError("size_mismatch")
+    digest = hashlib.sha256()
+    payload = bytearray()
+    try:
+        with path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(before, opened):
+                raise ArtifactReadError("changed_file")
+            if opened.st_size != artifact.size_bytes:
+                raise ArtifactReadError("size_mismatch")
+            while len(payload) < artifact.size_bytes:
+                check_read_deadline(cancel, deadline)
+                chunk = handle.read(min(65536, artifact.size_bytes - len(payload)))
+                check_read_deadline(cancel, deadline)
+                if not chunk:
+                    break
+                payload.extend(chunk)
+                if len(payload) > artifact.size_bytes or len(payload) > max_bytes:
+                    raise ArtifactReadError("byte_limit")
+                digest.update(chunk)
+            after = os.fstat(handle.fileno())
+            if (opened.st_size, opened.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                raise ArtifactReadError("changed_file")
+            checked = registered_read_path(data_root, run, artifact.relative_path)
+            if not os.path.samestat(after, checked.stat()):
+                raise ArtifactReadError("changed_file")
+    except OSError as error:
+        raise ArtifactReadError("missing_file") from error
+    if len(payload) != artifact.size_bytes or digest.hexdigest() != artifact.sha256:
+        raise ArtifactReadError("hash_mismatch")
+    check_read_deadline(cancel, deadline)
+    return bytes(payload)
 
 
 def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:

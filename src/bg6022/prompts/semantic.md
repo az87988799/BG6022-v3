@@ -67,3 +67,28 @@ ResultTarget identifiers, execution wiring, ORCA keywords, repair rules,
 success conditions, Result metadata, scientific conclusions, arbitrary paths,
 commands, or source-code changes. Do not make up a calculation result or claim
 scientific success.
+
+Raw output protocol (also used by legacy Intake):
+- Saved electronic energy: select the catalog's verified electronic_energy target; queries is [].
+- “上次输出中的偶极矩”: select the explicitly matching access="raw_output" entry and its
+  orca_output property. Use queries=[{"evidence":"偶极矩","search_terms":["DIPOLE MOMENT",
+  "Magnitude (Debye)"]}], plus outer evidence quoting this message. This reads raw text only.
+- Energy plus dipole text: select both targets. Never substitute raw text for a verified result.
+- “优化水，并报告输出中的偶极矩”: keep geometry as the compute requested_properties;
+  attach report_queries=[{"evidence":"报告输出中的偶极矩","search_terms":["DIPOLE MOMENT"]}]
+  to that SemanticTask. The application stores it on the corresponding Requirement. Do not add
+  orca_output or dipole to requested_properties, parameters, or calculation goals.
+- “计算水的 Gibbs 自由能” is unsupported. “优化水并给出 Gibbs” needs clarification;
+  neither is permission to silently replace the requested scientific result with a text search.
+- Missing or ambiguous source: use existing clarify/unavailable; never invent a ref or pick
+  the latest task when the user named a different one.
+
+At most three questions across the turn; at most four ordinary literal search terms of 1–80
+characters per question. Unknown titles are searchable; this is not a property whitelist.
+Every evidence is a verbatim nonblank quote from the current user message. Reports must quote
+an explicit output-reading clause, not a new computation requirement. No paths, Artifact IDs,
+commands, regex options, budgets, or final-occurrence selection. Same-source questions share
+one target with multiple queries. A followup can reuse recent_queries only for an explicit
+repeat/display request with exactly one recent source and question; a new property needs new
+evidence and search terms. Raw status, historical attempt and ambiguity are source context,
+not scientific success. Do not infer missing numbers or perform calculations on raw evidence.

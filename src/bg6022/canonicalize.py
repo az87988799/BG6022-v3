@@ -116,6 +116,7 @@ def semantic_to_intake(
             if validation_values:
                 tool.validate_parameter_patch(validation_values)
         proposals[task.key] = {
+            "report_queries": [item.model_dump(mode="json") for item in task.report_queries],
             "key": task.key,
             "subject_key": task.subject_key,
             "capability": tool.name,

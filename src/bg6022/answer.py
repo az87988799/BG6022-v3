@@ -14,9 +14,103 @@ from bg6022.llm import LlmClient
 from bg6022.models import Result, Run
 from bg6022.output_contracts import public_type_info
 from bg6022.planner import load_prompt
+from bg6022.tools.orca_output import visible_text
 
 if TYPE_CHECKING:
     from bg6022.tools.registry import ToolRegistry
+
+
+def _raw_label(value: Any) -> str:
+    return re.sub(r"([\\`*_{}\[\]()<>#!|])", r"\\\1", visible_text(str(value)))
+
+
+def render_output_evidence(reports: Sequence[Mapping[str, Any]]) -> str:
+    lines = ["ORCA 原文证据（文本命中不代表已通过性质或最终科学状态校验）："]
+    reasons = {
+        "invalid_source": "所选来源无法核验",
+        "missing_file": "来源文件缺失",
+        "hash_mismatch": "来源文件已变化",
+        "size_mismatch": "来源文件已变化",
+        "changed_file": "来源文件已变化",
+        "unsafe_path": "来源路径不安全",
+        "byte_limit": "该输出超出本次读取上限",
+        "deadline": "本轮读取时间预算已耗尽",
+        "cancelled": "原文查询已取消",
+    }
+    for report in reports:
+        lines.append(
+            f"任务：{_raw_label(report.get('task_description', '指定任务'))}；"
+            f"来源状态：{_raw_label(report.get('source_status', '未知'))}；"
+            f"Step：{_raw_label(report.get('source_step_id', '未知'))} / "
+            f"attempt {report.get('attempt', '?')}。"
+        )
+        if report.get("is_current_attempt") is False:
+            lines.append("这是历史 attempt 的原文，不能代替当前科学结果。")
+        if report.get("source_status") not in {None, "succeeded"}:
+            lines.append("来源计算未成功；以下仅为失败或取消来源的原文。")
+        if "artifact_id" in report:
+            lines.append(
+                f"Run：{_raw_label(report['run_id'])}；"
+                f"Artifact：{_raw_label(report['artifact_id'])}；"
+                f"SHA-256：{_raw_label(report['artifact_sha256'])}。"
+            )
+        if report.get("file_path"):
+            lines.append(f"文件：{_raw_label(report['file_path'])}")
+        for index, query in enumerate(report["queries"]):
+            lines.append(f"问题：{_raw_label(query['evidence'])}")
+            item = next((e for e in report.get("evidence", []) if e["query_index"] == index), {})
+            if report.get("error"):
+                lines.append(reasons.get(report["error"], "所选来源无法核验") + "；该报告未交付。")
+                continue
+            if item.get("lookup_status") != "found":
+                lines.append("本次受限搜索未找到相关片段或片段预算已耗尽；该报告未交付。")
+            for snippet in item.get("snippets", []):
+                lines.append(f"原文第 {snippet['start_line']}–{snippet['end_line']} 行：")
+                fence = "`" * max(
+                    3,
+                    1
+                    + max(
+                        (len(m[0]) for m in re.finditer(r"`+", snippet["text"])),
+                        default=0,
+                    ),
+                )
+                lines.extend([fence + "text", snippet["text"], fence])
+            if item.get("ambiguous"):
+                lines.append("存在多个匹配位置；不能据此确定唯一最终科学值。")
+            if item.get("truncated"):
+                lines.append("片段或搜索范围受到预算限制并已截断；未交付完整报告。")
+    return "\n".join(lines)
+
+
+def combine_output_reports(text, delivery, reports):
+    if not reports:
+        return text, delivery
+    merged = dict(delivery)
+    verified_status = delivery.get("status", "complete")
+    complete = all(
+        not r.get("error")
+        and len(r.get("evidence", [])) == len(r["queries"])
+        and all(
+            e["lookup_status"] == "found" and not e.get("truncated") and not e.get("ambiguous")
+            for e in r["evidence"]
+        )
+        for r in reports
+    )
+    cancelled = any(r.get("error") == "cancelled" for r in reports)
+    merged.update(
+        {
+            "verified_status": verified_status,
+            "raw_reports": reports,
+            "status": "cancelled"
+            if cancelled or verified_status == "cancelled"
+            else "complete"
+            if complete and verified_status == "complete"
+            else "partial",
+            "verified_summary": re.sub(r"```.*?```", "[文件正文省略]", text, flags=re.DOTALL),
+        }
+    )
+    merged.setdefault("outputs", [])
+    return "\n".join(part for part in [text, render_output_evidence(reports)] if part), merged
 
 
 _SUBSCRIPT_DIGITS = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
@@ -499,6 +593,11 @@ def render_confirmation(preview: Mapping[str, Any]) -> str:
     timeout_line = _timeout_sentence(resources)
     if timeout_line:
         lines.append(timeout_line)
+    for query in preview.get("report_queries", []):
+        lines.append(
+            f"计算结束后，将从这次输出中查找并报告：{query['evidence']}。"
+            "若未打印，将说明未找到；原文不等同于已验证性质。"
+        )
     lines.append("输入 /confirm 开始，也可以先告诉我需要调整什么。")
     return "\n".join(lines)
 

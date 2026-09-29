@@ -50,6 +50,14 @@ from bg6022.molecule_identity import (
 )
 from bg6022.orca.profiles import resolve_method_request
 from bg6022.output_contracts import property_evidence_matches
+from bg6022.output_query import (
+    merge_report_constraints,
+    normalize_report_queries,
+    read_report_queries,
+    validate_raw_query_targets,
+    validate_report_scope,
+)
+from bg6022.tools.orca_output import OutputQuerySpec
 from bg6022.tools.registry import ToolRegistry, build_registry, merge_explicit_step_parameters
 
 Intent = Literal["chemistry_compute", "chemistry_qa", "daily_qa", "context_query"]
@@ -83,6 +91,7 @@ class QueryTarget(BaseModel):
     property: ResultProperty
     evidence: StrictStr
     reference_mode: Literal["explicit", "followup"] = "explicit"
+    queries: list[OutputQuerySpec] = Field(default_factory=list, max_length=3)
 
 
 class QuerySelection(BaseModel):
@@ -106,6 +115,8 @@ class QuerySelection(BaseModel):
     def _bounded_targets(cls, value: list[QueryTarget]) -> list[QueryTarget]:
         if len(value) > 3:
             raise ValueError("query selection may contain at most three targets")
+        if sum(len(target.queries) for target in value) > 3:
+            raise ValueError("query selection may contain at most three raw questions")
         identities = [(item.subject_ref, item.property) for item in value]
         if len(set(identities)) != len(identities):
             raise ValueError("query targets must be unique per subject and property")
@@ -174,6 +185,7 @@ class RequirementProposal(BaseModel):
     input_bindings: dict[str, RequirementInputBindingProposal] = Field(default_factory=dict)
     parameter_evidence: list[ElectronicStateCandidate] = Field(default_factory=list)
     constraints: dict[str, Any] = Field(default_factory=dict)
+    report_queries: list[OutputQuerySpec] = Field(default_factory=list, max_length=3)
 
     @field_validator("key", "subject_key", "capability")
     @classmethod
@@ -1697,7 +1709,9 @@ def request_from_intake(
         method_request = parameters.pop("method_request", None)
         if method_request is None and "method_profile" in parameters:
             method_request = parameters["method_profile"]
-        constraints = dict(proposal.constraints)
+        constraints = merge_report_constraints(
+            proposal.constraints, proposal.report_queries, message, proposal.capability
+        )
         if method_request is not None:
             resolution = resolve_method_request(str(method_request))
             if resolution.status in {"resolved", "proposed"} and resolution.profile is not None:
@@ -1807,6 +1821,7 @@ def request_from_intake(
     )
     _validate_required_geometry_contract(request, registry)
     _require_composite_geometry_sources(request, registry)
+    read_report_queries(request)
     return request
 
 
@@ -3017,6 +3032,20 @@ def _intake_schema(
     def _request_contract(value: IntakeOutput) -> IntakeOutput:
         if value.intent != "chemistry_compute" or registry is None:
             return value
+        reports = []
+        for requirement in value.requirements:
+            if "report_queries" in requirement.constraints:
+                raise ValueError("report_queries is reserved; use the temporary field")
+            reports.extend(
+                normalize_report_queries(
+                    requirement.report_queries,
+                    message or "",
+                    capability=requirement.capability,
+                )
+            )
+        if len(reports) > 3:
+            raise ValueError("at most three report questions per Request")
+        validate_report_scope(message or "", reports)
         if value.parameter_patch and value.parameter_target_requirement_key is None:
             pending_requirements = [
                 item
@@ -3359,8 +3388,30 @@ def _validate_query_selection(
         ):
             recent_pairs.add((item["subject_ref"], result["property"]))
     invalid_evidence = False
+    try:
+        validate_raw_query_targets(
+            [target.model_dump(mode="json") for target in selection.targets],
+            message,
+            result_catalog or [],
+        )
+    except ValueError:
+        return output.model_copy(
+            update={
+                "query_selection": QuerySelection(
+                    status="clarify",
+                    clarification="请明确原文查询的问题及来源；不能沿用其他问题或任务。",
+                )
+            }
+        )
     if selection.status == "selected":
         for target in selection.targets:
+            if any(
+                item.get("access") == "raw_output"
+                and item.get("subject_ref") == target.subject_ref
+                and item.get("result", {}).get("property") == target.property
+                for item in result_catalog or []
+            ):
+                continue
             if target.reference_mode == "followup":
                 followup = (
                     target.subject_ref,

@@ -16,6 +16,7 @@ from typing import Any
 from .answer import (
     AnswerOutput,
     AnswerSection,
+    combine_output_reports,
     compose_answer,
     facts_from_result,
     render_answer_output,
@@ -39,6 +40,14 @@ from .molecule_identity import (
     normalize_formula_token,
 )
 from .output_contracts import is_compatible_value, public_type_info
+from .output_query import (
+    build_raw_catalog_entries,
+    collect_raw_output_sources,
+    query_output_sources,
+    read_report_queries,
+    reports_for_run,
+    validate_raw_query_targets,
+)
 from .plan_builder import PlanBuildError, build_plan
 from .planner import (
     IntakeOutput,
@@ -887,6 +896,7 @@ class Agent:
     def advance(self, run: Run, *, cancel: Event | None = None) -> Result | None:
         """Continue the current Run until a result, wait point, or terminal state."""
 
+        read_report_queries(run.request)
         cancel_event = cancel or self._cancel_events.setdefault(run.id, Event())
         if run.status in {"succeeded", "failed", "cancelled", "interrupted"}:
             return self._latest_result(run)
@@ -2207,6 +2217,9 @@ class Agent:
             "plan_steps": self._preview_plan_steps(run),
             "parameters": dict(step.parameters),
             "result_targets": self._preview_result_targets(run, step),
+            "report_queries": [
+                q for _, queries in read_report_queries(run.request) for q in queries
+            ],
             "parameter_sources": run.parameter_sources_by_step.get(step.id, {}),
             "structure": structure,
             "artifact_bindings": [
@@ -2676,6 +2689,23 @@ class Agent:
                     if run.status == "succeeded"
                     else f"{default_text}\n{rendered_facts}"
                 )
+            try:
+                reports = reports_for_run(
+                    self.config.data_root_path,
+                    run,
+                    session_id=self.session_id,
+                    cancel=cancel,
+                    output_limit_bytes=self.config.output_limit_bytes,
+                )
+            except ValueError:
+                reports = [
+                    {
+                        "queries": [{"evidence": "附带报告", "search_terms": []}],
+                        "evidence": [],
+                        "error": "invalid_source",
+                    }
+                ]
+            default_text, delivery = combine_output_reports(default_text, delivery, reports)
             return AgentResponse(
                 default_text,
                 run=run,
@@ -3378,14 +3408,32 @@ class Agent:
                 return
         if session_id is not None and self.session_id != session_id:
             return
-        summary = re.sub(r"```.*?```", "[已交付文件正文省略]", response.text, flags=re.DOTALL)
+        if response.delivery.get("raw_reports"):
+            summary = response.delivery.get("verified_summary", "")
+            for report in response.delivery["raw_reports"]:
+                summary += "\n原文报告：" + "；".join(q["evidence"] for q in report["queries"])
+                summary += f"；来源状态 {report.get('source_status', '未知')}；"
+                summary += str(
+                    report.get("error") or [e["lookup_status"] for e in report.get("evidence", [])]
+                )
+            self._session["last_output_query"] = [
+                {
+                    key: value
+                    for key, value in report.items()
+                    if key not in {"evidence", "file_path", "bytes_read", "error"}
+                }
+                for report in response.delivery["raw_reports"]
+                if "artifact_id" in report
+            ][:3]
+        else:
+            summary = re.sub(r"```.*?```", "[已交付文件正文省略]", response.text, flags=re.DOTALL)
         self._append_message("assistant", summary, save=False)
         delivery = response.delivery
         if isinstance(delivery, Mapping) and delivery.get("outputs"):
             outputs = [
                 dict(item) for item in delivery.get("outputs", []) if isinstance(item, Mapping)
             ]
-            if delivery.get("status") == "complete":
+            if delivery.get("verified_status", delivery.get("status")) == "complete":
                 self._session["last_delivery"] = outputs[-8:]
         self._save_session()
 
@@ -3515,7 +3563,25 @@ class Agent:
             if isinstance(run_id, str) and run_id and run_id not in indexed_ids:
                 indexed_ids.append(run_id)
 
-        catalog: list[dict[str, Any]] = []
+        raw_sources = []
+        for run_id in indexed_ids:
+            try:
+                source_run = load_run(self.config.data_root_path, run_id)
+                raw_sources.extend(
+                    collect_raw_output_sources(
+                        self.config.data_root_path,
+                        source_run,
+                        self.session_id,
+                    )
+                )
+            except ValueError:
+                continue
+        raw_catalog, raw_bindings = build_raw_catalog_entries(
+            raw_sources,
+            self._session.get("last_output_query", []),
+        )
+        self._query_bindings.update(raw_bindings)
+        catalog: list[dict[str, Any]] = list(raw_catalog)
         for run_id in indexed_ids:
             try:
                 run = load_run(self.config.data_root_path, run_id)
@@ -4385,28 +4451,63 @@ class Agent:
             return response
         selected_facts: list[dict[str, Any]] = []
         unavailable: list[str] = []
+        try:
+            validate_raw_query_targets(
+                [t.model_dump(mode="json") for t in selection.targets],
+                question,
+                catalog,
+            )
+        except ValueError:
+            response = AgentResponse("原文查询证据或来源不明确，请明确要读取的问题及任务。")
+            self._record_response(response, cancel=cancel)
+            return response
+        raw_selections = []
+        verified_targets = []
         for target in selection.targets:
+            binding = self._query_bindings.get((target.subject_ref, target.property), {})
+            if binding.get("access") == "raw_output":
+                raw_selections.append(
+                    (binding, [q.model_dump(mode="json") for q in target.queries])
+                )
+                continue
+            verified_targets.append(target)
             fact = self._load_query_fact(target.subject_ref, target.property)
             if fact is None:
                 unavailable.append(_query_target_label(target, catalog))
                 continue
             selected_facts.append(fact)
-        targets = [target.model_dump(mode="python") for target in selection.targets]
+        indexed_ids = [self._session.get("active_run_id")]
+        indexed_ids.extend(
+            item.get("run_id")
+            for item in self._session.get("recent_results", [])
+            if isinstance(item, Mapping)
+        )
+        raw_reports = query_output_sources(
+            self.config.data_root_path,
+            raw_selections,
+            session_id=self.session_id,
+            indexed_ids=indexed_ids,
+            cancel=cancel,
+            output_limit_bytes=self.config.output_limit_bytes,
+        )
+        targets = [target.model_dump(mode="python") for target in verified_targets]
         facts, _covered = select_facts_for_question(targets, selected_facts)
         if not facts:
             status = "cancelled" if cancel is not None and cancel.is_set() else "unavailable"
             text = "本次所选结果当前不可交付；未重新计算。"
             if unavailable:
                 text += f"\n尚未交付：{'；'.join(unavailable)}。"
-            response = AgentResponse(
-                text,
-                delivery={
-                    "status": status,
-                    "rendered_refs": [],
-                    "unavailable_targets": unavailable,
-                    "outputs": [],
-                },
-            )
+            delivery = {
+                "status": status,
+                "rendered_refs": [],
+                "unavailable_targets": unavailable,
+                "outputs": [],
+            }
+            if not verified_targets:
+                text = ""
+                delivery["status"] = "complete"
+            text, delivery = combine_output_reports(text, delivery, raw_reports)
+            response = AgentResponse(text, delivery=delivery)
             self._record_response(response, cancel=cancel)
             return response
         for index, fact in enumerate(facts, start=1):
@@ -4437,6 +4538,7 @@ class Agent:
             question=question,
             preferences=preferences,
         )
+        text, delivery = combine_output_reports(text, delivery, raw_reports)
         response = AgentResponse(
             text,
             run=run,

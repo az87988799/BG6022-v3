@@ -18,7 +18,9 @@ from pydantic import (
 
 from bg6022.intake_utils import extract_single_inline_xyz, mentions_computation
 from bg6022.llm import LlmClient
+from bg6022.output_query import normalize_report_queries, validate_raw_query_targets
 from bg6022.planner import QuerySelection, QueryTarget, _bounded_context, load_prompt
+from bg6022.tools.orca_output import OutputQuerySpec
 from bg6022.tools.registry import ToolRegistry
 
 SemanticMode = Literal[
@@ -90,6 +92,7 @@ class SemanticTask(SemanticModel):
     method_request: StrictStr | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
     requested_properties: list[SemanticProperty] = Field(default_factory=list)
+    report_queries: list[OutputQuerySpec] = Field(default_factory=list, max_length=3)
 
     @field_validator("key", "subject_key", "capability")
     @classmethod
@@ -288,10 +291,10 @@ def compact_method_catalog(registry: ToolRegistry) -> list[dict[str, Any]]:
     ]
 
 
-def compact_result_catalog(catalog: list[Mapping[str, Any]]) -> list[dict[str, str]]:
+def compact_result_catalog(catalog: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Reduce stored-result context to ephemeral refs and semantic properties."""
 
-    compact: list[dict[str, str]] = []
+    compact: list[dict[str, Any]] = []
     for item in catalog:
         subject_ref = item.get("subject_ref")
         raw_result = item.get("result")
@@ -305,6 +308,27 @@ def compact_result_catalog(catalog: list[Mapping[str, Any]]) -> list[dict[str, s
                 "subject_ref": subject_ref,
                 "property": property_name,
                 "label": label if isinstance(label, str) else property_name,
+                **{
+                    key: item[key]
+                    for key in ("access", "recently_delivered", "recent_queries")
+                    if key in item
+                },
+                **(
+                    {
+                        "task": {
+                            k: v
+                            for k, v in item.get("task", {}).items()
+                            if k in {"description", "status"}
+                        },
+                        "step": {
+                            k: v
+                            for k, v in item.get("step", {}).items()
+                            if k in {"tool", "attempt", "source_status", "is_current_attempt"}
+                        },
+                    }
+                    if item.get("access") == "raw_output"
+                    else {}
+                ),
             }
         )
     return compact
@@ -448,7 +472,7 @@ def semantic_message(
     if not message.strip():
         raise ValueError("message must not be empty")
     unsupported_requirement = _known_unsupported_requirement(message)
-    if unsupported_requirement is not None:
+    if unsupported_requirement is not None and not _output_reading_context(message):
         return SemanticProposal(
             mode="unsupported",
             unsupported_requirements=[unsupported_requirement],
@@ -535,7 +559,58 @@ def semantic_message(
     )
     if not isinstance(value, SemanticProposal):
         value = schema.model_validate(value, strict=True)
+    if value.query_selection is not None:
+        validate_raw_query_targets(
+            [t.model_dump(mode="json") for t in value.query_selection.targets],
+            message,
+            result_catalog or [],
+        )
+    reports = []
+    for task in value.tasks:
+        reports.extend(
+            normalize_report_queries(
+                task.report_queries,
+                message,
+                capability=task.capability,
+            )
+        )
+    if len(reports) > 3:
+        raise ValueError("at most three report questions per Request")
+    if value.mode == "compute":
+        compute_text = message
+        for report in reports:
+            compute_text = compute_text.replace(report["evidence"], "")
+        unsupported = _known_unsupported_requirement(compute_text)
+        if unsupported or (
+            re.search(r"Gibbs|自由能", compute_text, re.I) and mentions_computation(compute_text)
+        ):
+            return SemanticProposal(
+                mode="unsupported", unsupported_requirements=[unsupported or "Gibbs free energy"]
+            )
+    elif unsupported_requirement and value.mode == "context_query":
+        if not _historical_output_read(message):
+            return SemanticProposal(
+                mode="unsupported", unsupported_requirements=[unsupported_requirement]
+            )
     return value
+
+
+def _historical_output_read(message: str) -> bool:
+    if not re.search(r"刚才|上次|之前|先前|previous|last|earlier", message, re.I):
+        return False
+    reading = re.sub(r"(?:刚才|上次|之前|先前)(?:那次)?(?:计算|算出)(?:的|结果)?", "", message)
+    return not bool(re.search(r"计算|求取|算出|calculate|compute|determine", reading, re.I))
+
+
+def _output_reading_context(message: str) -> bool:
+    return _historical_output_read(message) or bool(
+        re.search(
+            r"(?:读取|报告|查找|展示|给出).{0,12}(?:输出|原文|日志)|"
+            r"(?:输出|原文|日志).{0,12}(?:中|里)|read.{0,20}output|report.{0,20}output",
+            message,
+            re.I,
+        )
+    )
 
 
 def _known_unsupported_requirement(message: str) -> str | None:
