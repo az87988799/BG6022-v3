@@ -846,7 +846,7 @@ def test_model_cannot_select_history_geometry_without_user_request(
 
     response = agent.handle_message(user_message)
 
-    assert "only when the user explicitly requests reuse" in response.text
+    assert "history geometry requires unique evidence" in response.text
     assert response.run is None
     assert agent._session["active_run_id"] == source_run.id
     assert len(list((Path(config.data_root_path) / "runs").iterdir())) == 1
@@ -880,6 +880,7 @@ def test_model_cannot_choose_between_multiple_history_geometries(
             molecule_query="water",
             molecule_input_kind="name",
             history_geometry_alias="geometry_1",
+            molecule_name_evidence="复用 geometry_1" if _args[1] == "复用 geometry_1" else None,
             explicit_parameters={"charge": 0, "multiplicity": 1},
             requested_results=["sp_electronic_energy"],
         )
@@ -888,9 +889,7 @@ def test_model_cannot_choose_between_multiple_history_geometries(
 
     response = agent.handle_message("Run SP using the previous optimized geometry.")
 
-    assert "多个可复用" in response.text
-    assert "geometry_1" in response.text
-    assert "geometry_2" in response.text
+    assert "history geometry requires unique evidence" in response.text
     assert response.run is None
     assert agent._session.get("active_run_id") == previous_active_run_id
     assert len(list((Path(config.data_root_path) / "runs").iterdir())) == 2

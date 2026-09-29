@@ -45,6 +45,14 @@ An initial geometry is an input artifact, not a new calculation. A Requirement i
 
 When the user asks for calculations on the same original structure, bind each geometry input to the initial geometry. When one calculation must consume another's output, bind it explicitly. Never let the Planner guess between initial and optimized geometry. “Use the optimized structure” means a dependency on the Opt Requirement's `optimized_geometry`; “use the original structure” means `initial_geometry`. For historical structures, use only a matching `history_geometry_alias` from the supplied catalog.
 
+Bind history_geometry_alias separately on each Subject, with molecule_name_evidence
+quoting the current reuse request and no new molecule lookup for that Subject. Reuse
+does not require particular words such as “previous”. Match source labels and focus;
+clarify ambiguity. Mixed historical/new Subjects are supported; do not merge them.
+Side-by-side AnswerGoal.output may use a shared canonical property even when each
+Requirement requests a different real field. Numeric difference requires the actual
+derived Tool output; operand display is optional. Never calculate numbers in an answer.
+
 Preserve exact inline XYZ text in the relevant Subject. If inline XYZ is present, do not also propose a molecule identity unless the user explicitly asks to resolve a separate structure. Do not send coordinates to a remote identity resolver or invent a structure from a formula.
 
 ## Comparisons

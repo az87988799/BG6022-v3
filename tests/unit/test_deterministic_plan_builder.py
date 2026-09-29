@@ -154,7 +154,7 @@ def test_dual_opt_compare_is_independent_and_shares_initial_geometry():
     assert Counter(target.field for target in plan.requested_results) == Counter(
         ["opt_final_electronic_energy", "opt_final_electronic_energy"]
     )
-    assert request.answer_goals[0].output == "opt_final_electronic_energy"
+    assert request.answer_goals[0].output == "electronic_energy"
 
 
 def test_requirement_cycle_stops_without_planner_fallback():

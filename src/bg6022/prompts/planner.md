@@ -25,3 +25,8 @@ Use `method_capability_catalog` as the only method directory. Keep the exact res
 Use only declared parameter fields and input/output ports. Charge and multiplicity must come from the Request, a trusted structure fact, or configured defaults under the application policy; never infer them from molecule identity. A model proposal cannot declare scientific success. Use Tool-declared goal checks for scientific prerequisites and preserve their exact source Step and input binding.
 
 If `validation_feedback` is supplied, correct those local issues while preserving every Requirement, AnswerGoal, parameter, and geometry-source constraint in the Request.
+Presentation comparisons bind the semantic property independently on each Requirement;
+the real field names may differ. Preserve each Subject's history_geometry_alias and
+explicit dependencies. A Subject with supplied geometry needs no preparation, while
+other Subjects may still need resolve/generate. Keep both SP inputs on their explicitly
+shared initial, historical or optimized geometry when building a method-energy difference.

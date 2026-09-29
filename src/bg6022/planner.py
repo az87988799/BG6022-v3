@@ -343,6 +343,53 @@ class AnswerGoalProposal(BaseModel):
         return value
 
 
+def validate_answer_goal_contract(goals, requirements, registry):
+    """Resolve each side independently; numeric differences need a real producer."""
+    by_key = {getattr(r, "key", None) or r.id: r for r in requirements}
+    for goal in goals:
+        keys = getattr(goal, "requirement_keys", None) or goal.requirement_ids
+        selected = [by_key[key] for key in keys]
+        descriptors = [
+            resolve_output_selector(registry.get(r.capability), goal.output) for r in selected
+        ]
+        contracts = {
+            tuple(d.get(k) for k in ("property", "kind", "type", "unit", "shape"))
+            for d in descriptors
+        }
+        if len(contracts) != 1:
+            raise ValueError("AnswerGoal requires compatible semantic properties")
+        if goal.mode == "side_by_side":
+            if any(d["name"] not in r.outputs for d, r in zip(descriptors, selected, strict=True)):
+                raise ValueError("AnswerGoal output must be requested from each Requirement")
+        else:
+
+            def matches(requirement, keys=keys):
+                if (
+                    requirement.capability != "same_geometry_method_energy_difference"
+                    or "method_energy_difference" not in requirement.outputs
+                ):
+                    return False
+                for port, key in zip(("energy_a", "energy_b"), keys, strict=False):
+                    binding = requirement.input_bindings.get(port)
+                    if (
+                        binding is None
+                        or (
+                            getattr(binding, "requirement_key", None)
+                            or getattr(binding, "source_requirement_id", None)
+                        )
+                        != key
+                    ):
+                        return False
+                return len(keys) == 2
+
+            if descriptors[0]["property"] != "electronic_energy" or not any(
+                matches(r) for r in requirements
+            ):
+                raise ValueError(
+                    "numeric_difference requires a requested, bound derived Tool result"
+                )
+
+
 @dataclass(frozen=True)
 class ElectronicStateInput:
     status: ElectronicStateStatus
@@ -1744,17 +1791,15 @@ def _validate_molecule_identity_contract(
 
     subject_constraints: list[tuple[str | None, Mapping[str, Any], Mapping[str, Any]]] = []
     for subject_id, subject in request.subjects.items():
-        if not isinstance(subject, Mapping):
-            continue
-        subject_input = subject.get("structure_input", {})
+        subject_input = subject.structure_input
         if not isinstance(subject_input, Mapping):
             continue
         identity = subject_input.get("molecule_identity")
         if isinstance(identity, Mapping):
             subject_constraints.append((subject_id, identity, subject_input))
-    identity = request.structure_input.get("molecule_identity")
+    identity = single_subject_structure(request).get("molecule_identity")
     if isinstance(identity, Mapping) and not subject_constraints:
-        subject_constraints.append((None, identity, request.structure_input))
+        subject_constraints.append((None, identity, single_subject_structure(request)))
     for subject_id, identity, subject_input in subject_constraints:
         expected_kind = identity.get("input_kind")
         selected_cid = identity.get("selected_cid")
@@ -1763,7 +1808,11 @@ def _validate_molecule_identity_contract(
             step
             for step in plan.steps
             if step.tool == "resolve_molecule"
-            and (subject_id is None or step.subject_id == subject_id)
+            and (
+                subject_id is None
+                or step.subject_id == subject_id
+                or (step.subject_id is None and len(request.subjects) == 1)
+            )
         ]
         has_inline_xyz = (
             subject_input.get("xyz_text") is not None or subject_input.get("xyz") is not None
@@ -1945,6 +1994,7 @@ def request_from_intake(
     ]
     if unresolved:
         raise ValueError("本次请求包含尚未支持的方法要求：" + "；".join(dict.fromkeys(unresolved)))
+    validate_answer_goal_contract(intake.answer_goals, intake.requirements, registry)
     request = Request(
         id=request_id,
         description=message,
@@ -2396,11 +2446,33 @@ def _target_identity(target: ResultTarget) -> tuple[str, str]:
     return "field", target.field
 
 
-def _required_geometry_bindings(request: Request) -> list[RequiredGeometryBinding]:
-    raw = request.structure_input.get("required_bindings", [])
-    if not isinstance(raw, list):
-        raise ValueError("Request.structure_input.required_bindings must be a list")
-    return [RequiredGeometryBinding.model_validate(item, strict=True) for item in raw]
+def single_subject_structure(request: Request) -> dict[str, Any]:
+    """Read actual Subject data without the legacy default-registry projection."""
+    return (
+        dict(next(iter(request.subjects.values())).structure_input)
+        if len(request.subjects) == 1
+        else {}
+    )
+
+
+def _required_geometry_bindings(
+    request: Request, registry: ToolRegistry
+) -> list[RequiredGeometryBinding]:
+    bindings = []
+    for requirement in request.requirements:
+        tool = registry.get(requirement.capability)
+        for port, binding in requirement.input_bindings.items():
+            if tool.input_ports.get(port) != "molecular_geometry":
+                continue
+            bindings.append(
+                RequiredGeometryBinding(
+                    consumer_requirement_id=requirement.id,
+                    input_port=port,
+                    source_requirement_id=binding.source_requirement_id,
+                    source_port=binding.artifact_alias or binding.source_port,
+                )
+            )
+    return bindings
 
 
 def _tool_for_operation(registry: ToolRegistry, operation: str):
@@ -2417,7 +2489,7 @@ def _tool_for_operation(registry: ToolRegistry, operation: str):
 
 
 def _validate_required_geometry_contract(request: Request, registry: ToolRegistry) -> None:
-    for binding in _required_geometry_bindings(request):
+    for binding in _required_geometry_bindings(request, registry):
         consumer_requirement = None
         if binding.consumer_requirement_id is not None:
             consumer_requirement = next(
@@ -2512,7 +2584,7 @@ def _require_composite_geometry_sources(request: Request, registry: ToolRegistry
         ]
         if not optimizers:
             return
-        bindings = _required_geometry_bindings(request)
+        bindings = _required_geometry_bindings(request, registry)
         explicitly_bound: set[str] = set()
         for binding in bindings:
             if binding.consumer_requirement_id is not None:
@@ -2551,7 +2623,7 @@ def _require_composite_geometry_sources(request: Request, registry: ToolRegistry
     operations = set(registry.operations_for_request(request))
     if "Opt" not in operations:
         return
-    bindings = _required_geometry_bindings(request)
+    bindings = _required_geometry_bindings(request, registry)
     bound_operations = {
         item.consumer_operation for item in bindings if item.consumer_operation is not None
     }
@@ -2587,7 +2659,7 @@ def _validate_required_geometry_bindings(
     request: Request, plan: Plan, registry: ToolRegistry
 ) -> None:
     _validate_required_geometry_contract(request, registry)
-    bindings = _required_geometry_bindings(request)
+    bindings = _required_geometry_bindings(request, registry)
     if not bindings:
         return
     steps_by_requirement: dict[str, list[Step]] = {}
@@ -3354,12 +3426,7 @@ def _intake_schema(
                 else:
                     raise ValueError(f"unregistered artifact alias {binding.artifact_alias!r}")
 
-        for goal in value.answer_goals:
-            selected = [requirements_by_key[key] for key in goal.requirement_keys]
-            if any(goal.output not in requirement.outputs for requirement in selected):
-                raise ValueError(
-                    f"AnswerGoal output {goal.output!r} must be requested from each Requirement"
-                )
+        validate_answer_goal_contract(value.answer_goals, value.requirements, registry)
         return value
 
     def _dialogue_contract(value: IntakeOutput) -> IntakeOutput:

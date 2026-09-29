@@ -234,7 +234,9 @@ def test_independent_method_optimizations_keep_answer_goal_out_of_plan(tmp_path:
             zip(requirements, optimization_steps, strict=True), 1
         )
     ]
-    answer_goals, comparison_note = Agent._answer_goal_context(run, answer_facts)
+    answer_goals, comparison_note = Agent._answer_goal_context(
+        run, answer_facts, registry=build_registry()
+    )
     assert answer_goals[0]["mode"] == "side_by_side"
     assert [item["output_ref"] for item in answer_goals[0]["calculations"]] == [
         "out_1",

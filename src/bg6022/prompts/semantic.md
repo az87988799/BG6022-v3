@@ -38,6 +38,12 @@ never infer a new binding from a short ref's spelling.
 For compute requests:
 - Give every subject a short local key and an input query grounded in this turn or
   recent conversation. `evidence` must quote the user's original wording exactly.
+- A Subject has either a query or a history_geometry_ref selected from geometry_catalog.
+  History reuse keeps query null; evidence quotes the current reuse request. Select by
+  molecule, method, operation and recent delivery labels, not keywords or alias order.
+  Each Subject may select its own source; another Subject may use a new identity.
+  “沿用这个结构计算单点能” can reuse a uniquely identified source without saying “上次”.
+  Excluded reuse must not produce a history binding; ambiguous references need clarification.
 - Keep the user's original molecule wording in `evidence`. When `input_kind`
   is `name` and the user gives a Chinese chemical name, use a reliable English
   PubChem lookup name in `query` while preserving the exact Chinese wording in
@@ -57,6 +63,11 @@ For compute requests:
 - Use `compare` for side-by-side results. Use `difference` only when a numeric
   difference is explicitly requested. The program derives outputs and energy
   wiring from Tool contracts.
+- The same semantic property may have different real field names on different Tools.
+  use_output requires a real public port, never an ordinary value field. When needed,
+  specify source_output and target_input from the declared contracts. A difference can
+  share initial, historical or optimized geometry, but both SP tasks must select the
+  same source and electronic state; retain explicit dependencies on both sides.
 - For a numeric energy difference, describe the two source calculations and add
   a `difference` relation. Do not create a task for the program-derived
   difference Tool. Gibbs free energy and other thermal free-energy values are

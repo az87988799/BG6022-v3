@@ -39,7 +39,12 @@ from .molecule_identity import (
     identity_matches_facts,
     normalize_formula_token,
 )
-from .output_contracts import is_compatible_value, public_source_context, public_type_info
+from .output_contracts import (
+    is_compatible_value,
+    public_source_context,
+    public_type_info,
+    resolve_output_selector,
+)
 from .output_query import (
     build_raw_catalog_entries,
     collect_raw_output_sources,
@@ -62,6 +67,7 @@ from .planner import (
     plan_message,
     proposal_to_plan,
     request_from_intake,
+    single_subject_structure,
     validate_request_plan,
 )
 from .repair import apply_repair_proposal, propose_repair
@@ -135,7 +141,7 @@ def _pending_intake_context(run: Run | None, registry: ToolRegistry) -> dict[str
         subject_input.get("molecule_identity") if isinstance(subject_input, Mapping) else None
     )
     if not isinstance(identity, Mapping):
-        identity = run.request.structure_input.get("molecule_identity")
+        identity = single_subject_structure(run.request).get("molecule_identity")
     identity = identity if isinstance(identity, Mapping) else {}
     candidates = run.pending_data.get("candidates")
     candidates = candidates if isinstance(candidates, list) else []
@@ -358,6 +364,7 @@ class Agent:
                         "last_delivery": self._session.get("last_delivery", []),
                     },
                     pending_tasks=pending_tasks,
+                    geometry_catalog=geometry_catalog,
                     result_catalog=result_catalog,
                     cancel=request_cancel,
                 )
@@ -462,6 +469,7 @@ class Agent:
                                     "last_delivery": self._session.get("last_delivery", []),
                                 },
                                 pending_tasks=pending_tasks,
+                                geometry_catalog=geometry_catalog,
                                 result_catalog=result_catalog,
                                 validation_feedback=validation_feedback,
                                 cancel=request_cancel,
@@ -636,67 +644,20 @@ class Agent:
                 self._record_response(response, cancel=request_cancel)
                 return response
 
-            selected_geometry_alias = intake.history_geometry_alias
-            history_geometry_requested = _requests_history_geometry(text)
-            if selected_geometry_alias is not None and not history_geometry_requested:
-                raise ValueError(
-                    "a historical geometry can be selected only when the user explicitly "
-                    "requests reuse of a previous structure"
-                )
-            if (
-                intake.intent == "chemistry_compute"
-                and history_geometry_requested
-                and len(geometry_catalog) > 1
-            ):
-                # The intake model can help interpret a request, but it must not
-                # choose among multiple historical structures on the user's behalf.
-                explicit_alias = _explicit_history_geometry_alias(text, geometry_catalog)
-                if explicit_alias is None:
-                    options = "\n".join(
-                        f"- {item['alias']}: {item['description']} "
-                        f"({_query_system_label(item.get('system', {}))})"
-                        for item in geometry_catalog
-                    )
-                    response = AgentResponse(
-                        "当前会话有多个可复用的成功结构，请明确选择一个结构别名后再继续：\n"
-                        f"{options}\n回复如“复用 geometry_1”。"
-                    )
-                    self._record_response(response, cancel=request_cancel)
-                    return response
-                selected_geometry_alias = explicit_alias
-                intake = _intake_with_history_geometry(intake, selected_geometry_alias)
-            if (
-                selected_geometry_alias is None
-                and intake.intent == "chemistry_compute"
-                and history_geometry_requested
-            ):
-                if not geometry_catalog:
-                    response = AgentResponse(
-                        "当前会话没有找到可安全复用的成功结构；我没有改用新结构或启动计算。"
-                    )
-                    self._record_response(response, cancel=request_cancel)
-                    return response
-                if len(geometry_catalog) > 1:
-                    response = AgentResponse(
-                        "当前会话有多个可复用的成功结构，请说明要使用哪一个分子或任务。"
-                    )
-                    self._record_response(response, cancel=request_cancel)
-                    return response
-                selected_geometry_alias = str(geometry_catalog[0]["alias"])
-                intake = _intake_with_history_geometry(intake, selected_geometry_alias)
-            if selected_geometry_alias is not None:
-                if intake.intent != "chemistry_compute":
-                    raise ValueError(
-                        "a historical geometry alias can only be used for a calculation"
-                    )
-                if selected_geometry_alias not in geometry_bindings:
-                    raise ValueError(
-                        "intake selected a history geometry outside the verified catalog"
-                    )
-                if intake.structure_input.get("xyz_text") or intake.structure_input.get("xyz"):
-                    raise ValueError(
-                        "a request cannot combine a historical geometry alias with inline XYZ"
-                    )
+            selected_geometry_aliases = {
+                key: subject.history_geometry_alias
+                for key, subject in intake.subjects.items()
+                if subject.history_geometry_alias is not None
+            }
+            for key, alias in selected_geometry_aliases.items():
+                subject = intake.subjects[key]
+                if alias not in geometry_bindings:
+                    raise ValueError("selected history geometry is outside the provided catalog")
+                evidence = subject.molecule_name_evidence
+                if not evidence or text.count(evidence) != 1:
+                    raise ValueError("history geometry requires unique evidence from this message")
+                if subject.inline_xyz is not None:
+                    raise ValueError("one subject cannot combine history and inline XYZ")
 
             if normalized_parameters.clarification_fields and (
                 intake.intent == "chemistry_compute"
@@ -766,9 +727,9 @@ class Agent:
                                 [
                                     item
                                     for item in geometry_catalog
-                                    if item.get("alias") == selected_geometry_alias
+                                    if item.get("alias") in selected_geometry_aliases.values()
                                 ]
-                                if selected_geometry_alias is not None
+                                if selected_geometry_aliases
                                 else []
                             ),
                         },
@@ -785,10 +746,12 @@ class Agent:
                             self.registry,
                             plan_id=new_id("plan"),
                             artifact_aliases=_selected_artifact_aliases(
-                                request, selected_geometry_alias
+                                request, selected_geometry_aliases
                             ),
                         )
-                        _validate_selected_geometry_binding(plan, request, selected_geometry_alias)
+                        _validate_selected_geometry_binding(
+                            plan, request, selected_geometry_aliases
+                        )
                         break
                     except ValueError as error:
                         if revision >= max_revisions:
@@ -806,11 +769,11 @@ class Agent:
             run = self._create_chat_run(
                 request,
                 plan,
-                history_geometry_binding=(
-                    geometry_bindings.get(selected_geometry_alias)
-                    if selected_geometry_alias is not None
-                    else None
-                ),
+                history_geometry_bindings={
+                    subject_id: geometry_bindings[subject.structure_input["history_geometry_alias"]]
+                    for subject_id, subject in request.subjects.items()
+                    if subject.structure_input.get("history_geometry_alias") is not None
+                },
             )
             self._session["active_run_id"] = run.id
             self._save_session()
@@ -1357,17 +1320,23 @@ class Agent:
         plan: Plan,
         *,
         history_geometry_binding: Mapping[str, Any] | None = None,
+        history_geometry_bindings: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> Run:
         plan = validate_request_plan(request, plan, self.registry)
         _validate_request_parameter_scope(request, plan, self.registry)
-        history_alias = request.structure_input.get("history_geometry_alias")
-        verified_history = (
-            self._verify_history_geometry_binding(history_geometry_binding)
-            if history_alias is not None and history_geometry_binding is not None
-            else None
-        )
-        if history_alias is not None and verified_history is None:
-            raise ValueError("selected history geometry has no verified source binding")
+        bindings = dict(history_geometry_bindings or {})
+        if history_geometry_binding is not None:
+            if len(request.subjects) != 1 or bindings:
+                raise ValueError("legacy history binding requires exactly one subject")
+            bindings[next(iter(request.subjects))] = history_geometry_binding
+        verified_history = {}
+        for subject_id, subject in request.subjects.items():
+            alias = subject.structure_input.get("history_geometry_alias")
+            if alias is None:
+                continue
+            if subject_id not in bindings:
+                raise ValueError("selected history geometry has no verified source binding")
+            verified_history[alias] = self._verify_history_geometry_binding(bindings[subject_id])
         run = Run(
             id=new_id("run"),
             request=request,
@@ -1390,7 +1359,7 @@ class Agent:
         )
         create_run(self.config.data_root_path, run)
         alias_replacements: dict[str, str] = {}
-        if verified_history is not None:
+        for history_alias, verified_source in verified_history.items():
             (
                 source_run,
                 source_step,
@@ -1398,7 +1367,7 @@ class Agent:
                 source_artifact,
                 source_path,
                 source_port,
-            ) = verified_history
+            ) = verified_source
             copied = register_file_artifact(
                 self.config.data_root_path,
                 run,
@@ -1447,7 +1416,7 @@ class Agent:
         """Register caller-supplied XYZ once per subject and expose safe aliases."""
 
         replacements: dict[str, Any] = {}
-        value = run.request.structure_input
+        value = single_subject_structure(run.request)
         xyz_text = value.get("xyz_text") or value.get("xyz") if isinstance(value, dict) else None
         if xyz_text is not None:
             artifact = self._register_input_geometry(
@@ -1837,7 +1806,7 @@ class Agent:
             subject_input_value = (
                 subject_record.get("structure_input", {})
                 if isinstance(subject_record, Mapping)
-                else run.request.structure_input
+                else single_subject_structure(run.request)
             )
             structure_input = dict(subject_input_value)
             if candidate is not None:
@@ -3067,7 +3036,7 @@ class Agent:
 
     @staticmethod
     def _answer_goal_context(
-        run: Run, facts: list[Mapping[str, Any]]
+        run: Run, facts: list[Mapping[str, Any]], *, registry: ToolRegistry
     ) -> tuple[list[dict[str, Any]], str | None]:
         """Bind presentation goals to current verified outputs, without planning work."""
 
@@ -3078,13 +3047,22 @@ class Agent:
             calculations: list[dict[str, Any]] = []
             for requirement_id in goal.requirement_ids:
                 requirement = requirements.get(requirement_id)
+                if requirement is None:
+                    calculations = []
+                    break
+                try:
+                    descriptor = resolve_output_selector(
+                        registry.get(requirement.capability), goal.output
+                    )
+                except ValueError:
+                    calculations = []
+                    break
                 fact = next(
                     (
                         item
                         for item in facts
                         if item.get("requirement_id") == requirement_id
-                        and goal.output
-                        in {str(item.get("name") or ""), str(item.get("result_property") or "")}
+                        and descriptor["name"] == item.get("name")
                     ),
                     None,
                 )
@@ -3183,7 +3161,9 @@ class Agent:
                 },
             )
         outputs = self._answer_output_map(renderable, files)
-        answer_goal_context, answer_goal_note = self._answer_goal_context(run, renderable)
+        answer_goal_context, answer_goal_note = self._answer_goal_context(
+            run, renderable, registry=self.registry
+        )
         draft: AnswerOutput | None = None
         if not cancelled:
             try:
@@ -3772,10 +3752,7 @@ class Agent:
                     if expected_type != "molecular_geometry":
                         continue
                     artifact = self._query_port_artifact(run, step, result, port, expected_type)
-                    if artifact is None or artifact.role not in {
-                        "initial_geometry",
-                        "optimized_geometry",
-                    }:
+                    if artifact is None or artifact.role == "restart_candidate":
                         continue
                     try:
                         geometry_path = artifact_path(self.config.data_root_path, run, artifact)
@@ -3860,7 +3837,7 @@ class Agent:
         if (
             artifact is None
             or artifact.id != binding.get("artifact_id")
-            or artifact.role not in {"initial_geometry", "optimized_geometry"}
+            or artifact.role == "restart_candidate"
             or (binding.get("role") is not None and artifact.role != binding.get("role"))
             or artifact.step_id != step.id
             or artifact.attempt != result.attempt
@@ -4837,26 +4814,26 @@ def _intake_with_history_geometry(intake: IntakeOutput, alias: str) -> IntakeOut
 
 
 def _selected_artifact_aliases(
-    request: Request, selected_history_alias: str | None
+    request: Request, selected_history_alias: str | Mapping[str, str] | None
 ) -> dict[str, str]:
     aliases: dict[str, str] = {}
-    if selected_history_alias is not None:
+    if isinstance(selected_history_alias, Mapping):
+        aliases.update({alias: alias for alias in selected_history_alias.values()})
+    elif selected_history_alias is not None:
         aliases[selected_history_alias] = selected_history_alias
-    structure_input = request.structure_input
+    structure_input = single_subject_structure(request)
     if isinstance(structure_input, Mapping) and (
         structure_input.get("xyz_text") is not None or structure_input.get("xyz") is not None
     ):
         aliases["request_geometry"] = "request_geometry"
         aliases[INPUT_GEOMETRY_PLACEHOLDER] = INPUT_GEOMETRY_PLACEHOLDER
     for subject_id, subject in request.subjects.items():
-        if not isinstance(subject, Mapping):
-            continue
-        subject_input = subject.get("structure_input", {})
+        subject_input = subject.structure_input
         if not isinstance(subject_input, Mapping) or not (
             subject_input.get("xyz_text") is not None or subject_input.get("xyz") is not None
         ):
             continue
-        key = str(subject.get("key") or subject_id)
+        key = str(subject.key or subject_id)
         alias = f"request_geometry_{key}"
         aliases[alias] = alias
     return aliases
@@ -4935,30 +4912,40 @@ def _explicit_history_geometry_alias(
 
 
 def _validate_selected_geometry_binding(
-    plan: Plan, request: Request, selected_history_alias: str | None
+    plan: Plan, request: Request, selected_history_alias: str | Mapping[str, str] | None
 ) -> None:
-    selected_alias = selected_history_alias
-    if (
-        selected_alias is None
-        and isinstance(request.structure_input, Mapping)
-        and (
-            request.structure_input.get("xyz_text") is not None
-            or request.structure_input.get("xyz") is not None
+    aliases = selected_history_alias if isinstance(selected_history_alias, Mapping) else {}
+    for subject_id, subject in request.subjects.items():
+        alias = aliases.get(subject.key) or subject.structure_input.get("history_geometry_alias")
+        if alias is None and len(request.subjects) == 1 and isinstance(selected_history_alias, str):
+            alias = selected_history_alias
+        inline = (
+            subject.structure_input.get("xyz_text") is not None
+            or subject.structure_input.get("xyz") is not None
         )
-    ):
-        selected_alias = "request_geometry"
-    if selected_alias is None:
-        return
-    if any(step.tool in {"resolve_molecule", "generate_geometry"} for step in plan.steps):
-        raise ValueError(
-            "a supplied geometry must be used directly without new structure preparation"
+        if alias is None and not inline:
+            continue
+        subject_steps = [
+            step
+            for step in plan.steps
+            if step.subject_id == subject_id
+            or (step.subject_id is None and len(request.subjects) == 1)
+        ]
+        if any(step.tool in {"resolve_molecule", "generate_geometry"} for step in subject_steps):
+            raise ValueError(
+                "a supplied geometry must be used directly without new structure preparation"
+            )
+        permitted = (
+            {alias}
+            if alias
+            else {"request_geometry", INPUT_GEOMETRY_PLACEHOLDER, f"request_geometry_{subject.key}"}
         )
-    if not any(
-        (reference := step.inputs.get("geometry")) is not None
-        and reference.artifact_id == selected_alias
-        for step in plan.steps
-    ):
-        raise ValueError("Plan does not use the selected supplied geometry as a calculation input")
+        if not any(
+            ref.artifact_id in permitted for step in subject_steps for ref in step.inputs.values()
+        ):
+            raise ValueError(
+                "Plan does not use the selected supplied geometry as a calculation input"
+            )
 
 
 def _looks_like_molecule_change(message: str) -> bool:

@@ -59,14 +59,15 @@ class SemanticModel(BaseModel):
 
 class SemanticSubject(SemanticModel):
     key: StrictStr
-    query: StrictStr
+    query: StrictStr | None = None
+    history_geometry_ref: StrictStr | None = None
     input_kind: Literal["name", "cid", "smiles", "formula"] = "name"
     evidence: StrictStr
 
     @field_validator("key", "query", "evidence")
     @classmethod
-    def _nonblank(cls, value: str) -> str:
-        if not value.strip():
+    def _nonblank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
             raise ValueError("semantic subject fields must not be blank")
         return value
 
@@ -79,7 +80,9 @@ class SemanticSubject(SemanticModel):
 
     @model_validator(mode="after")
     def _normalized_name_lookup(self) -> SemanticSubject:
-        if self.input_kind == "name" and _HAN_NAME.search(self.query):
+        if (self.query is None) == (self.history_geometry_ref is None):
+            raise ValueError("subject needs exactly one identity query or history geometry ref")
+        if self.query is not None and self.input_kind == "name" and _HAN_NAME.search(self.query):
             raise ValueError(
                 "name query must use a reliable English PubChem lookup spelling; "
                 "preserve the original Chinese name in evidence"
@@ -130,13 +133,15 @@ class UseOutputRelation(SemanticModel):
     type: Literal["use_output"]
     source_task: StrictStr
     target_task: StrictStr
-    property: Literal["geometry", "energy"]
+    property: StrictStr
+    source_output: StrictStr | None = None
+    target_input: StrictStr | None = None
 
 
 class CompareRelation(SemanticModel):
     type: Literal["compare"]
     tasks: list[StrictStr]
-    property: Literal["energy", "geometry"] = "energy"
+    property: StrictStr = "energy"
 
     @field_validator("tasks")
     @classmethod
@@ -349,6 +354,7 @@ def semantic_schema(
     result_catalog: list[Mapping[str, Any]] | None = None,
     pending_tasks: list[Mapping[str, Any]] | None = None,
     message: str | None = None,
+    geometry_catalog: list[Mapping[str, Any]] | None = None,
 ) -> type[BaseModel]:
     """Create a strict response type whose task names match current Tools."""
 
@@ -405,6 +411,17 @@ def semantic_schema(
     )
 
     def _catalog_contract(value: SemanticProposal) -> SemanticProposal:
+        if geometry_catalog is not None:
+            aliases = {item.get("alias") for item in geometry_catalog}
+            for subject in value.subjects:
+                if subject.history_geometry_ref is not None and (
+                    subject.history_geometry_ref not in aliases
+                    or message is None
+                    or message.count(subject.evidence) != 1
+                ):
+                    raise ValueError(
+                        "history subject must select a provided geometry and quote current evidence"
+                    )
         requirements_by_key = {item.key: item for item in value.tasks}
         for task in value.tasks:
             tool = registry.get(task.capability)
@@ -481,6 +498,7 @@ def semantic_message(
     recent_context: Mapping[str, Any] | None = None,
     pending_tasks: list[Mapping[str, Any]] | None = None,
     result_catalog: list[Mapping[str, Any]] | None = None,
+    geometry_catalog: list[Mapping[str, Any]] | None = None,
     validation_feedback: str | None = None,
     cancel: Any = None,
 ) -> SemanticProposal:
@@ -517,6 +535,7 @@ def semantic_message(
         result_catalog=results,
         pending_tasks=tasks,
         message=message,
+        geometry_catalog=geometry_catalog or [],
     )
     example = {
         "mode": "compute",
@@ -563,6 +582,7 @@ def semantic_message(
                         "recent_context": context,
                         "pending_tasks": tasks,
                         "result_catalog": results,
+                        "geometry_catalog": geometry_catalog or [],
                         "tool_catalog": compact_tool_catalog(registry),
                         "method_catalog": compact_method_catalog(registry),
                         "validation_feedback": validation_feedback,

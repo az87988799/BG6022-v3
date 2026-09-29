@@ -118,7 +118,7 @@ def test_dual_opt_compare_derives_shared_output_and_answer_goal():
         ["opt_final_electronic_energy"],
         ["opt_final_electronic_energy"],
     ]
-    assert request.answer_goals[0].output == "opt_final_electronic_energy"
+    assert request.answer_goals[0].output == "electronic_energy"
     assert request.answer_goals[0].mode == "side_by_side"
 
 

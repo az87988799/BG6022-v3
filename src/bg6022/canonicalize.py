@@ -68,7 +68,7 @@ def semantic_to_intake(
             molecule_input_kind=None if inline is not None else subject.input_kind,
             molecule_name_evidence=None if inline is not None else subject.evidence,
             inline_xyz=inline[0] if inline is not None else None,
-            history_geometry_alias=history_geometry_alias,
+            history_geometry_alias=subject.history_geometry_ref or history_geometry_alias,
         )
     if inline is not None and not subject_proposals:
         subject_proposals["subject_1"] = IntakeSubjectProposal(
@@ -129,7 +129,9 @@ def semantic_to_intake(
 
     consumed: set[str] = set()
     answer_goals: list[AnswerGoalProposal] = []
-    for relation in semantic.relations:
+    for relation in sorted(
+        semantic.relations, key=lambda r: 0 if isinstance(r, UseOutputRelation) else 1
+    ):
         if isinstance(relation, UseOutputRelation):
             source = task_by_key[relation.source_task]
             target = task_by_key[relation.target_task]
@@ -145,7 +147,12 @@ def semantic_to_intake(
                 registry,
             )
             for task_key in relation.tasks:
-                _append_unique(outputs_by_task[task_key], common_output)
+                _append_unique(
+                    outputs_by_task[task_key],
+                    _output_for_property(
+                        registry.get(task_by_key[task_key].capability), common_output
+                    ),
+                )
             answer_goals.append(
                 AnswerGoalProposal(
                     kind="compare",
@@ -269,20 +276,17 @@ def _common_output(
     tasks: Mapping[str, SemanticTask],
     registry: ToolRegistry,
 ) -> str:
-    candidate_sets = [
-        {
-            str(item["name"])
-            for item in registry.get(tasks[key].capability).public_outputs()
-            if item["property"] == property_name
-        }
+    outputs = [
+        resolve_output_selector(registry.get(tasks[key].capability), property_name)
         for key in task_keys
     ]
-    common = set.intersection(*candidate_sets) if candidate_sets else set()
-    if len(common) != 1:
-        raise ValueError(
-            f"comparison output is not uniquely derivable from Tool contracts: {sorted(common)}"
-        )
-    return next(iter(common))
+    contracts = {
+        tuple(o.get(k) for k in ("property", "kind", "type", "unit", "shape", "mime_type"))
+        for o in outputs
+    }
+    if len(contracts) != 1:
+        raise ValueError("comparison requires compatible semantic output contracts")
+    return str(outputs[0]["property"])
 
 
 def _apply_use_output(
@@ -295,20 +299,28 @@ def _apply_use_output(
     target_task = tasks[relation.target_task]
     source_tool = registry.get(source_task.capability)
     target_tool = registry.get(target_task.capability)
-    wanted_type = {"geometry": "molecular_geometry", "energy": "energy_data"}[relation.property]
-    source_ports = [
-        name for name, value in source_tool.output_ports.items() if value == wanted_type
+    source = resolve_output_selector(
+        source_tool, relation.source_output or relation.property, kind="port"
+    )
+    if relation.source_output is not None:
+        expected = PROPERTY_ALIASES.get(relation.property, relation.property)
+        if expected not in {source["property"], source["name"]}:
+            raise ValueError("source_output does not match dependency property")
+    target_ports = [
+        name
+        for name, value in target_tool.input_ports.items()
+        if value == source["type"]
+        and (relation.target_input is None or name == relation.target_input)
     ]
-    target_ports = [name for name, value in target_tool.input_ports.items() if value == wanted_type]
-    if len(source_ports) != 1 or len(target_ports) != 1:
-        raise ValueError("typed dependency is not uniquely derivable")
+    if len(target_ports) != 1:
+        raise ValueError("typed dependency is not uniquely derivable; specify target_input")
     target_bindings = proposals[relation.target_task]["input_bindings"]
     input_name = target_ports[0]
     if input_name in target_bindings:
         raise ValueError(f"target input {input_name!r} has conflicting semantic relations")
     target_bindings[input_name] = RequirementInputBindingProposal(
         requirement_key=relation.source_task,
-        port=source_ports[0],
+        port=source["name"],
     )
 
 
@@ -328,12 +340,15 @@ def _apply_difference(
     difference_tool = registry.get("same_geometry_method_energy_difference")
     if not difference_tool.available or difference_tool.planning_role != "task":
         raise ValueError("same-geometry energy difference Tool is unavailable")
-    for key in (left_key, right_key):
-        inputs = proposals[key]["input_bindings"]
-        current = inputs.get("geometry")
-        if current is not None and current.artifact_alias != "initial_geometry":
-            raise ValueError("energy difference tasks must share the same initial geometry")
-        inputs["geometry"] = RequirementInputBindingProposal(artifact_alias="initial_geometry")
+    left_geometry = proposals[left_key]["input_bindings"].get("geometry")
+    right_geometry = proposals[right_key]["input_bindings"].get("geometry")
+    if left_geometry != right_geometry:
+        raise ValueError("energy difference tasks must share the same explicit geometry source")
+    if left_geometry is None:
+        for key in (left_key, right_key):
+            proposals[key]["input_bindings"]["geometry"] = RequirementInputBindingProposal(
+                artifact_alias="initial_geometry"
+            )
     derived_key = f"difference_{left_key}_{right_key}"
     if _ID_RE.fullmatch(derived_key) is None:
         raise ValueError("derived energy-difference key is too long")
