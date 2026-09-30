@@ -17,8 +17,10 @@ from bg6022.session import (
     new_id,
     new_metadata_budget,
     read_metadata_json,
+    read_registered_artifact_bytes,
     registered_read_path,
 )
+from bg6022.tools.molecule import ATOMIC_NUMBERS, parse_xyz_bytes
 from bg6022.tools.orca_output import (
     MAX_FILE_BYTES,
     MAX_LINES,
@@ -27,12 +29,66 @@ from bg6022.tools.orca_output import (
     MAX_SNIPPETS,
     MAX_TEXT_BYTES,
     OutputQuerySpec,
+    dump_query_spec,
     make_orca_output_tool,
     validate_output_evidence,
 )
 from bg6022.tools.runtime import ToolCallContext
 
 ORCA_CAPABILITIES = {"optimize_geometry", "single_point", "frequency"}
+PROPERTY_SEARCH_TERMS = {
+    "dipole_moment": ["DIPOLE MOMENT"],
+    "homo_energy": ["ORBITAL ENERGIES"],
+    "lumo_energy": ["ORBITAL ENERGIES"],
+    "homo_lumo_gap": ["ORBITAL ENERGIES"],
+    "frontier_orbitals": ["ORBITAL ENERGIES"],
+    "orca_printed_electron_count": ["Number of Electrons"],
+    "orca_printed_alpha_electrons": ["Number of Alpha Electrons"],
+    "orca_printed_beta_electrons": ["Number of Beta Electrons"],
+    "orca_printed_correlated_electrons": ["Number of Correlated Electrons"],
+}
+
+
+def pending_query_targets(pending, hint, bindings):
+    """Restore goals from program-owned context, never from a short reply's words."""
+    targets = []
+    for source in pending["source_bindings"]:
+        run_id, step_id = source.get("run_id"), source.get("source_step_id", source.get("step_id"))
+        formal = [
+            (key, b)
+            for key, b in bindings.items()
+            if key[1] == hint and b.get("run_id") == run_id and b.get("step_id") == step_id
+        ]
+        observation = [
+            (key, b)
+            for key, b in bindings.items()
+            if b.get("access") == "readonly_observation"
+            and b.get("derivation_id") == hint
+            and same_source(b["source_binding"], source)
+        ]
+        raw = [
+            (key, b)
+            for key, b in bindings.items()
+            if b.get("access") == "raw_output" and same_source(b, source)
+        ]
+        matches = formal or observation or raw
+        if len(matches) != 1:
+            raise ValueError("pending source is no longer uniquely bound")
+        (ref, prop), binding = matches[0]
+        target = {"subject_ref": ref, "property": prop, "evidence": pending["origin_evidence"]}
+        if binding.get("access") == "raw_output":
+            target["queries"] = [
+                {
+                    "evidence": pending["origin_evidence"],
+                    "property_hint": hint,
+                    "question_key": pending["pending_id"],
+                    "search_terms": PROPERTY_SEARCH_TERMS.get(hint)
+                    or pending.get("search_terms")
+                    or [hint.replace("_", " ")],
+                }
+            ]
+        targets.append(target)
+    return targets
 
 
 def normalize_report_queries(queries, message, *, capability=None):
@@ -45,7 +101,7 @@ def normalize_report_queries(queries, message, *, capability=None):
         query = OutputQuerySpec.model_validate(value, strict=True)
         if query.evidence not in message:
             raise ValueError("report evidence must quote the user's message")
-        normalized.append(query.model_dump(mode="json"))
+        normalized.append(dump_query_spec(query))
     return normalized
 
 
@@ -74,16 +130,26 @@ def read_report_queries(request):
     return result
 
 
-def validate_raw_query_targets(targets, message, catalog):
+def validate_raw_query_targets(targets, message, catalog, *, evidence_context=None):
     entries = {
         (item.get("subject_ref"), item.get("result", item).get("property")): item
         for item in catalog
     }
     total = 0
     for target in targets:
+        origin = (evidence_context or {}).get("origin_question")
+        origin_evidence = (evidence_context or {}).get("origin_evidence")
+        resumed = bool(
+            origin
+            and origin_evidence
+            and target.get("evidence") == origin_evidence
+            and origin.count(origin_evidence) == 1
+        )
         item = entries.get((target["subject_ref"], target["property"]), {})
-        queries = target.get("queries", [])
+        queries = [dump_query_spec(q) for q in target.get("queries", [])]
         if item.get("access") != "raw_output":
+            if item.get("access") == "readonly_observation":
+                total += 1
             if queries:
                 raise ValueError("verified targets cannot contain raw queries")
             continue
@@ -92,25 +158,33 @@ def validate_raw_query_targets(targets, message, catalog):
         specs = [OutputQuerySpec.model_validate(q, strict=True) for q in queries]
         total += len(specs)
         if target.get("reference_mode", "explicit") == "followup":
-            recent = item.get("recent_queries", [])
+            recent = [dump_query_spec(q) for q in item.get("recent_queries", [])]
             recent_sources = [x for x in catalog if x.get("recent_queries")]
+            explicit_new_goal = all(message.count(q.evidence) == 1 for q in specs)
             if (
                 not target.get("evidence", "").strip()
                 or message.count(target["evidence"]) != 1
-                or len(recent_sources) != 1
-                or len(recent) != 1
-                or queries != recent
-                or not item.get("recently_delivered")
+                or (
+                    not explicit_new_goal
+                    and (
+                        len(recent_sources) != 1
+                        or len(recent) != 1
+                        or queries != recent
+                        or not item.get("recently_delivered")
+                    )
+                )
             ):
                 raise ValueError("raw followup needs one unambiguous, unchanged recorded question")
-        elif (
+        elif not resumed and (
             not target.get("evidence", "").strip()
             or target["evidence"] not in message
             or any(q.evidence not in message for q in specs)
         ):
             raise ValueError("raw evidence must quote the current message")
+        if resumed and any(q.evidence != origin_evidence for q in specs):
+            raise ValueError("resumed evidence must match the stored origin question")
     if total > MAX_QUERIES:
-        raise ValueError("at most three raw questions per selection")
+        raise ValueError("at most three readonly questions per selection")
 
 
 def _load_source_result(data_root, run, relative, metadata_budget=None):
@@ -133,6 +207,25 @@ def _fingerprint(result):
     return hashlib.sha256(result.model_dump_json().encode()).hexdigest()
 
 
+def _executed_parameters(step, result):
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            step.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
+    return step.parameters if result.step_fingerprint == fingerprint else {}
+
+
+def new_content_budget(cancel=None, output_limit_bytes=MAX_FILE_BYTES):
+    return {
+        "cancel": cancel or Event(),
+        "deadline": time.monotonic() + MAX_SECONDS,
+        "remaining": min(MAX_FILE_BYTES, output_limit_bytes),
+        "limits": {"snippets": MAX_SNIPPETS, "lines": MAX_LINES, "bytes": MAX_TEXT_BYTES},
+        "cache": {},
+    }
+
+
 def _raw_sources_for_result(run, result, relative, session_id):
     sources = []
     step = next((step for step in run.plan.steps if step.id == result.step_id), None)
@@ -149,18 +242,16 @@ def _raw_sources_for_result(run, result, relative, session_id):
     if (
         attempt.get("phase") != "finished"
         or attempt.get("status") != result.status
-        or attempt.get("result_relative_path") != result.attempt_relative_path
+        or (
+            attempt.get("result_relative_path") != result.attempt_relative_path
+            and not (
+                "result_relative_path" not in attempt
+                and attempt.get("relative_path") == f"runs/{run.id}/{result.attempt_relative_path}"
+            )
+        )
     ):
         return []
-    fingerprint = hashlib.sha256(
-        json.dumps(
-            step.model_dump(mode="json"),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
-    parameters = step.parameters if result.step_fingerprint == fingerprint else {}
+    parameters = _executed_parameters(step, result)
     try:
         method_label = get_profile(parameters.get("method_profile", "")).display_name
     except ValueError:
@@ -254,15 +345,17 @@ def same_source(left, right):
     )
 
 
-def build_raw_catalog_entries(sources, recent):
+def build_raw_catalog_entries(sources, recent, *, limit=6):
     entries, bindings = [], {}
+    focus = recent
+    recent = [r for r in recent if r.get("access") == "raw_output"]
     sources = sorted(
         sources,
         key=lambda s: (
-            not any(same_source(s, r) for r in recent),
+            not any(same_source(s, r) for r in focus),
             not s["is_current_attempt"],
         ),
-    )[:6]
+    )[:limit]
     for index, source in enumerate(sources, 1):
         ref = f"raw_{index}_a{source['attempt']}"
         previous = next((r for r in recent if same_source(source, r)), {})
@@ -295,6 +388,189 @@ def build_raw_catalog_entries(sources, recent):
         )
         bindings[(ref, "orca_output")] = source
     return entries, bindings
+
+
+def build_readonly_observation_entries(
+    sources, data_root, *, metadata_budget=None, limit=6, recent=(), raw_bindings=None
+):
+    """Advertise bounded derivations from recorded inputs, verified only on selection."""
+    entries, bindings = [], {}
+    budget = metadata_budget or new_metadata_budget()
+    if raw_bindings is not None:
+        sources = list(raw_bindings.values())
+    for index, source in enumerate(sources[:limit], 1):
+        try:
+            run = load_run(data_root, source["run_id"], metadata_budget=budget)
+            result = _load_source_result(data_root, run, source["source_result_path"], budget)
+            step = next(s for s in run.plan.steps if s.id == result.step_id)
+            if (
+                type(_executed_parameters(step, result).get("charge")) is not int
+                or not result.input_bindings.get("geometry")
+                or not step.parameters
+                or not result.step_fingerprint
+            ):
+                continue
+        except (OSError, ValueError, StopIteration):
+            continue
+        ref = next(
+            (key[0] for key, value in (raw_bindings or {}).items() if same_source(value, source)),
+            f"obs_{index}_a{source['attempt']}",
+        )
+        prop = "chemical_total_electrons"
+        entries.append(
+            {
+                "subject_ref": ref,
+                "access": "readonly_observation",
+                "derivation_id": prop,
+                "source_context": source["source_context"],
+                "recently_delivered": any(
+                    same_source(r, source)
+                    and r.get("access") == "readonly_observation"
+                    and any(q.get("property_hint") == prop for q in r.get("queries", []))
+                    for r in recent
+                ),
+                "result": {
+                    "property": prop,
+                    "label": "由组成与实际总电荷计数的总电子数",
+                    "validity": "metadata_only",
+                },
+            }
+        )
+        bindings[(ref, prop)] = {
+            "access": "readonly_observation",
+            "derivation_id": prop,
+            "source_binding": source,
+            "session_id": source["session_id"],
+        }
+    return entries, bindings
+
+
+def _bound_geometry(run, result, step):
+    ref = step.inputs.get("geometry")
+    artifact_id = result.input_bindings.get("geometry")
+    if ref is None or artifact_id not in result.input_artifact_ids:
+        raise ValueError("geometry is not bound to executed inputs")
+    if ref.artifact_id is not None and ref.artifact_id != artifact_id:
+        raise ValueError("geometry input binding changed")
+    artifact = next(a for a in run.artifact_index if a.id == artifact_id)
+    if artifact.run_id != run.id or artifact.artifact_type != "molecular_geometry":
+        raise ValueError("geometry has wrong identity or type")
+    return artifact
+
+
+def query_readonly_observations(
+    data_root,
+    selections,
+    *,
+    session_id,
+    indexed_ids,
+    cancel=None,
+    output_limit_bytes=MAX_FILE_BYTES,
+    read_budget=None,
+):
+    """Dispatch advertised derivations without publishing scientific Results."""
+    cancel = cancel or Event()
+    read_budget = read_budget or new_content_budget(cancel, output_limit_bytes)
+    deadline, remaining = read_budget["deadline"], read_budget["remaining"]
+    reports, budget = [], new_metadata_budget(cancel)
+    for binding, evidence in selections:
+        source = binding["source_binding"]
+        query = {
+            "evidence": evidence,
+            "search_terms": ["Number of Electrons"],
+            "property_hint": binding["derivation_id"],
+        }
+        base = {**source, "queries": [query], "access": "readonly_observation"}
+        try:
+            run, result, _ = resolve_raw_output_source(
+                data_root, source, session_id, indexed_ids, metadata_budget=budget
+            )
+            step = next(s for s in run.plan.steps if s.id == result.step_id)
+            geometry = _bound_geometry(run, result, step)
+            ref = step.inputs["geometry"]
+            if ref.step_id is not None:
+                relative = run.current_results.get(ref.step_id)
+                upstream = _load_source_result(data_root, run, relative, budget)
+                if (
+                    upstream.status != "succeeded"
+                    or upstream.output_ports.get(ref.port) != geometry.id
+                    or geometry.step_id != upstream.step_id
+                    or geometry.attempt != upstream.attempt
+                ):
+                    raise ValueError("geometry producer binding changed")
+            payload = read_registered_artifact_bytes(
+                data_root, run, geometry, max_bytes=remaining, deadline=deadline, cancel=cancel
+            )
+            remaining -= len(payload)
+            parsed = parse_xyz_bytes(payload)
+            charge = _executed_parameters(step, result).get("charge")
+            if type(charge) is not int or binding["derivation_id"] != "chemical_total_electrons":
+                raise ValueError("derivation lacks executed charge")
+            numbers = [ATOMIC_NUMBERS[s] for s in parsed.symbols]
+            count = sum(numbers) - charge
+            if count < 0:
+                raise ValueError("negative chemical electron count")
+            observation = {
+                "property_hint": binding["derivation_id"],
+                "view_kind": "derived_value",
+                "token": str(count),
+                "unit": "electrons",
+                "binding_status": "selected_stage",
+                "operands": {"atomic_numbers": numbers, "charge": charge},
+                "formula": "sum(Z) - charge",
+                "geometry_artifact_id": geometry.id,
+                "geometry_sha256": geometry.sha256,
+                "source_lines": [],
+                "limitations": [],
+                "required_scope_complete": True,
+            }
+            reports.append(
+                {
+                    **base,
+                    "bytes_read": len(payload),
+                    "evidence": [
+                        {
+                            "query_index": 0,
+                            "lookup_status": "found",
+                            "snippets": [],
+                            "ambiguous": False,
+                            "truncated": False,
+                            "search_status": "complete",
+                            "candidate_status": "unique",
+                            "binding_status": "selected_stage",
+                            "excerpt_complete": True,
+                            "observations": [observation],
+                            "required_scope_complete": True,
+                            "limitations": [],
+                        }
+                    ],
+                }
+            )
+        except (ValueError, OSError, StopIteration, KeyError) as error:
+            reports.append(
+                {**base, "error": getattr(error, "category", "invalid_source"), "evidence": []}
+            )
+        finally:
+            read_budget["remaining"] = remaining
+    return reports
+
+
+def _stage_context(run, result, source, geometry_verified):
+    step = next(s for s in run.plan.steps if s.id == result.step_id)
+    facts = result.diagnostics.get("facts", {})
+    return {
+        "source_locations": facts.get("source_locations", {}),
+        "multiplicity": step.parameters.get("multiplicity"),
+        "verified_stage": (
+            geometry_verified
+            and bool(_executed_parameters(step, result))
+            and result.status == "succeeded"
+            and facts.get("input_hashes_match") is True
+            and facts.get("normal_termination") is True
+            and facts.get("scf_converged") is True
+            and source["is_current_attempt"]
+        ),
+    }
 
 
 def resolve_raw_output_source(data_root, binding, session_id, indexed_ids, *, metadata_budget=None):
@@ -330,11 +606,15 @@ def query_output_sources(
     indexed_ids,
     cancel=None,
     output_limit_bytes=MAX_FILE_BYTES,
+    read_budget=None,
 ):
     cancel = cancel or Event()
-    deadline = time.monotonic() + MAX_SECONDS
-    remaining = min(MAX_FILE_BYTES, output_limit_bytes)
-    limits = {"snippets": MAX_SNIPPETS, "lines": MAX_LINES, "bytes": MAX_TEXT_BYTES}
+    read_budget = read_budget or new_content_budget(cancel, output_limit_bytes)
+    deadline, remaining, limits = (
+        read_budget["deadline"],
+        read_budget["remaining"],
+        read_budget["limits"],
+    )
     grouped = {}
     for binding, queries in selections:
         key = (binding["run_id"], binding["artifact_id"])
@@ -359,10 +639,34 @@ def query_output_sources(
                 metadata_budget=metadata_budget,
             )
             before_limits = dict(limits)
+            geometry_verified = False
+            step = next(s for s in run.plan.steps if s.id == result.step_id)
+            geometry_id = (
+                result.output_ports.get("optimized_geometry")
+                if step.tool == "optimize_geometry"
+                else result.input_bindings.get("geometry")
+            )
+            geometry = next((a for a in run.artifact_index if a.id == geometry_id), None)
+            if geometry is not None and geometry.artifact_type == "molecular_geometry":
+                geometry_bytes = read_registered_artifact_bytes(
+                    data_root,
+                    run,
+                    geometry,
+                    max_bytes=remaining,
+                    deadline=deadline,
+                    cancel=cancel,
+                )
+                parse_xyz_bytes(geometry_bytes)
+                remaining -= len(geometry_bytes)
+                geometry_verified = (
+                    step.tool != "optimize_geometry"
+                    or result.diagnostics.get("facts", {}).get("geometry_consistent") is True
+                )
             tool = make_orca_output_tool(
                 remaining_file_bytes=remaining,
                 deadline=deadline,
                 remaining_excerpt_limits=limits,
+                stage_context=_stage_context(run, result, binding, geometry_verified),
             )
             parameters = tool.validate_parameters({"queries": queries})
             step = Step(
@@ -425,11 +729,21 @@ def query_output_sources(
                             "lookup_status": "unavailable",
                             "snippets": [],
                             "truncated": False,
+                            "ambiguous": False,
+                            "search_status": "unavailable",
+                            "candidate_status": "no_match",
+                            "binding_status": "unavailable",
+                            "limitations": [getattr(error, "category", "invalid_source")],
+                            "excerpt_complete": False,
+                            "required_scope_complete": False,
+                            "observations": [],
                         }
                         for i in range(len(queries))
                     ],
                 }
             )
+        finally:
+            read_budget["remaining"] = remaining
     return reports
 
 

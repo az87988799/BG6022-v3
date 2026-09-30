@@ -151,13 +151,72 @@ def _source_opt_run(config: Any, session_id: str) -> tuple[Run, Any]:
         step_id=step.id,
         attempt=1,
     )
+    # A readable XYZ alone is not a scientifically valid Opt result. Supply
+    # the existing Tool-local energy contract for this synthetic positive case.
+    from bg6022.orca.profiles import get_profile
+
+    observation = {"value": -76.4, "unit": "Eh", "token": "-76.4", "source_line": 1}
+    energy_payload = {
+        "schema": "bg6022.energy_data.v1",
+        "property": "electronic_energy",
+        "value": -76.4,
+        "unit": "Eh",
+        "observation": observation,
+        "method_profile": "r2scan3c",
+        "method_keyword": get_profile("r2scan3c").orca_keyword,
+        "operation": "Opt",
+        "charge": 0,
+        "multiplicity": 1,
+        "source": {"step_id": step.id, "attempt": 1},
+        "geometry": {"artifact_id": optimized.id, "sha256": optimized.sha256},
+    }
+    energy = register_bytes_artifact(
+        data_root,
+        run,
+        json.dumps(energy_payload).encode(),
+        artifact_type="energy_data",
+        role="verified_energy_data",
+        source="test:synthetic",
+        extension=".json",
+        step_id=step.id,
+        attempt=1,
+        metadata={
+            "geometry_sha256": optimized.sha256,
+            "method_profile": "r2scan3c",
+            "operation": "Opt",
+            "charge": 0,
+            "multiplicity": 1,
+            "unit": "Eh",
+        },
+    )
     result = Result(
         run_id=run.id,
         step_id=step.id,
         attempt=1,
         status="succeeded",
-        artifact_ids=[optimized.id],
-        output_ports={"optimized_geometry": optimized.id},
+        artifact_ids=[optimized.id, energy.id],
+        output_ports={"optimized_geometry": optimized.id, "energy_data": energy.id},
+        values={"opt_final_electronic_energy": observation},
+        checks={
+            name: True
+            for name in (
+                "runner_succeeded",
+                "exit_code_zero",
+                "process_tree_empty",
+                "normal_termination",
+                "stdout_valid_utf8",
+                "stdout_within_size_limit",
+                "stderr_within_size_limit",
+                "scf_converged",
+                "input_hashes_match",
+                "final_energy_selected",
+                "finite_final_energy",
+                "optimization_converged",
+                "output_geometry_present",
+                "stdout_geometry_present",
+                "geometry_consistent",
+            )
+        },
         input_artifact_ids=[seed.id],
         input_bindings={"geometry": seed.id},
         attempt_relative_path="opt/attempt-01",
@@ -170,7 +229,7 @@ def _source_opt_run(config: Any, session_id: str) -> tuple[Run, Any]:
             "attempt": 1,
             "phase": "finished",
             "status": "succeeded",
-            "artifact_ids": [optimized.id],
+            "artifact_ids": [optimized.id, energy.id],
         }
     )
     save_run(data_root, run)
@@ -234,7 +293,9 @@ def test_history_geometry_is_verified_copied_and_bound_to_the_new_run(tmp_path: 
     )
 
 
-@pytest.mark.parametrize("tamper", ["missing", "fabricated", "wrong_role", "altered_bytes"])
+@pytest.mark.parametrize(
+    "tamper", ["missing", "fabricated", "wrong_role", "altered_bytes", "changed_step"]
+)
 def test_invalid_historical_geometry_bindings_stop_before_a_new_run(
     tmp_path: Path, tamper: str
 ) -> None:
@@ -247,7 +308,10 @@ def test_invalid_historical_geometry_bindings_stop_before_a_new_run(
     assert len(catalog) == 1
     binding = dict(bindings["geometry_1"])
 
-    if tamper == "wrong_role":
+    if tamper == "changed_step":
+        source_run.plan.steps[0].parameters["charge"] = 1
+        save_run(config.data_root_path, source_run)
+    elif tamper == "wrong_role":
         source_run.artifact_index = [
             item.model_copy(update={"role": "initial_geometry"})
             if item.id == source_artifact.id

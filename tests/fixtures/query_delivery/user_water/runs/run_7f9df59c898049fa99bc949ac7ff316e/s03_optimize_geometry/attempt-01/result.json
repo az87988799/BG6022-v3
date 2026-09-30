@@ -1,0 +1,268 @@
+{
+  "artifact_ids": [
+    "artifact_70df160a9450419495dc3fe55e5d52fd",
+    "artifact_f7d2b17de6f0492a94636f44879f066d",
+    "artifact_65c064e0fbc2422e960ff3f404721131",
+    "artifact_193ab9c69df64418ab2e8d8890cc5eec",
+    "artifact_5ec11646b7cb40089c0896113e95d8cf",
+    "artifact_d66b93954390437bba76fb80b12cca59"
+  ],
+  "attempt": 1,
+  "attempt_relative_path": "s03_optimize_geometry/attempt-01",
+  "checks": {
+    "exit_code_zero": true,
+    "final_energy_selected": true,
+    "finite_final_energy": true,
+    "geometry_consistent": true,
+    "input_hashes_match": true,
+    "normal_termination": true,
+    "optimization_converged": true,
+    "output_geometry_present": true,
+    "process_tree_empty": true,
+    "runner_succeeded": true,
+    "scf_converged": true,
+    "stderr_within_size_limit": true,
+    "stdout_geometry_present": true,
+    "stdout_valid_utf8": true,
+    "stdout_within_size_limit": true
+  },
+  "clarification": {},
+  "diagnostics": {
+    "category": null,
+    "facts": {
+      "diagnostics": [],
+      "effective_geom_maxiter": 50,
+      "effective_geom_maxiter_error": null,
+      "effective_geom_maxiter_source": "orca_output",
+      "effective_scf_maxiter": null,
+      "energies": [
+        {
+          "error": null,
+          "label": "FINAL SINGLE POINT ENERGY",
+          "line": 837,
+          "offset": 43486,
+          "token": "-76.415240803144",
+          "valid": true,
+          "value": -76.415240803144
+        },
+        {
+          "error": null,
+          "label": "FINAL SINGLE POINT ENERGY",
+          "line": 1230,
+          "offset": 63028,
+          "token": "-76.418468717091",
+          "valid": true,
+          "value": -76.418468717091
+        },
+        {
+          "error": null,
+          "label": "FINAL SINGLE POINT ENERGY",
+          "line": 1626,
+          "offset": 82720,
+          "token": "-76.418853952219",
+          "valid": true,
+          "value": -76.418853952219
+        },
+        {
+          "error": null,
+          "label": "FINAL SINGLE POINT ENERGY",
+          "line": 2020,
+          "offset": 102268,
+          "token": "-76.418938632722",
+          "valid": true,
+          "value": -76.418938632722
+        },
+        {
+          "error": null,
+          "label": "FINAL SINGLE POINT ENERGY",
+          "line": 2712,
+          "offset": 134776,
+          "token": "-76.418938720831",
+          "valid": true,
+          "value": -76.418938720831
+        }
+      ],
+      "error_category": null,
+      "exit_code": 0,
+      "final_energy": {
+        "error": null,
+        "label": "FINAL SINGLE POINT ENERGY",
+        "line": 2712,
+        "offset": 134776,
+        "token": "-76.418938720831",
+        "valid": true,
+        "value": -76.418938720831
+      },
+      "final_energy_error": null,
+      "frequency_section": null,
+      "geometry_consistent": true,
+      "geometry_mismatch_reason": null,
+      "hessian_dimension": null,
+      "hessian_error": null,
+      "hessian_present": false,
+      "hessian_valid": null,
+      "input_hash_error": null,
+      "input_hashes_match": true,
+      "last_opt_cycle": 4,
+      "normal_marker_count": 1,
+      "normal_termination": true,
+      "operation": "Opt",
+      "opt_iteration_limit_reached": false,
+      "optimization_converged": true,
+      "orca_version": "6.1.1",
+      "output_geometry": {
+        "comment": "Coordinates from ORCA-job E:\\BG6022-v3-data\\runs\\run_7f9df59c898049fa99bc949ac7ff316e\\s03_optimize_geometry\\attempt-01\\input E -76.418938720831",
+        "coordinates": [
+          [
+            -0.0003187737919,
+            0.39451307244144,
+            0.0
+          ],
+          [
+            -0.75799939641377,
+            -0.19786892516311,
+            0.0
+          ],
+          [
+            0.75831817020567,
+            -0.19664414727733,
+            0.0
+          ]
+        ],
+        "symbols": [
+          "O",
+          "H",
+          "H"
+        ]
+      },
+      "output_geometry_error": null,
+      "output_xyz_exists": true,
+      "process_tree_empty": true,
+      "runner_status": "succeeded",
+      "scf_converged": true,
+      "scf_iteration_limit_reached": false,
+      "scf_near_converged": null,
+      "source_locations": {
+        "effective_geom_maxiter": 243,
+        "effective_geom_maxiter_source": "orca_output",
+        "energy": [
+          837,
+          1230,
+          1626,
+          2020,
+          2712
+        ],
+        "final_energy": 2712,
+        "final_energy_section": 2176,
+        "final_scf": 2506,
+        "normal_termination": 2917,
+        "opt_iteration_limit": null,
+        "optimization_converged": 2147,
+        "scf_iteration_limit": null,
+        "unbound_scf": null
+      },
+      "stderr_preview": "",
+      "stderr_size_exceeded": false,
+      "stdout_geometry": {
+        "comment": "ORCA final geometry",
+        "coordinates": [
+          [
+            -0.000319,
+            0.394513,
+            0.0
+          ],
+          [
+            -0.757999,
+            -0.197869,
+            0.0
+          ],
+          [
+            0.758318,
+            -0.196644,
+            0.0
+          ]
+        ],
+        "symbols": [
+          "O",
+          "H",
+          "H"
+        ]
+      },
+      "stdout_geometry_error": null,
+      "stdout_preview": "es work. Hence this citation list should not be read as indicating\r\nthat the listed papers, which are focused on our own work, are the only ones worth citing. It simply\r\nmeant to make it easier for users to cite ORCA specific papers. It is not a substitute for doing your\r\nown literature research and citing the relevant literature in a scientifically appropriate manner.\r\n\r\nList of essential papers. We consider these as the minimum necessary citations\r\n\r\n  1. Grimme, S.; Hansen, A.; Ehlert, S.; Mewes, J.\r\n     r2SCAN-3c: A 'Swiss army knife' composite electronic-structure method\r\n     J. Chem. Phys. 2021 154 , 064103\r\n     doi.org/10.1063/5.0040021\r\n  2. Neese, F.\r\n     Software update: the ORCA program system, version 6.0\r\n     WIRES Comput. Molec. Sci. 2025 15(1), e70019\r\n     doi.org/10.1002/wcms.70019\r\n\r\nList of papers to cite with high priority. The work reported in these papers was absolutely\r\nnecessary for this run to complete.\r\nOur perspective: the developers of density functionals and basis sets usually get cited in chemistry papers\r\nGood! But without the algorithms to do something with them, the functionals or basis sets would not do anything.\r\nHence, in our opinion, the algorithm design and method developments papers are equally worthy of getting cited\r\n\r\n  1. Neese, F.\r\n     An improvement of the resolution of the identity approximation for the formation of the Coulomb matrix\r\n     J. Comp. Chem. 2003 24(14), 1740-1747\r\n     doi.org/10.1002/jcc.10318\r\n  2. Caldeweyher, E.; Bannwarth, C.; Grimme, S.\r\n     Extension of the D3 dispersion coefficient model\r\n     J. Chem. Phys. 2017 147 , 034112\r\n     doi.org/10.1063/1.4993215\r\n  3. Lehtola, S.; Steigemann, C.; Oliveira, M.; Marques, M.\r\n     Recent developments in Libxc - A comprehensive library of functionals for density functional theory\r\n     Software X 2018 7 , \r\n     doi.org/10.1016/j.softx.2017.11.002\r\n  4. Caldeweyher, E.; Ehlert, S.; Hansen, A.; Neugebauer, H.; Spicher, S.; Bannwarth, C.; Grimme, S.\r\n     A generally applicable atomic-charge dependent London dispersion correction\r\n     J. Chem. Phys. 2019 150 , 154122\r\n     doi.org/10.1063/1.5090222\r\n  5. Neese, F.\r\n     The SHARK Integral Generation and Digestion System\r\n     J. Comp. Chem. 2022 44(3), 381\r\n     doi.org/10.1002/jcc.26942\r\n\r\nList of suggested additional citations. These are papers that are important in the 'surrounding' of \r\nof this run, or papers that preceded the highly important papers. If you like your results we are grateful for a citation.\r\n\r\n  1. Neese, F.\r\n     The ORCA program system\r\n     WIRES Comput. Molec. Sci. 2012 2(1), 73-78\r\n     doi.org/10.1002/wcms.81\r\n  2. Neese, F.\r\n     Software update: the ORCA program system, version 4.0\r\n     WIRES Comput. Molec. Sci. 2018 8(1), 1-6\r\n     doi.org/10.1002/wcms.1327\r\n  3. Neese, F.; Wennmohs, F.; Becker, U.; Riplinger, C.\r\n     The ORCA quantum chemistry program package\r\n     J. Chem. Phys. 2020 152(22), 224108\r\n     doi.org/10.1063/5.0004608\r\n  4. Neese, F.\r\n     Software update: The ORCA program system—Version 5.0\r\n     WIRES Comput. Molec. Sci. 2022 12(1), e1606\r\n     doi.org/10.1002/wcms.1606\r\n\r\nList of optional additional citations\r\n\r\n  1. Neese, F.\r\n     Approximate second-order SCF convergence for spin unrestricted wavefunctions\r\n     Chem. Phys. Lett. 2000 325(1-3), 93-98\r\n     doi.org/10.1016/s0009-2614(00)00662-x\r\n\r\nTimings for individual modules:\r\n\r\nSum of individual times          ...       12.959 sec (=   0.216 min)\r\nStartup calculation              ...        1.664 sec (=   0.028 min)  12.8 %\r\nSCF iterations                   ...        9.439 sec (=   0.157 min)  72.8 %\r\nProperty calculations            ...        0.232 sec (=   0.004 min)   1.8 %\r\nSCF Gradient evaluation          ...        1.580 sec (=   0.026 min)  12.2 %\r\nGeometry relaxation              ...        0.044 sec (=   0.001 min)   0.3 %\r\n                             ****ORCA TERMINATED NORMALLY****\r\nTOTAL RUN TIME: 0 days 0 hours 0 minutes 16 seconds 479 msec\r\n",
+      "stdout_size_exceeded": false,
+      "stdout_valid_utf8": true,
+      "stop_reason": "normal_exit"
+    },
+    "input_hashes": {
+      "actual_geometry": "7ba61b8b2eabe361de563ab6148c0658e0780da12926bdbf76f41e00f1377ee4",
+      "actual_input": "f38298ce5ea5fa5bb4630c9473914682d43e331ee932d456d528ac8db8e5f000",
+      "expected_geometry": "7ba61b8b2eabe361de563ab6148c0658e0780da12926bdbf76f41e00f1377ee4",
+      "expected_input": "f38298ce5ea5fa5bb4630c9473914682d43e331ee932d456d528ac8db8e5f000",
+      "match": true
+    },
+    "observed_energy": {
+      "error": null,
+      "label": "FINAL SINGLE POINT ENERGY",
+      "line": 2712,
+      "offset": 134776,
+      "token": "-76.418938720831",
+      "valid": true,
+      "value": -76.418938720831
+    },
+    "process": {
+      "cleanup_error": null,
+      "cleanup_unconfirmed": false,
+      "exception": null,
+      "exit_code": 0,
+      "pid": 24120,
+      "platform_supported": true,
+      "process_created_at": 13435166614.151411,
+      "process_tree_empty": true,
+      "status": "succeeded",
+      "stderr_path": "E:\\BG6022-v3-data\\runs\\run_7f9df59c898049fa99bc949ac7ff316e\\s03_optimize_geometry\\attempt-01\\stderr.txt",
+      "stdout_path": "E:\\BG6022-v3-data\\runs\\run_7f9df59c898049fa99bc949ac7ff316e\\s03_optimize_geometry\\attempt-01\\stdout.out",
+      "stop_confirmed": true,
+      "stop_reason": "normal_exit",
+      "stop_request_sent": false
+    },
+    "raw_paths": {
+      "attempt": "E:\\BG6022-v3-data\\runs\\run_7f9df59c898049fa99bc949ac7ff316e\\s03_optimize_geometry\\attempt-01",
+      "geometry": "E:\\BG6022-v3-data\\runs\\run_7f9df59c898049fa99bc949ac7ff316e\\s03_optimize_geometry\\attempt-01\\geometry.xyz",
+      "hessian": "E:\\BG6022-v3-data\\runs\\run_7f9df59c898049fa99bc949ac7ff316e\\s03_optimize_geometry\\attempt-01\\input.hess",
+      "input": "E:\\BG6022-v3-data\\runs\\run_7f9df59c898049fa99bc949ac7ff316e\\s03_optimize_geometry\\attempt-01\\input.inp",
+      "stderr": "E:\\BG6022-v3-data\\runs\\run_7f9df59c898049fa99bc949ac7ff316e\\s03_optimize_geometry\\attempt-01\\stderr.txt",
+      "stdout": "E:\\BG6022-v3-data\\runs\\run_7f9df59c898049fa99bc949ac7ff316e\\s03_optimize_geometry\\attempt-01\\stdout.out"
+    },
+    "reason": null
+  },
+  "input_artifact_ids": [
+    "artifact_f1c635bc0b01428ab1b525c9f960b456"
+  ],
+  "input_bindings": {
+    "geometry": "artifact_f1c635bc0b01428ab1b525c9f960b456"
+  },
+  "output_ports": {
+    "energy_data": "artifact_d66b93954390437bba76fb80b12cca59",
+    "optimized_geometry": "artifact_5ec11646b7cb40089c0896113e95d8cf"
+  },
+  "parameter_sources": {
+    "charge": "structure_facts",
+    "environment": "default_policy",
+    "method_profile": "default_policy",
+    "multiplicity": "structure_facts"
+  },
+  "run_id": "run_7f9df59c898049fa99bc949ac7ff316e",
+  "scientific_checks": {},
+  "status": "succeeded",
+  "step_fingerprint": "3444c3e392e6a36d1bcf4c2ce3217792a052d25eb41d02ae740bda1ea358a337",
+  "step_id": "s03_optimize_geometry",
+  "values": {
+    "opt_final_electronic_energy": {
+      "source_line": 2712,
+      "token": "-76.418938720831",
+      "unit": "Eh",
+      "value": -76.418938720831
+    }
+  }
+}

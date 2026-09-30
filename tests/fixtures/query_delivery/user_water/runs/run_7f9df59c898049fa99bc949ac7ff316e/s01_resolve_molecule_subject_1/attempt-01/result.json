@@ -1,0 +1,38 @@
+{
+  "artifact_ids": [
+    "artifact_d84463af25e84957a174789d9314e7b2",
+    "artifact_eb2a3fbe78a84b1ab58ff8c8ee3ab9d8"
+  ],
+  "attempt": 1,
+  "attempt_relative_path": "s01_resolve_molecule_subject_1/attempt-01",
+  "checks": {},
+  "clarification": {},
+  "diagnostics": {
+    "accepted_structure_count": 1,
+    "candidates_truncated": false,
+    "checked_cid_count": 1,
+    "excluded_candidates": [],
+    "rejected_candidates": [],
+    "returned_cid_count": 1,
+    "search_complete": true,
+    "source_url": "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/water/property/CanonicalSMILES,IsomericSMILES,ConnectivitySMILES,Title,MolecularFormula,Charge/JSON",
+    "unverified_candidates": []
+  },
+  "input_artifact_ids": [],
+  "input_bindings": {},
+  "output_ports": {
+    "molecule": "artifact_d84463af25e84957a174789d9314e7b2"
+  },
+  "parameter_sources": {
+    "structure": "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/water/property/CanonicalSMILES,IsomericSMILES,ConnectivitySMILES,Title,MolecularFormula,Charge/JSON"
+  },
+  "run_id": "run_7f9df59c898049fa99bc949ac7ff316e",
+  "scientific_checks": {},
+  "status": "succeeded",
+  "step_fingerprint": "5842cc026c26795f60c5bc67f99c0e5cc2545df6af375266b064f1cfed229a1f",
+  "step_id": "s01_resolve_molecule_subject_1",
+  "values": {
+    "formal_charge": 0,
+    "molecule_formula": "H2O"
+  }
+}

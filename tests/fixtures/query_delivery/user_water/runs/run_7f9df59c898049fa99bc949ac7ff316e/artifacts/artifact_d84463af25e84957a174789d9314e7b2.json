@@ -1,0 +1,34 @@
+{
+  "facts": {
+    "atom_count": 1,
+    "atom_symbols": [
+      "O"
+    ],
+    "canonical_smiles": "O",
+    "cid": 962,
+    "component_count": 1,
+    "element_counts": {
+      "H": 2,
+      "O": 1
+    },
+    "formal_charge": 0,
+    "formula": "H2O",
+    "isomeric_smiles": "O",
+    "isotopic": false,
+    "radical_electrons": 0,
+    "rdkit_version": "2026.03.6",
+    "source_url": "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/water/property/CanonicalSMILES,IsomericSMILES,ConnectivitySMILES,Title,MolecularFormula,Charge/JSON",
+    "title": "Water"
+  },
+  "input_kind": "name",
+  "lookup_attempts": 1,
+  "molecule_identity": {
+    "input_kind": "name",
+    "lookup_query": "water",
+    "raw_query": "水",
+    "selected_cid": null
+  },
+  "query": "water",
+  "schema_version": 1,
+  "source": "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/water/property/CanonicalSMILES,IsomericSMILES,ConnectivitySMILES,Title,MolecularFormula,Charge/JSON"
+}

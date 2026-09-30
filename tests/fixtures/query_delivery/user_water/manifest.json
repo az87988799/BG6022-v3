@@ -1,0 +1,25 @@
+{
+  "source_kind": "user_run_copy",
+  "original_run_id": "run_7f9df59c898049fa99bc949ac7ff316e",
+  "original_session_id": "session_c071268a86e34a43999bb6f908195d0f",
+  "original_status": "succeeded",
+  "stdout_sha256": "d4c8390841f501a19923ca9d10eec46af790e3f9ed85be1450cc5327ef4fcbf8",
+  "dipole_token": "1.861296656",
+  "captured_from": "E:\\BG6022-v3-data\\runs\\run_7f9df59c898049fa99bc949ac7ff316e",
+  "original_model_responses": "unavailable; prior session stores categories only",
+  "files": {
+    "run.json": "d818d123448878e88a1744e58c95b4d793335f5cfb3ad13386e2ac9cad4caf94",
+    "s01_resolve_molecule_subject_1/attempt-01/result.json": "73972b997b209e21e3719b6bf8265cd71b0cdd33313a22db5bd29d5e3fbacfd2",
+    "s02_generate_geometry_subject_1/attempt-01/result.json": "828a698d54ab25a033e9ea4b29e73367c762d34b6f4edfe1bb6165440e7c4c1f",
+    "s03_optimize_geometry/attempt-01/result.json": "a39b84ae265f790f7c3edfa9cbcbba8bd1e29eb10947224d538a6781c2b95e8a",
+    "artifacts/artifact_eb2a3fbe78a84b1ab58ff8c8ee3ab9d8.json": "053ef35656808ddaa8fa0b5210aced811e36aa7e9e7776404100a17f24aaa33a",
+    "artifacts/artifact_d84463af25e84957a174789d9314e7b2.json": "a7a970b758613c5ab9d7b7f57af1e4574813229d7bd1e21f0493af956ea90f95",
+    "artifacts/artifact_f1c635bc0b01428ab1b525c9f960b456.xyz": "7ba61b8b2eabe361de563ab6148c0658e0780da12926bdbf76f41e00f1377ee4",
+    "artifacts/artifact_70df160a9450419495dc3fe55e5d52fd.inp": "f38298ce5ea5fa5bb4630c9473914682d43e331ee932d456d528ac8db8e5f000",
+    "artifacts/artifact_f7d2b17de6f0492a94636f44879f066d.xyz": "7ba61b8b2eabe361de563ab6148c0658e0780da12926bdbf76f41e00f1377ee4",
+    "artifacts/artifact_65c064e0fbc2422e960ff3f404721131.out": "d4c8390841f501a19923ca9d10eec46af790e3f9ed85be1450cc5327ef4fcbf8",
+    "artifacts/artifact_193ab9c69df64418ab2e8d8890cc5eec.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "artifacts/artifact_5ec11646b7cb40089c0896113e95d8cf.xyz": "73b96c140c33b8884873e9e9d7e8af744598bac18a69e860fb3287e0f6b60ee6",
+    "artifacts/artifact_d66b93954390437bba76fb80b12cca59.json": "f16953fcaf6401bae9e953e95874662bf09690f7119aa6ee8e623cc8aef36909"
+  }
+}

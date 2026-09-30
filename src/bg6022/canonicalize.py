@@ -25,6 +25,7 @@ from bg6022.semantic import (
     SemanticTask,
     UseOutputRelation,
 )
+from bg6022.tools.orca_output import dump_query_spec
 from bg6022.tools.registry import ToolRegistry
 
 _ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
@@ -42,7 +43,11 @@ def semantic_to_intake(
     if semantic.mode == "qa":
         return IntakeOutput(intent="chemistry_qa")
     if semantic.mode == "context_query":
-        return IntakeOutput(intent="context_query", query_selection=semantic.query_selection)
+        return IntakeOutput(
+            intent="context_query",
+            query_selection=semantic.query_selection,
+            intent_items=semantic.intent_items,
+        )
     if semantic.mode != "compute":
         raise ValueError(f"semantic mode {semantic.mode!r} is not a Request")
 
@@ -110,7 +115,7 @@ def semantic_to_intake(
             if validation_values:
                 tool.validate_parameter_patch(validation_values)
         proposals[task.key] = {
-            "report_queries": [item.model_dump(mode="json") for item in task.report_queries],
+            "report_queries": [dump_query_spec(item) for item in task.report_queries],
             "key": task.key,
             "subject_key": task.subject_key,
             "capability": tool.name,

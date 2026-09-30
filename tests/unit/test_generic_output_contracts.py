@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from bg6022.answer import AnswerOutput, AnswerSection, render_answer_output, validate_result_answer
@@ -460,3 +462,38 @@ def test_model_cannot_force_link_only_without_user_request() -> None:
         ]
         == "show"
     )
+
+
+@pytest.mark.parametrize("budget", [128, 512, 8192])
+def test_empty_container_preview_counts_actual_json_bytes(budget):
+    """F-R11: even empty containers consume bytes/nodes."""
+    from bg6022.output_contracts import bounded_verified_value
+
+    value = [[[] for _ in range(50)] for _ in range(50)]
+    preview, meta = bounded_verified_value(
+        value, {"scope": "all", "limit": 50}, budget_bytes=budget
+    )
+    assert len(json.dumps(preview, ensure_ascii=False).encode()) <= budget
+    assert meta["encoded_bytes"] == len(json.dumps(preview, ensure_ascii=False).encode())
+    assert not meta["full_value_shown"] and not meta["requested_scope_complete"]
+    assert len(value) == 50 and all(child == [] for row in value for child in row)
+
+
+def test_deep_preview_and_shared_turn_budget_are_bounded():
+    """F-R11/F-R12: bounded preview reused by model and deterministic rendering."""
+    from bg6022.agent import Agent
+    from bg6022.output_contracts import MAX_TURN_VALUE_BYTES, bounded_verified_value
+
+    deep = []
+    for _ in range(20):
+        deep = [deep]
+    preview, meta = bounded_verified_value(deep, budget_bytes=80)
+    assert len(json.dumps(preview).encode()) <= 80 and not meta["full_value_shown"]
+    facts = [{"kind": "field", "value": [{"x": "😀" * 2000}] * 50} for _ in range(3)]
+    bounded = Agent._bounded_answer_facts(facts)
+    assert (
+        sum(len(json.dumps(f["value"], ensure_ascii=False).encode()) for f in bounded)
+        <= MAX_TURN_VALUE_BYTES
+    )
+    assert Agent._bounded_answer_facts(bounded) == bounded
+    assert facts[0]["value"][0]["x"] == "😀" * 2000

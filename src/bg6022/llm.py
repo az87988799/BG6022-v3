@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
@@ -49,6 +51,8 @@ class LlmCall:
     transport_attempts: int = 1
     structured_correction_count: int = 0
     corrected: bool = False
+    response_sha256: str | None = None
+    schema_errors: tuple[dict[str, str], ...] = ()
 
     @property
     def model(self) -> str:
@@ -67,12 +71,16 @@ class LlmClient:
         client: httpx.Client | None = None,
         transport: httpx.BaseTransport | None = None,
         api_key: str | None = None,
+        response_recorder: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.settings = config.llm if isinstance(config, AppConfig) else config
         self._client = client
         self._transport = transport
         self._api_key_override = api_key
         self.calls: list[LlmCall] = []
+        # Opt-in local test recorder. Headers, config and credentials are never
+        # supplied; ordinary sessions retain only the digest and schema facts.
+        self._response_recorder = response_recorder
 
     def complete_text(
         self,
@@ -161,6 +169,16 @@ class LlmClient:
                 cancel=cancel,
                 remaining_timeout_seconds=remaining,
             )
+            self._replace_last_call(response_sha256=hashlib.sha256(content.encode()).hexdigest())
+            if self._response_recorder is not None:
+                self._response_recorder(
+                    {
+                        "purpose": purpose,
+                        "correction_index": correction_index,
+                        "content": self._sanitize(content),
+                        "schema_version": schema_version,
+                    }
+                )
             if cancel is not None and cancel.is_set():
                 self._replace_last_call(
                     category="cancelled",
@@ -216,10 +234,11 @@ class LlmClient:
             except (TypeError, ValueError) as error:
                 ambiguous_energy = _is_ambiguous_energy_request(payload)
                 failure_category = "ambiguous_result" if ambiguous_energy else "schema_error"
-                diagnostics = _schema_failure_diagnostics(error)
+                diagnostics = _schema_failure_diagnostics(error, sanitize=self._sanitize)
                 self._replace_last_call(
                     category=failure_category,
                     structured_correction_count=correction_index,
+                    schema_errors=diagnostics,
                 )
                 if correction_index < corrections:
                     correction_error = _schema_failure_feedback(diagnostics)
@@ -446,6 +465,8 @@ class LlmClient:
         corrected: bool | None = None,
         category: str | None = None,
         structured_correction_count: int | None = None,
+        response_sha256: str | None = None,
+        schema_errors: tuple[dict[str, str], ...] | None = None,
     ) -> None:
         if not self.calls:
             return
@@ -456,7 +477,23 @@ class LlmClient:
             changes["category"] = category
         if structured_correction_count is not None:
             changes["structured_correction_count"] = structured_correction_count
+        if response_sha256 is not None:
+            changes["response_sha256"] = response_sha256
+        if schema_errors is not None:
+            changes["schema_errors"] = schema_errors
         self.calls[-1] = replace(self.calls[-1], **changes)
+
+    def _sanitize(self, text):
+        secrets = [self._api_key_override, os.environ.get(self.settings.api_key_env)]
+        secrets += [
+            value
+            for key, value in os.environ.items()
+            if re.search(r"(?:KEY|TOKEN|SECRET|PASSWORD)$", key, re.I) and len(value) >= 8
+        ]
+        for secret in secrets:
+            if secret:
+                text = text.replace(secret, "[REDACTED]")
+        return re.sub(r"(?i)bearer\s+[^\s'\"]+", "Bearer [REDACTED]", text)
 
 
 DeepSeekClient = LlmClient
@@ -537,13 +574,13 @@ def _validate_schema(schema: Any, payload: Any) -> Any:
     return payload
 
 
-def _schema_failure_diagnostics(error: BaseException) -> tuple[dict[str, str], ...]:
+def _schema_failure_diagnostics(error: BaseException, *, sanitize=lambda s: s):
     """Keep field paths and messages while omitting echoed input values."""
 
     errors_method = getattr(error, "errors", None)
     if callable(errors_method):
         try:
-            errors = errors_method(include_url=False)
+            errors = errors_method(include_url=False, include_input=False)
         except TypeError:
             errors = errors_method()
         diagnostics = []
@@ -551,10 +588,18 @@ def _schema_failure_diagnostics(error: BaseException) -> tuple[dict[str, str], .
             location = item.get("loc", ())
             path = ".".join(str(part) for part in location) or "$"
             message = str(item.get("msg") or "value failed local validation")
-            diagnostics.append({"path": path, "message": message[:512]})
+            diagnostics.append(
+                {
+                    "path": sanitize(path)[:240],
+                    "message": sanitize(message)[:512],
+                    "error_type": str(item.get("type", "validation_error"))[:80],
+                }
+            )
         if diagnostics:
             return tuple(diagnostics[:12])
-    return ({"path": "$", "message": str(error)[:512]},)
+    return (
+        {"path": "$", "message": sanitize(str(error))[:512], "error_type": type(error).__name__},
+    )
 
 
 def _schema_failure_feedback(diagnostics: tuple[dict[str, str], ...]) -> str:

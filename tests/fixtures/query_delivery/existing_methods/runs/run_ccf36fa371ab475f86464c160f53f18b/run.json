@@ -1,0 +1,798 @@
+{
+  "accepted_execution_sha256": "b8e5c168c88fd2f60cd80d082cfba607269b6a92651d799bb6dcfc83b1cc279d",
+  "accepted_snapshot": {
+    "allowed_repairs": [
+      "increase_scf_maxiter"
+    ],
+    "bound_inputs": [
+      {
+        "id": "artifact_1539c5775f2147318b5460cdfd66b9bc",
+        "sha256": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2",
+        "step_id": "sp_a"
+      },
+      {
+        "id": "artifact_1539c5775f2147318b5460cdfd66b9bc",
+        "sha256": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2",
+        "step_id": "sp_b"
+      }
+    ],
+    "budgets": {
+      "max_attempts_per_science_step": 3,
+      "max_extra_executions_by_category": {
+        "electronic_structure": 3
+      },
+      "max_plan_revisions": 2
+    },
+    "origin_step_map": {
+      "delta": "delta",
+      "sp_a": "sp_a",
+      "sp_b": "sp_b"
+    },
+    "plan": {
+      "id": "real_method_comparison_plan_after_fix",
+      "request_id": "real_method_comparison_request_after_fix",
+      "requested_results": [
+        {
+          "check": null,
+          "field": "sp_electronic_energy",
+          "port": null,
+          "requirement_id": "req_sp_a",
+          "step_id": null
+        },
+        {
+          "check": null,
+          "field": null,
+          "port": "energy_data",
+          "requirement_id": "req_sp_a",
+          "step_id": null
+        },
+        {
+          "check": null,
+          "field": "sp_electronic_energy",
+          "port": null,
+          "requirement_id": "req_sp_b",
+          "step_id": null
+        },
+        {
+          "check": null,
+          "field": null,
+          "port": "energy_data",
+          "requirement_id": "req_sp_b",
+          "step_id": null
+        },
+        {
+          "check": null,
+          "field": "method_energy_difference",
+          "port": null,
+          "requirement_id": "req_delta",
+          "step_id": null
+        }
+      ],
+      "revision": 1,
+      "steps": [
+        {
+          "goal_checks": [],
+          "id": "sp_a",
+          "inputs": {
+            "geometry": {
+              "artifact_id": "artifact_1539c5775f2147318b5460cdfd66b9bc",
+              "port": null,
+              "step_id": null
+            }
+          },
+          "origin_step_id": null,
+          "parameters": {
+            "charge": 0,
+            "environment": "gas",
+            "method_profile": "r2scan3c",
+            "multiplicity": 1
+          },
+          "requirement_id": "req_sp_a",
+          "subject_id": "subject_water",
+          "tool": "single_point"
+        },
+        {
+          "goal_checks": [],
+          "id": "sp_b",
+          "inputs": {
+            "geometry": {
+              "artifact_id": "artifact_1539c5775f2147318b5460cdfd66b9bc",
+              "port": null,
+              "step_id": null
+            }
+          },
+          "origin_step_id": null,
+          "parameters": {
+            "charge": 0,
+            "environment": "gas",
+            "method_profile": "pbe0_d3bj_def2svp",
+            "multiplicity": 1
+          },
+          "requirement_id": "req_sp_b",
+          "subject_id": "subject_water",
+          "tool": "single_point"
+        },
+        {
+          "goal_checks": [],
+          "id": "delta",
+          "inputs": {
+            "energy_a": {
+              "artifact_id": null,
+              "port": "energy_data",
+              "step_id": "sp_a"
+            },
+            "energy_b": {
+              "artifact_id": null,
+              "port": "energy_data",
+              "step_id": "sp_b"
+            }
+          },
+          "origin_step_id": null,
+          "parameters": {},
+          "requirement_id": "req_delta",
+          "subject_id": "subject_water",
+          "tool": "energy_difference"
+        }
+      ]
+    },
+    "repair_record_start": 0,
+    "repair_scope": {
+      "iteration_increase_allowed": true,
+      "max_attempts_per_science_step": 3,
+      "max_extra_executions_by_category": {
+        "electronic_structure": 3
+      },
+      "resources_immutable": {
+        "attempt_timeout_seconds": 1200,
+        "cores": 4,
+        "max_concurrent_jobs": 1,
+        "maxcore_mb": 192,
+        "memory_mb": 1024,
+        "output_limit_bytes": 67108864,
+        "run_active_timeout_seconds": 3600,
+        "workdir_limit_bytes": 536870912
+      },
+      "steps": {
+        "sp_a": {
+          "actions": {
+            "increase_scf_maxiter": {
+              "fields": [
+                "scf_maxiter"
+              ],
+              "input_aliases": [],
+              "limits": {
+                "scf_maxiter": 1000
+              },
+              "maximum": 1000
+            }
+          },
+          "immutable_parameters": [
+            "charge",
+            "environment",
+            "method_profile",
+            "multiplicity"
+          ],
+          "mutable_parameters": [
+            "scf_maxiter"
+          ],
+          "origin_step_id": "sp_a"
+        }
+      },
+      "version": 1
+    },
+    "request": {
+      "description": "Compare two registered methods on one water geometry",
+      "explicit_parameters": {},
+      "id": "real_method_comparison_request_after_fix",
+      "missing_fields": [],
+      "operations": [
+        "SP",
+        "SP"
+      ],
+      "original_text": null,
+      "output_preferences": {
+        "detail": "normal",
+        "file_content": "auto",
+        "layout": "auto"
+      },
+      "requested_results": [
+        {
+          "check": null,
+          "field": "sp_electronic_energy",
+          "port": null,
+          "requirement_id": "req_sp_a",
+          "step_id": null
+        },
+        {
+          "check": null,
+          "field": null,
+          "port": "energy_data",
+          "requirement_id": "req_sp_a",
+          "step_id": null
+        },
+        {
+          "check": null,
+          "field": "sp_electronic_energy",
+          "port": null,
+          "requirement_id": "req_sp_b",
+          "step_id": null
+        },
+        {
+          "check": null,
+          "field": null,
+          "port": "energy_data",
+          "requirement_id": "req_sp_b",
+          "step_id": null
+        },
+        {
+          "check": null,
+          "field": "method_energy_difference",
+          "port": null,
+          "requirement_id": "req_delta",
+          "step_id": null
+        }
+      ],
+      "requirements": [
+        {
+          "capability": "single_point",
+          "constraints": {},
+          "id": "req_sp_a",
+          "outputs": [
+            "sp_electronic_energy",
+            "energy_data"
+          ],
+          "parameters": {
+            "charge": 0,
+            "environment": "gas",
+            "method_profile": "r2scan3c",
+            "multiplicity": 1
+          },
+          "subject_id": "subject_water"
+        },
+        {
+          "capability": "single_point",
+          "constraints": {},
+          "id": "req_sp_b",
+          "outputs": [
+            "sp_electronic_energy",
+            "energy_data"
+          ],
+          "parameters": {
+            "charge": 0,
+            "environment": "gas",
+            "method_profile": "pbe0_d3bj_def2svp",
+            "multiplicity": 1
+          },
+          "subject_id": "subject_water"
+        },
+        {
+          "capability": "energy_difference",
+          "constraints": {},
+          "id": "req_delta",
+          "outputs": [
+            "method_energy_difference"
+          ],
+          "parameters": {},
+          "subject_id": "subject_water"
+        }
+      ],
+      "source": "chat",
+      "structure_input": {},
+      "subjects": {
+        "subject_water": {
+          "key": "water",
+          "structure_input": {}
+        }
+      },
+      "user_modifications": {},
+      "user_modifications_by_requirement": {}
+    },
+    "resources": {
+      "attempt_timeout_seconds": 1200,
+      "cores": 4,
+      "max_concurrent_jobs": 1,
+      "maxcore_mb": 192,
+      "memory_mb": 1024,
+      "output_limit_bytes": 67108864,
+      "run_active_timeout_seconds": 3600,
+      "workdir_limit_bytes": 536870912
+    }
+  },
+  "active_seconds": 8.794518899871036,
+  "artifact_index": [
+    {
+      "artifact_type": "molecular_geometry",
+      "attempt": null,
+      "id": "artifact_1539c5775f2147318b5460cdfd66b9bc",
+      "metadata": {
+        "imported_as_raw_bytes": true
+      },
+      "relative_path": "artifacts/artifact_1539c5775f2147318b5460cdfd66b9bc.xyz",
+      "role": "input_geometry",
+      "run_id": "run_ccf36fa371ab475f86464c160f53f18b",
+      "sha256": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2",
+      "size_bytes": 168,
+      "source": "E:\\BG6022-v3\\examples\\water.xyz",
+      "step_id": null
+    },
+    {
+      "artifact_type": "orca_input",
+      "attempt": 1,
+      "id": "artifact_58fa43304c244bf49ac03b1dda045973",
+      "metadata": {},
+      "relative_path": "artifacts/artifact_58fa43304c244bf49ac03b1dda045973.inp",
+      "role": "input",
+      "run_id": "run_ccf36fa371ab475f86464c160f53f18b",
+      "sha256": "57ba5323cb7e48a2812178ce53803fc1e09a48eccb2c8f5e3aa6b23a11dab299",
+      "size_bytes": 85,
+      "source": "sp_a/attempt-01/input.inp",
+      "step_id": "sp_a"
+    },
+    {
+      "artifact_type": "molecular_geometry",
+      "attempt": 1,
+      "id": "artifact_ea3c2481689149db82d4f67918181032",
+      "metadata": {},
+      "relative_path": "artifacts/artifact_ea3c2481689149db82d4f67918181032.xyz",
+      "role": "input_geometry_snapshot",
+      "run_id": "run_ccf36fa371ab475f86464c160f53f18b",
+      "sha256": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2",
+      "size_bytes": 168,
+      "source": "sp_a/attempt-01/geometry.xyz",
+      "step_id": "sp_a"
+    },
+    {
+      "artifact_type": "orca_output",
+      "attempt": 1,
+      "id": "artifact_851d00cb77c345cdbe4c8fd1f541356c",
+      "metadata": {},
+      "relative_path": "artifacts/artifact_851d00cb77c345cdbe4c8fd1f541356c.out",
+      "role": "stdout",
+      "run_id": "run_ccf36fa371ab475f86464c160f53f18b",
+      "sha256": "59634a4fe678a0e1c375831abc406e6efa339928f75d9212dfaf96443e4484b7",
+      "size_bytes": 50641,
+      "source": "sp_a/attempt-01/stdout.out",
+      "step_id": "sp_a"
+    },
+    {
+      "artifact_type": "orca_output",
+      "attempt": 1,
+      "id": "artifact_dfd8dd480b944c158357e14d3f792c30",
+      "metadata": {},
+      "relative_path": "artifacts/artifact_dfd8dd480b944c158357e14d3f792c30.txt",
+      "role": "stderr",
+      "run_id": "run_ccf36fa371ab475f86464c160f53f18b",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0,
+      "source": "sp_a/attempt-01/stderr.txt",
+      "step_id": "sp_a"
+    },
+    {
+      "artifact_type": "energy_data",
+      "attempt": 1,
+      "id": "artifact_ddca26d2f9794632a97c1acd8708e894",
+      "metadata": {
+        "charge": 0,
+        "geometry_sha256": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2",
+        "method_profile": "r2scan3c",
+        "multiplicity": 1,
+        "operation": "SP",
+        "property": "electronic_energy",
+        "unit": "Eh"
+      },
+      "relative_path": "artifacts/artifact_ddca26d2f9794632a97c1acd8708e894.json",
+      "role": "verified_energy_data",
+      "run_id": "run_ccf36fa371ab475f86464c160f53f18b",
+      "sha256": "b4ff6b64533e63d3079ee3348b6d7ca33734e07e2e09e742bfd08de558f461ff",
+      "size_bytes": 490,
+      "source": "sp_a/attempt-01/energy_data.json",
+      "step_id": "sp_a"
+    },
+    {
+      "artifact_type": "orca_input",
+      "attempt": 1,
+      "id": "artifact_fe5e2dc8e9034d37a896542a34145d4f",
+      "metadata": {},
+      "relative_path": "artifacts/artifact_fe5e2dc8e9034d37a896542a34145d4f.inp",
+      "role": "input",
+      "run_id": "run_ccf36fa371ab475f86464c160f53f18b",
+      "sha256": "1dc51bb80eee8f0bd5c19e93861a3a6daae8f38fe48fbed0f978540b8da0d345",
+      "size_bytes": 109,
+      "source": "sp_b/attempt-01/input.inp",
+      "step_id": "sp_b"
+    },
+    {
+      "artifact_type": "molecular_geometry",
+      "attempt": 1,
+      "id": "artifact_1e7bfd37def54fe589751bdd080a9823",
+      "metadata": {},
+      "relative_path": "artifacts/artifact_1e7bfd37def54fe589751bdd080a9823.xyz",
+      "role": "input_geometry_snapshot",
+      "run_id": "run_ccf36fa371ab475f86464c160f53f18b",
+      "sha256": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2",
+      "size_bytes": 168,
+      "source": "sp_b/attempt-01/geometry.xyz",
+      "step_id": "sp_b"
+    },
+    {
+      "artifact_type": "orca_output",
+      "attempt": 1,
+      "id": "artifact_35781ac4a861439295ef1739878609a8",
+      "metadata": {},
+      "relative_path": "artifacts/artifact_35781ac4a861439295ef1739878609a8.out",
+      "role": "stdout",
+      "run_id": "run_ccf36fa371ab475f86464c160f53f18b",
+      "sha256": "f3e042687b0d96ccabc3907ae3116ae75abc97741ca612ee973dcd9d2a14c21d",
+      "size_bytes": 53395,
+      "source": "sp_b/attempt-01/stdout.out",
+      "step_id": "sp_b"
+    },
+    {
+      "artifact_type": "orca_output",
+      "attempt": 1,
+      "id": "artifact_93a1e8da31d141ca9536d0af9674bad2",
+      "metadata": {},
+      "relative_path": "artifacts/artifact_93a1e8da31d141ca9536d0af9674bad2.txt",
+      "role": "stderr",
+      "run_id": "run_ccf36fa371ab475f86464c160f53f18b",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0,
+      "source": "sp_b/attempt-01/stderr.txt",
+      "step_id": "sp_b"
+    },
+    {
+      "artifact_type": "energy_data",
+      "attempt": 1,
+      "id": "artifact_3d19107dfabd40fcafcb05f3158471ba",
+      "metadata": {
+        "charge": 0,
+        "geometry_sha256": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2",
+        "method_profile": "pbe0_d3bj_def2svp",
+        "multiplicity": 1,
+        "operation": "SP",
+        "property": "electronic_energy",
+        "unit": "Eh"
+      },
+      "relative_path": "artifacts/artifact_3d19107dfabd40fcafcb05f3158471ba.json",
+      "role": "verified_energy_data",
+      "run_id": "run_ccf36fa371ab475f86464c160f53f18b",
+      "sha256": "ccf24e08575c2f5255ae6bc4eec302eb3920968d3438dc7d3cbf2cc5f3b095a2",
+      "size_bytes": 523,
+      "source": "sp_b/attempt-01/energy_data.json",
+      "step_id": "sp_b"
+    }
+  ],
+  "attempt_counts": {
+    "sp_a": 1,
+    "sp_b": 1
+  },
+  "attempts": [
+    {
+      "artifact_ids": [
+        "artifact_58fa43304c244bf49ac03b1dda045973",
+        "artifact_ea3c2481689149db82d4f67918181032",
+        "artifact_851d00cb77c345cdbe4c8fd1f541356c",
+        "artifact_dfd8dd480b944c158357e14d3f792c30",
+        "artifact_ddca26d2f9794632a97c1acd8708e894"
+      ],
+      "attempt": 1,
+      "geometry_sha256": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2",
+      "input_geometry_artifact_id": "artifact_1539c5775f2147318b5460cdfd66b9bc",
+      "input_sha256": "57ba5323cb7e48a2812178ce53803fc1e09a48eccb2c8f5e3aa6b23a11dab299",
+      "operation": "SP",
+      "output_ports": {
+        "energy_data": "artifact_ddca26d2f9794632a97c1acd8708e894"
+      },
+      "phase": "finished",
+      "pid": 57560,
+      "process_created_at": 13434630948.352594,
+      "relative_path": "runs/run_ccf36fa371ab475f86464c160f53f18b/sp_a/attempt-01",
+      "result_category": null,
+      "status": "succeeded",
+      "step_id": "sp_a"
+    },
+    {
+      "artifact_ids": [
+        "artifact_fe5e2dc8e9034d37a896542a34145d4f",
+        "artifact_1e7bfd37def54fe589751bdd080a9823",
+        "artifact_35781ac4a861439295ef1739878609a8",
+        "artifact_93a1e8da31d141ca9536d0af9674bad2",
+        "artifact_3d19107dfabd40fcafcb05f3158471ba"
+      ],
+      "attempt": 1,
+      "geometry_sha256": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2",
+      "input_geometry_artifact_id": "artifact_1539c5775f2147318b5460cdfd66b9bc",
+      "input_sha256": "1dc51bb80eee8f0bd5c19e93861a3a6daae8f38fe48fbed0f978540b8da0d345",
+      "operation": "SP",
+      "output_ports": {
+        "energy_data": "artifact_3d19107dfabd40fcafcb05f3158471ba"
+      },
+      "phase": "finished",
+      "pid": 17564,
+      "process_created_at": 13434630952.806776,
+      "relative_path": "runs/run_ccf36fa371ab475f86464c160f53f18b/sp_b/attempt-01",
+      "result_category": null,
+      "status": "succeeded",
+      "step_id": "sp_b"
+    },
+    {
+      "artifact_ids": [],
+      "attempt": 1,
+      "input_artifact_ids": [
+        "artifact_ddca26d2f9794632a97c1acd8708e894",
+        "artifact_3d19107dfabd40fcafcb05f3158471ba"
+      ],
+      "output_ports": {},
+      "phase": "finished",
+      "status": "succeeded",
+      "step_id": "delta"
+    }
+  ],
+  "budget": {
+    "max_attempts_per_science_step": 3,
+    "max_extra_executions_by_category": {
+      "electronic_structure": 3
+    },
+    "max_plan_revisions": 2
+  },
+  "created_at": "2026-09-23T09:55:48.307465Z",
+  "current_results": {
+    "delta": "delta/attempt-01/result.json",
+    "sp_a": "sp_a/attempt-01/result.json",
+    "sp_b": "sp_b/attempt-01/result.json"
+  },
+  "execution_permission": true,
+  "extra_executions_by_category": {},
+  "extra_orca_executions": 0,
+  "id": "run_ccf36fa371ab475f86464c160f53f18b",
+  "origin_step_map": {
+    "delta": "delta",
+    "sp_a": "sp_a",
+    "sp_b": "sp_b"
+  },
+  "parameter_sources_by_step": {
+    "sp_a": {},
+    "sp_b": {}
+  },
+  "pending_data": {},
+  "plan": {
+    "id": "real_method_comparison_plan_after_fix",
+    "request_id": "real_method_comparison_request_after_fix",
+    "requested_results": [
+      {
+        "check": null,
+        "field": "sp_electronic_energy",
+        "port": null,
+        "requirement_id": "req_sp_a",
+        "step_id": null
+      },
+      {
+        "check": null,
+        "field": null,
+        "port": "energy_data",
+        "requirement_id": "req_sp_a",
+        "step_id": null
+      },
+      {
+        "check": null,
+        "field": "sp_electronic_energy",
+        "port": null,
+        "requirement_id": "req_sp_b",
+        "step_id": null
+      },
+      {
+        "check": null,
+        "field": null,
+        "port": "energy_data",
+        "requirement_id": "req_sp_b",
+        "step_id": null
+      },
+      {
+        "check": null,
+        "field": "method_energy_difference",
+        "port": null,
+        "requirement_id": "req_delta",
+        "step_id": null
+      }
+    ],
+    "revision": 1,
+    "steps": [
+      {
+        "goal_checks": [],
+        "id": "sp_a",
+        "inputs": {
+          "geometry": {
+            "artifact_id": "artifact_1539c5775f2147318b5460cdfd66b9bc",
+            "port": null,
+            "step_id": null
+          }
+        },
+        "origin_step_id": null,
+        "parameters": {
+          "charge": 0,
+          "environment": "gas",
+          "method_profile": "r2scan3c",
+          "multiplicity": 1
+        },
+        "requirement_id": "req_sp_a",
+        "subject_id": "subject_water",
+        "tool": "single_point"
+      },
+      {
+        "goal_checks": [],
+        "id": "sp_b",
+        "inputs": {
+          "geometry": {
+            "artifact_id": "artifact_1539c5775f2147318b5460cdfd66b9bc",
+            "port": null,
+            "step_id": null
+          }
+        },
+        "origin_step_id": null,
+        "parameters": {
+          "charge": 0,
+          "environment": "gas",
+          "method_profile": "pbe0_d3bj_def2svp",
+          "multiplicity": 1
+        },
+        "requirement_id": "req_sp_b",
+        "subject_id": "subject_water",
+        "tool": "single_point"
+      },
+      {
+        "goal_checks": [],
+        "id": "delta",
+        "inputs": {
+          "energy_a": {
+            "artifact_id": null,
+            "port": "energy_data",
+            "step_id": "sp_a"
+          },
+          "energy_b": {
+            "artifact_id": null,
+            "port": "energy_data",
+            "step_id": "sp_b"
+          }
+        },
+        "origin_step_id": null,
+        "parameters": {},
+        "requirement_id": "req_delta",
+        "subject_id": "subject_water",
+        "tool": "energy_difference"
+      }
+    ]
+  },
+  "plan_revisions": 0,
+  "repair_records": [],
+  "request": {
+    "description": "Compare two registered methods on one water geometry",
+    "explicit_parameters": {},
+    "id": "real_method_comparison_request_after_fix",
+    "missing_fields": [],
+    "operations": [
+      "SP",
+      "SP"
+    ],
+    "original_text": null,
+    "output_preferences": {
+      "detail": "normal",
+      "file_content": "auto",
+      "layout": "auto"
+    },
+    "requested_results": [
+      {
+        "check": null,
+        "field": "sp_electronic_energy",
+        "port": null,
+        "requirement_id": "req_sp_a",
+        "step_id": null
+      },
+      {
+        "check": null,
+        "field": null,
+        "port": "energy_data",
+        "requirement_id": "req_sp_a",
+        "step_id": null
+      },
+      {
+        "check": null,
+        "field": "sp_electronic_energy",
+        "port": null,
+        "requirement_id": "req_sp_b",
+        "step_id": null
+      },
+      {
+        "check": null,
+        "field": null,
+        "port": "energy_data",
+        "requirement_id": "req_sp_b",
+        "step_id": null
+      },
+      {
+        "check": null,
+        "field": "method_energy_difference",
+        "port": null,
+        "requirement_id": "req_delta",
+        "step_id": null
+      }
+    ],
+    "requirements": [
+      {
+        "capability": "single_point",
+        "constraints": {},
+        "id": "req_sp_a",
+        "outputs": [
+          "sp_electronic_energy",
+          "energy_data"
+        ],
+        "parameters": {
+          "charge": 0,
+          "environment": "gas",
+          "method_profile": "r2scan3c",
+          "multiplicity": 1
+        },
+        "subject_id": "subject_water"
+      },
+      {
+        "capability": "single_point",
+        "constraints": {},
+        "id": "req_sp_b",
+        "outputs": [
+          "sp_electronic_energy",
+          "energy_data"
+        ],
+        "parameters": {
+          "charge": 0,
+          "environment": "gas",
+          "method_profile": "pbe0_d3bj_def2svp",
+          "multiplicity": 1
+        },
+        "subject_id": "subject_water"
+      },
+      {
+        "capability": "energy_difference",
+        "constraints": {},
+        "id": "req_delta",
+        "outputs": [
+          "method_energy_difference"
+        ],
+        "parameters": {},
+        "subject_id": "subject_water"
+      }
+    ],
+    "source": "chat",
+    "structure_input": {},
+    "subjects": {
+      "subject_water": {
+        "key": "water",
+        "structure_input": {}
+      }
+    },
+    "user_modifications": {},
+    "user_modifications_by_requirement": {}
+  },
+  "resources": {
+    "attempt_timeout_seconds": 1200,
+    "cores": 4,
+    "max_concurrent_jobs": 1,
+    "maxcore_mb": 192,
+    "memory_mb": 1024,
+    "output_limit_bytes": 67108864,
+    "run_active_timeout_seconds": 3600,
+    "workdir_limit_bytes": 536870912
+  },
+  "result_index": [
+    "sp_a/attempt-01/result.json",
+    "sp_b/attempt-01/result.json",
+    "delta/attempt-01/result.json"
+  ],
+  "session_id": null,
+  "status": "succeeded",
+  "step_status": {
+    "delta": "succeeded",
+    "sp_a": "succeeded",
+    "sp_b": "succeeded"
+  },
+  "updated_at": "2026-09-23T09:55:57.122863Z",
+  "waiting_for": null
+}

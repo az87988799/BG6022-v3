@@ -1,0 +1,14 @@
+{
+  "PropertyTable": {
+    "Properties": [
+      {
+        "CID": 962,
+        "MolecularFormula": "H2O",
+        "SMILES": "O",
+        "ConnectivitySMILES": "O",
+        "Charge": 0,
+        "Title": "Water"
+      }
+    ]
+  }
+}

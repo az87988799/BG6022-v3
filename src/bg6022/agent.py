@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, is_dataclass
@@ -50,8 +51,12 @@ from .output_contracts import (
 )
 from .output_query import (
     build_raw_catalog_entries,
+    build_readonly_observation_entries,
     collect_raw_output_sources,
+    new_content_budget,
+    pending_query_targets,
     query_output_sources,
+    query_readonly_observations,
     read_report_queries,
     reports_for_run,
     validate_raw_query_targets,
@@ -61,6 +66,7 @@ from .planner import (
     IntakeOutput,
     IntakeSubjectProposal,
     QuerySelection,
+    QueryTarget,
     _request_output_preferences,
     apply_plan_change,
     electronic_state_clarification,
@@ -79,6 +85,7 @@ from .session import (
     MAX_RECENT_RUNS,
     ArtifactReadError,
     artifact_path,
+    check_read_deadline,
     create_run,
     execution_fingerprint,
     find_artifact,
@@ -90,8 +97,10 @@ from .session import (
     new_metadata_budget,
     publish_step_result,
     read_metadata_json,
+    read_registered_artifact_bytes,
     register_bytes_artifact,
     register_file_artifact,
+    registered_read_path,
     run_directory,
     save_run,
     save_session,
@@ -102,6 +111,7 @@ from .tools.molecule import (
     parse_xyz_bytes,
     resolve_artifact_reference,
 )
+from .tools.orca_output import dump_query_spec
 from .tools.pubchem import _facts_from_smiles
 from .tools.registry import ToolRegistry, merge_explicit_step_parameters
 
@@ -233,6 +243,11 @@ class Agent:
                 "history_diagnostic": "session_read_limited_or_invalid",
             }
         self._session.setdefault("last_delivery", [])
+        if self._session.get("history_diagnostic") == "pending_query_invalid":
+            self._session_readonly = True
+            self._session["pending_prompt"] = (
+                "待澄清记录无效；原会话文件已保留，可用 /new 开始新会话。"
+            )
 
     def execute_plan(
         self,
@@ -320,6 +335,7 @@ class Agent:
 
         request_token, request_cancel = self._begin_request()
         self._query_cancel = request_cancel
+        self._selected_read_budget = None
         self._append_message("user", text)
         llm_call_cursor = self._llm_call_count()
         llm_stage = "intake"
@@ -378,6 +394,7 @@ class Agent:
                         "last_delivery": self._session.get("last_delivery", []),
                     },
                     pending_tasks=pending_tasks,
+                    pending_query=self._pending_query_context(),
                     geometry_catalog=geometry_catalog,
                     result_catalog=result_catalog,
                     cancel=request_cancel,
@@ -408,6 +425,10 @@ class Agent:
                     self._record_response(response, cancel=request_cancel)
                     return response
                 if semantic.mode == "clarify":
+                    if semantic.query_clarification is not None:
+                        self._store_query_clarification(
+                            semantic.query_clarification, text, request_cancel
+                        )
                     response = AgentResponse(str(semantic.clarification), run=current)
                     self._record_response(response, cancel=request_cancel)
                     return response
@@ -435,22 +456,14 @@ class Agent:
                     capability_catalog=capability_catalog,
                     registry=self.registry,
                     pending_context=_pending_intake_context(current, self.registry),
+                    pending_query=self._pending_query_context(),
                     cancel=request_cancel,
                 )
                 self._persist_llm_diagnostics(llm_call_cursor, stage="intake")
             llm_call_cursor = self._llm_call_count()
             self._ensure_request_active(request_token, request_cancel)
 
-            answer_stage_eligible = intake.intent in {"chemistry_qa", "daily_qa"} or (
-                intake.intent == "context_query"
-                and (
-                    intake.query_selection is None
-                    or (
-                        intake.query_selection.status != "selected"
-                        and intake.query_selection.catalog_request is None
-                    )
-                )
-            )
+            answer_stage_eligible = intake.intent in {"chemistry_qa", "daily_qa"}
             if answer_stage_eligible:
                 llm_stage = "answer"
                 answer_draft, answer_error = self._compose_answer_draft(
@@ -489,6 +502,7 @@ class Agent:
                                     "last_delivery": self._session.get("last_delivery", []),
                                 },
                                 pending_tasks=pending_tasks,
+                                pending_query=self._pending_query_context(),
                                 geometry_catalog=geometry_catalog,
                                 result_catalog=result_catalog,
                                 validation_feedback=validation_feedback,
@@ -506,6 +520,10 @@ class Agent:
                                 self._record_response(response, cancel=request_cancel)
                                 return response
                             elif semantic.mode == "clarify":
+                                if semantic.query_clarification is not None:
+                                    self._store_query_clarification(
+                                        semantic.query_clarification, text, request_cancel
+                                    )
                                 response = AgentResponse(str(semantic.clarification), run=current)
                                 self._record_response(response, cancel=request_cancel)
                                 return response
@@ -529,6 +547,7 @@ class Agent:
                                 capability_catalog=capability_catalog,
                                 registry=self.registry,
                                 pending_context=_pending_intake_context(current, self.registry),
+                                pending_query=self._pending_query_context(),
                                 validation_feedback=validation_feedback,
                                 cancel=request_cancel,
                             )
@@ -809,6 +828,7 @@ class Agent:
                 llm_call_cursor,
                 stage=stage,
                 failure_category=error.category,
+                failure_diagnostics=error.diagnostics,
             )
             if error.category == "cancelled" or request_cancel.is_set():
                 completed_run = locals().get("run")
@@ -837,7 +857,7 @@ class Agent:
                         "sp_electronic_energy（单点电子能）或 "
                         "opt_final_electronic_energy（优化末态电子能）；未启动计算。"
                     )
-                elif stage == "intake" and error.category == "schema_error":
+                elif stage in {"semantic", "intake"} and error.category == "schema_error":
                     diagnostic_text = "；".join(
                         f"{item.get('path', '$')}: {item.get('message', '')}"
                         for item in error.diagnostics
@@ -855,8 +875,8 @@ class Agent:
                         )
                     else:
                         response = AgentResponse(
-                            f"请求字段未通过校验（{diagnostic_text[:300]}）。"
-                            "请按提示修正；本次没有生成或启动计算。"
+                            "这次查询的字段匹配失败，没有启动新计算；"
+                            f"诊断编号 {self._session.get('last_diagnostic_id', 'unknown')}。"
                         )
                 elif stage_label is not None:
                     response = AgentResponse(
@@ -1402,10 +1422,10 @@ class Agent:
                 source_path,
                 source_port,
             ) = verified_source
-            copied = register_file_artifact(
+            copied = register_bytes_artifact(
                 self.config.data_root_path,
                 run,
-                source_path,
+                self._read_query_artifact(source_run, source_artifact),
                 artifact_type="molecular_geometry",
                 role="input_geometry",
                 source=f"history:verified_{source_artifact.role}",
@@ -2709,7 +2729,12 @@ class Agent:
                         "error": "invalid_source",
                     }
                 ]
-            default_text, delivery = combine_output_reports(default_text, delivery, reports)
+            default_text, delivery = combine_output_reports(
+                default_text,
+                delivery,
+                reports,
+                detail=run.request.output_preferences.get("detail", "normal"),
+            )
             return AgentResponse(
                 default_text,
                 run=run,
@@ -2970,6 +2995,19 @@ class Agent:
         for fact in facts:
             item = dict(fact)
             if item.get("kind") != "port" and "view_metadata" not in item:
+                if remaining <= 516:
+                    item["value"] = None
+                    item["view_metadata"] = {
+                        "total_rows": 0,
+                        "offset": 0,
+                        "shown_rows": 0,
+                        "full_value_shown": False,
+                        "requested_scope_complete": False,
+                        "has_more": True,
+                        "encoded_bytes": 4,
+                    }
+                    bounded.append(item)
+                    continue
                 item["value"], item["view_metadata"] = bounded_verified_value(
                     item.get("value"),
                     item.get("view"),
@@ -3537,6 +3575,7 @@ class Agent:
         *,
         stage: str,
         failure_category: str | None = None,
+        failure_diagnostics=(),
     ) -> None:
         """Keep bounded, credential-free model-call facts with session context."""
 
@@ -3552,7 +3591,14 @@ class Agent:
                 item["stage"] = stage
                 diagnostics.append(item)
         if failure_category is not None:
-            diagnostics.append({"stage": stage, "category": failure_category})
+            failure = {"stage": stage, "category": failure_category}
+            if failure_category == "schema_error" or failure_diagnostics:
+                diagnostic_id = new_id("diag")
+                self._session["last_diagnostic_id"] = diagnostic_id
+                failure.update(
+                    diagnostic_id=diagnostic_id, schema_errors=list(failure_diagnostics)[:12]
+                )
+            diagnostics.append(failure)
         self._session["llm_diagnostics"] = diagnostics[-32:]
         self._save_session()
 
@@ -3647,9 +3693,19 @@ class Agent:
         raw_catalog, raw_bindings = build_raw_catalog_entries(
             raw_sources,
             self._session.get("last_output_query", []),
+            limit=None if return_all else 6,
         )
         self._query_bindings.update(raw_bindings)
-        catalog: list[dict[str, Any]] = list(raw_catalog)
+        observation_catalog, observation_bindings = build_readonly_observation_entries(
+            raw_sources,
+            self.config.data_root_path,
+            metadata_budget=budget,
+            limit=None if return_all else 6,
+            recent=self._session.get("last_output_query", []),
+            raw_bindings=raw_bindings,
+        )
+        self._query_bindings.update(observation_bindings)
+        catalog: list[dict[str, Any]] = raw_catalog + observation_catalog
         for run_id in indexed_ids:
             try:
                 run = load_run(self.config.data_root_path, run_id, metadata_budget=budget)
@@ -3760,6 +3816,11 @@ class Agent:
         ]
         if budget.get("diagnostic"):
             self._session["history_diagnostic"] = budget["diagnostic"]
+        self._query_catalog_limited = bool(
+            budget.get("diagnostic") or (not return_all and len(raw_sources) > 6)
+        )
+        if self._query_catalog_limited and catalog:
+            catalog[-1]["catalog_limit"] = budget.get("diagnostic", "raw_source_limit")
         for entry in catalog:
             if entry.get("access") != "raw_output":
                 entry["result"]["validity"] = "metadata_only"
@@ -3941,6 +4002,10 @@ class Agent:
             source_tool = self.registry.get(step.tool)
         except ValueError as error:
             raise ValueError("history geometry source Tool is unavailable") from error
+        if not self._query_result_is_valid(
+            source_run, step, result, relative, validate_all_outputs=True
+        ):
+            raise ValueError("history geometry source failed its Tool-local validation")
         port = binding.get("port")
         if not isinstance(port, str) or source_tool.output_ports.get(port) != "molecular_geometry":
             raise ValueError("history geometry binding does not name a geometry output port")
@@ -3955,9 +4020,34 @@ class Agent:
             or artifact.sha256 != binding.get("sha256")
         ):
             raise ValueError("history geometry artifact binding is invalid")
-        path = artifact_path(self.config.data_root_path, source_run, artifact)
-        parse_xyz_bytes(path.read_bytes())
+        path = registered_read_path(self.config.data_root_path, source_run, artifact.relative_path)
+        parse_xyz_bytes(self._read_query_artifact(source_run, artifact))
         return source_run, step, result, artifact, path, port
+
+    def _read_query_artifact(self, run, artifact):
+        """Share selected-content bytes/deadline across one request, including hashes."""
+        budget = getattr(self, "_selected_read_budget", None)
+        if budget is None:
+            budget = self._selected_read_budget = {
+                "deadline": time.monotonic() + 5,
+                "remaining": min(64 * 1024 * 1024, self.config.output_limit_bytes),
+                "cancel": getattr(self, "_query_cancel", None) or Event(),
+                "cache": {},
+            }
+        key = (run.id, artifact.id, artifact.sha256)
+        check_read_deadline(budget["cancel"], budget["deadline"])
+        if key not in budget["cache"]:
+            value = read_registered_artifact_bytes(
+                self.config.data_root_path,
+                run,
+                artifact,
+                max_bytes=budget["remaining"],
+                deadline=budget["deadline"],
+                cancel=budget["cancel"],
+            )
+            budget["remaining"] -= len(value)
+            budget["cache"][key] = value
+        return budget["cache"][key]
 
     def _public_query_entry(
         self,
@@ -4345,7 +4435,14 @@ class Agent:
         return list(dict.fromkeys(labels))
 
     def _query_result_is_valid(
-        self, run: Run, step: Step, result: Result, relative: str, *, metadata_only=False
+        self,
+        run: Run,
+        step: Step,
+        result: Result,
+        relative: str,
+        *,
+        metadata_only=False,
+        validate_all_outputs=False,
     ) -> bool:
         if (
             result.run_id != run.id
@@ -4380,7 +4477,8 @@ class Agent:
             if artifact is None or artifact.run_id != run.id:
                 return False
             try:
-                artifact_path(self.config.data_root_path, run, artifact)
+                if not metadata_only:
+                    self._read_query_artifact(run, artifact)
             except (OSError, ValueError):
                 return False
             if artifact.id not in result.input_artifact_ids:
@@ -4388,12 +4486,28 @@ class Agent:
             if result.input_bindings.get(input_name) != artifact.id:
                 return False
         tool = self.registry.get(step.tool)
-        if (
-            not metadata_only
-            and tool.scientific_checks
-            and not tool.validate_result(run, step, result)
-        ):
+        if not metadata_only and validate_all_outputs:
+            for port, artifact_id in result.output_ports.items():
+                if port not in tool.output_ports:
+                    return False
+                try:
+                    output = find_artifact(run, artifact_id)
+                    if (
+                        output.run_id != run.id
+                        or output.step_id != step.id
+                        or output.attempt != result.attempt
+                        or output.id not in result.artifact_ids
+                    ):
+                        return False
+                    self._read_query_artifact(run, output)
+                except (OSError, ValueError):
+                    return False
+        if not metadata_only and not tool.validate_result(run, step, result):
             return False
+        if not metadata_only:
+            budget = getattr(self, "_selected_read_budget", None)
+            if budget is not None:
+                check_read_deadline(budget["cancel"], budget["deadline"])
         return True
 
     def _query_port_artifact(
@@ -4425,11 +4539,9 @@ class Agent:
                 return None
             if metadata_only:
                 return artifact
-            path = artifact_path(self.config.data_root_path, run, artifact)
-            if not _artifact_integrity_matches(path, artifact):
-                return None
+            payload = self._read_query_artifact(run, artifact)
             if expected_type == "molecular_geometry":
-                parse_xyz_bytes(path.read_bytes())
+                parse_xyz_bytes(payload)
             return artifact
         except (OSError, ValueError):
             return None
@@ -4459,7 +4571,7 @@ class Agent:
                 continue
             try:
                 payload = read_metadata_json(
-                    artifact_path(self.config.data_root_path, run, molecule),
+                    registered_read_path(self.config.data_root_path, run, molecule.relative_path),
                     metadata_budget or new_metadata_budget(getattr(self, "_query_cancel", None)),
                 )
             except (OSError, ValueError, json.JSONDecodeError):
@@ -4619,8 +4731,8 @@ class Agent:
                 payload = {
                     "items": self._catalog_page,
                     "cursor": cursor,
-                    "complete": cursor is None,
-                    "status": "ok",
+                    "complete": cursor is None and not self._query_catalog_limited,
+                    "status": "limited" if self._query_catalog_limited else "ok",
                 }
             self._save_session()
             diagnostic = self._session.get("history_diagnostic")
@@ -4640,6 +4752,154 @@ class Agent:
         self._record_response(response, cancel=cancel)
         return response
 
+    @staticmethod
+    def _pending_source(binding):
+        return binding.get("source_binding", binding)
+
+    def _pending_query_context(self):
+        pending = self._session.get("pending_query")
+        if not isinstance(pending, Mapping) or pending.get("session_id") != self.session_id:
+            return None
+        refs = []
+        for source in pending.get("source_bindings", []):
+            candidates = [
+                key[0]
+                for key, value in self._query_bindings.items()
+                if self._pending_source(value) == source
+            ]
+            # Prefer a raw alias when the same source also has derivations.
+            candidates.sort(key=lambda ref: not ref.startswith("raw_"))
+            if candidates:
+                refs.append(candidates[0])
+        return {
+            "pending_ref": pending["pending_id"],
+            "original_question": pending["origin_question"],
+            "origin_evidence": pending["origin_evidence"],
+            "property_hint": pending.get("property_hint"),
+            "property_candidates": pending.get("property_candidates", []),
+            "candidate_source_refs": refs[:3],
+            "missing_slots": pending.get("missing_slots", []),
+            "resolved_slots": pending.get("resolved_slots", {}),
+            "source_available": len(refs) == len(pending.get("source_bindings", []))
+            and not pending.get("binding_diagnostic"),
+        }
+
+    def _store_query_clarification(self, context, question, cancel):
+        if cancel is not None and cancel.is_set():
+            return
+        sources = []
+        for ref in context.candidate_source_refs:
+            matches = [
+                self._pending_source(value)
+                for (r, _), value in self._query_bindings.items()
+                if r == ref and value.get("access") != "directory"
+            ]
+            if not matches:
+                raise ValueError("pending query source was not issued")
+            for binding in matches:
+                if binding not in sources:
+                    sources.append(binding)
+        if len(sources) > 3 or context.origin_evidence not in question:
+            raise ValueError("pending query sources/evidence exceed the supplied context")
+        pending = {
+            "schema": "bg6022.pending_query.v1",
+            "pending_id": new_id("pending"),
+            "session_id": self.session_id,
+            "origin_question": context.original_question,
+            "origin_evidence": context.origin_evidence,
+            "property_hint": context.property_hint,
+            "property_candidates": context.property_candidates,
+            "search_terms": context.search_terms,
+            "source_bindings": sources,
+            "missing_slots": context.missing_slots,
+            "resolved_slots": {} if "mode" in context.missing_slots else {"mode": "read_existing"},
+            "created_at": utc_now(),
+        }
+        if len(json.dumps(pending, ensure_ascii=False).encode()) > 8192:
+            raise ValueError("pending query exceeds its byte budget")
+        self._session["pending_query"] = pending
+
+    def _resume_query(self, question, resume, catalog, preferences, cancel):
+        pending = self._session.get("pending_query")
+        public = self._pending_query_context()
+        if (
+            not public
+            or resume.pending_ref != public["pending_ref"]
+            or not resume.resolution_evidence.strip()
+            or question.count(resume.resolution_evidence) != 1
+        ):
+            return AgentResponse("待补充查询的编号或引文无效；没有读取原文或启动计算。")
+        if not public["source_available"]:
+            return AgentResponse("原查询的来源已变化或不可用，请明确选择来源；未重新计算。")
+        updates = resume.slot_updates
+        updated = dict(pending)
+        updated["resolved_slots"] = dict(pending.get("resolved_slots", {}))
+        if updates.mode is not None:
+            updated["resolved_slots"]["mode"] = updates.mode
+        if updates.property_hint is not None:
+            allowed = set(public["property_candidates"]) | {public["property_hint"]}
+            if updates.property_hint not in allowed:
+                return AgentResponse("请从原查询的性质候选中选择；未读取原文。")
+            updated["property_hint"] = updates.property_hint
+        if updates.source_refs is not None:
+            if not updates.source_refs or set(updates.source_refs) - set(
+                public["candidate_source_refs"]
+            ):
+                return AgentResponse("所选来源不属于原查询的候选；未读取原文。")
+            updated["source_bindings"] = []
+            for (ref, _), value in self._query_bindings.items():
+                source = self._pending_source(value)
+                if ref in updates.source_refs and source not in updated["source_bindings"]:
+                    updated["source_bindings"].append(source)
+        missing = []
+        if len(updated["source_bindings"]) != 1 and "source" in pending["missing_slots"]:
+            missing.append("source")
+        if not updated.get("property_hint"):
+            missing.append("property")
+        if updated["resolved_slots"].get("mode") != "read_existing":
+            missing.append("mode")
+        updated["missing_slots"] = missing
+        if missing:
+            if cancel is None or not cancel.is_set():
+                self._session["pending_query"] = updated
+            labels = {
+                "source": "请明确原查询的来源。",
+                "property": "请选择 LUMO 轨道能量或 HOMO–LUMO 轨道能隙。",
+                "mode": "请明确是否读取已有结果。",
+            }
+            labels["property"] = (
+                "请明确原查询所需的性质：" + "、".join(public["property_candidates"]) + "。"
+            )
+            response = AgentResponse(" ".join(labels[m] for m in missing))
+            self._record_response(response, cancel=cancel)
+            return response
+        selection = QuerySelection(
+            status="selected",
+            targets=[
+                QueryTarget(**target)
+                for target in pending_query_targets(
+                    updated, updated["property_hint"], self._query_bindings
+                )
+            ],
+        )
+        response = self._answer_context(
+            question,
+            selection=selection,
+            catalog=catalog,
+            preferences=preferences,
+            cancel=cancel,
+            evidence_context=updated,
+        )
+        if cancel is None or not cancel.is_set():
+            if any(r.get("error") for r in response.delivery.get("raw_reports", [])):
+                updated["missing_slots"] = ["source"]
+                updated["binding_diagnostic"] = "source_unavailable"
+                self._session["pending_query"] = updated
+            else:
+                self._session.pop("pending_query", None)
+            self._save_session()
+        return response
+
     def _answer_context(
         self,
         question: str,
@@ -4648,6 +4908,7 @@ class Agent:
         catalog: list[Mapping[str, Any]],
         preferences: Mapping[str, Any] | None = None,
         cancel: Event | None = None,
+        evidence_context=None,
     ) -> AgentResponse:
         if cancel is not None and cancel.is_set():
             return AgentResponse(
@@ -4666,7 +4927,11 @@ class Agent:
             return response
         if selection.catalog_request is not None:
             return self._answer_catalog(selection.catalog_request, cancel)
+        if selection.status == "resume":
+            return self._resume_query(question, selection.resume, catalog, preferences, cancel)
         if selection.status != "selected":
+            if selection.clarification_context is not None:
+                self._store_query_clarification(selection.clarification_context, question, cancel)
             text = render_clarification(selection.model_dump(mode="python"))
             response = AgentResponse(text)
             self._record_response(response, cancel=cancel)
@@ -4689,19 +4954,24 @@ class Agent:
                 [t.model_dump(mode="json") for t in selection.targets],
                 question,
                 catalog,
+                evidence_context=evidence_context,
             )
         except ValueError:
             response = AgentResponse("原文查询证据或来源不明确，请明确要读取的问题及任务。")
             self._record_response(response, cancel=cancel)
             return response
+        content_budget = new_content_budget(cancel, self.config.output_limit_bytes)
+        self._selected_read_budget = content_budget
         raw_selections = []
+        observation_selections = []
         verified_targets = []
         for target in selection.targets:
             binding = self._query_bindings.get((target.subject_ref, target.property), {})
             if binding.get("access") == "raw_output":
-                raw_selections.append(
-                    (binding, [q.model_dump(mode="json") for q in target.queries])
-                )
+                raw_selections.append((binding, [dump_query_spec(q) for q in target.queries]))
+                continue
+            if binding.get("access") == "readonly_observation":
+                observation_selections.append((binding, target.evidence))
                 continue
             verified_targets.append(target)
             fact = self._load_query_fact(target.subject_ref, target.property)
@@ -4731,6 +5001,16 @@ class Agent:
             indexed_ids=indexed_ids,
             cancel=cancel,
             output_limit_bytes=self.config.output_limit_bytes,
+            read_budget=content_budget,
+        )
+        raw_reports += query_readonly_observations(
+            self.config.data_root_path,
+            observation_selections,
+            session_id=self.session_id,
+            indexed_ids=indexed_ids,
+            cancel=cancel,
+            output_limit_bytes=self.config.output_limit_bytes,
+            read_budget=content_budget,
         )
         targets = [target.model_dump(mode="python") for target in verified_targets]
         facts, _covered = select_facts_for_question(targets, selected_facts)
@@ -4748,7 +5028,13 @@ class Agent:
             if not verified_targets:
                 text = ""
                 delivery["status"] = "complete"
-            text, delivery = combine_output_reports(text, delivery, raw_reports)
+            text, delivery = combine_output_reports(
+                text, delivery, raw_reports, detail=(preferences or {}).get("detail", "normal")
+            )
+            if cancel is not None and cancel.is_set():
+                delivery["status"] = "cancelled"
+            elif evidence_context is None:
+                self._session.pop("pending_query", None)
             response = AgentResponse(text, delivery=delivery)
             self._record_response(response, cancel=cancel)
             return response
@@ -4780,7 +5066,13 @@ class Agent:
             question=question,
             preferences=preferences,
         )
-        text, delivery = combine_output_reports(text, delivery, raw_reports)
+        text, delivery = combine_output_reports(
+            text, delivery, raw_reports, detail=(preferences or {}).get("detail", "normal")
+        )
+        if cancel is not None and cancel.is_set():
+            delivery["status"] = "cancelled"
+        elif evidence_context is None:
+            self._session.pop("pending_query", None)
         response = AgentResponse(
             text,
             run=run,

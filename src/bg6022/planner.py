@@ -66,7 +66,7 @@ from bg6022.tools.registry import ToolRegistry, build_registry, merge_explicit_s
 
 Intent = Literal["chemistry_compute", "chemistry_qa", "daily_qa", "context_query"]
 PendingAction = Literal["none", "supplement_identity", "replace_identity", "clarify"]
-QuerySelectionStatus = Literal["selected", "clarify", "unavailable"]
+QuerySelectionStatus = Literal["selected", "clarify", "unavailable", "resume"]
 QuerySelectionReason = Literal[
     "ambiguous_subject",
     "ambiguous_property",
@@ -89,22 +89,38 @@ class IntentItem(BaseModel):
 
 
 def validate_intent_items(
-    items, message, tasks, *, registry, query_selection=None, result_catalog=()
+    items,
+    message,
+    tasks,
+    *,
+    registry,
+    query_selection=None,
+    result_catalog=(),
+    knowledge_only=False,
 ):
     """Check interpreted goals against exact quotes and actual Tool/source bindings.
 
     Language meaning belongs to the model. This boundary checks that its proposed
     execution covers the goals it identified; it never classifies words itself.
     """
-    by_key = {task.key: task for task in tasks}
+    # Validate and normalize copies. A later invalid goal must not leave behind
+    # a promoted output or an already deleted shared report question.
+    copies = [task.model_copy(deep=True) for task in tasks]
+    by_key = {task.key: task for task in copies}
     covered = set()
     report_evidence = set()
     affirmative = set()
     excluded = set()
+    report_consumers = {}
     for item in items:
         if not item.evidence.strip() or message.count(item.evidence) != 1:
             raise ValueError(
                 "intent evidence must uniquely quote the user's message; use a fuller quote"
+            )
+        if item.kind == "query" and item.task_keys:
+            raise ValueError(
+                "readonly query intent_items.task_keys must be []; choose issued QuerySelection "
+                "targets instead. Raw targets use property=orca_output and queries[].property_hint."
             )
         if len(set(item.task_keys)) != len(item.task_keys) or set(item.task_keys) - set(by_key):
             raise ValueError("intent task_keys must identify actual proposal tasks")
@@ -162,12 +178,13 @@ def validate_intent_items(
                                 task.requested_properties.append(descriptor["property"])
                         elif descriptor["name"] not in task.outputs:
                             task.outputs.append(descriptor["name"])
-                        task.report_queries = [q for q in task.report_queries if q not in matches]
                     else:
                         if not matches:
                             raise ValueError("report intent must bind an attached report question")
                         normalize_report_queries(matches, message, capability=task.capability)
                         report_evidence.update((key, q.evidence) for q in matches)
+                    for q in matches:
+                        report_consumers.setdefault((key, q.evidence), []).append(bool(possible))
                     affirmative.add((key, prop))
         elif item.kind == "query":
             targets = query_selection.targets if query_selection is not None else []
@@ -175,7 +192,15 @@ def validate_intent_items(
                 (entry.get("subject_ref"), entry.get("result", entry).get("property"))
                 for entry in result_catalog
             }
-            if item.task_keys or not any(
+            if item.task_keys:
+                raise ValueError("query intent cannot authorize execution tasks")
+            if query_selection is None:
+                if knowledge_only and not tasks:
+                    continue
+                raise ValueError("saved-result query intent requires query_selection")
+            if query_selection.status != "selected" or query_selection.catalog_request is not None:
+                continue
+            if not any(
                 t.evidence == item.evidence
                 and (t.subject_ref, t.property) in pairs
                 and (t.property == "orca_output" or t.property == prop)
@@ -190,10 +215,26 @@ def validate_intent_items(
         raise ValueError("new compute tasks require corresponding intent_items")
     if any((key, prop) in affirmative or (key, None) in excluded for key, prop in excluded):
         raise ValueError("excluded and affirmative goals conflict")
-    for task in tasks:
+    for task in copies:
+        task.report_queries = [
+            q
+            for q in task.report_queries
+            if not (
+                report_consumers.get((task.key, q.evidence))
+                and all(report_consumers[(task.key, q.evidence)])
+            )
+        ]
         for query in task.report_queries:
             if (task.key, query.evidence) not in report_evidence:
                 raise ValueError("attached report requires corresponding intent_items")
+    for original, normalized in zip(tasks, copies, strict=True):
+        original.report_queries = normalized.report_queries
+        if hasattr(original, "requested_properties"):
+            original.requested_properties += sorted(
+                set(normalized.requested_properties) - set(original.requested_properties)
+            )
+        else:
+            original.outputs += sorted(set(normalized.outputs) - set(original.outputs))
 
 
 class ElectronicStateCandidate(BaseModel):
@@ -248,6 +289,33 @@ class CatalogRequest(BaseModel):
         return self
 
 
+class QueryClarification(BaseModel):
+    """Turn-local unresolved question; source aliases are issued by the program."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    original_question: StrictStr = Field(min_length=1, max_length=240)
+    origin_evidence: StrictStr = Field(min_length=1, max_length=240)
+    property_hint: StrictStr | None = Field(default=None, max_length=80)
+    property_candidates: list[StrictStr] = Field(default_factory=list, max_length=6)
+    search_terms: list[StrictStr] = Field(default_factory=list, max_length=4)
+    candidate_source_refs: list[StrictStr] = Field(default_factory=list, max_length=3)
+    missing_slots: list[Literal["source", "property", "mode"]] = Field(min_length=1, max_length=3)
+
+
+class QuerySlotUpdates(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    mode: Literal["read_existing"] | None = None
+    property_hint: StrictStr | None = Field(default=None, max_length=80)
+    source_refs: list[StrictStr] | None = Field(default=None, max_length=3)
+
+
+class QueryResume(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    pending_ref: StrictStr = Field(min_length=1, max_length=80)
+    resolution_evidence: StrictStr = Field(min_length=1, max_length=240)
+    slot_updates: QuerySlotUpdates
+
+
 class QuerySelection(BaseModel):
     """Ephemeral model output for choosing facts from this intake round.
 
@@ -264,6 +332,8 @@ class QuerySelection(BaseModel):
     clarification: StrictStr | None = None
     missing_description: StrictStr | None = None
     reason: QuerySelectionReason | None = None
+    clarification_context: QueryClarification | None = None
+    resume: QueryResume | None = None
 
     @field_validator("targets")
     @classmethod
@@ -279,6 +349,15 @@ class QuerySelection(BaseModel):
 
     @model_validator(mode="after")
     def _status_matches_refs(self) -> QuerySelection:
+        if self.status == "resume":
+            if self.resume is None or self.targets or self.catalog_request is not None:
+                raise ValueError("resume requires a pending reference, without targets or catalog")
+        elif self.resume is not None:
+            raise ValueError("pending reference is only valid for resume")
+        if self.clarification_context is not None and self.status != "clarify":
+            raise ValueError("clarification context is only valid for clarify")
+        if self.status != "selected" and self.catalog_request is not None:
+            raise ValueError("only selected can browse a catalog")
         if self.catalog_request is not None and self.targets:
             raise ValueError("directory browsing and result targets are mutually exclusive")
         if self.status == "selected" and not self.targets and self.catalog_request is None:
@@ -286,6 +365,65 @@ class QuerySelection(BaseModel):
         if self.status != "selected" and self.targets:
             raise ValueError("clarify/unavailable query results cannot contain targets")
         return self
+
+
+def normalize_query_goals(selection, items):
+    """Project explicit model goal labels onto this turn's temporary raw queries."""
+    if selection is None or selection.status != "selected":
+        return selection
+    normalized = selection.model_copy(deep=True)
+    for target in normalized.targets:
+        for query in target.queries:
+            goals = {
+                item.requested_property
+                for item in items
+                if item.kind == "query"
+                and item.evidence in {query.evidence, target.evidence}
+                and item.requested_property
+            }
+            if query.property_hint is None and len(goals) == 1:
+                query.property_hint = goals.pop()
+    return normalized
+
+
+def validate_query_context(selection, message, catalog, pending_query=None):
+    """Common temporary protocol boundary for Semantic and Intake."""
+    if selection is None:
+        return
+    refs = {item.get("subject_ref") for item in catalog}
+    if selection.status == "selected":
+        if any(not t.evidence.strip() or message.count(t.evidence) != 1 for t in selection.targets):
+            raise ValueError("query evidence must uniquely quote the current message")
+    clarification = selection.clarification_context
+    if clarification is not None:
+        if (
+            not clarification.origin_evidence.strip()
+            or message.count(clarification.origin_evidence) != 1
+            or clarification.original_question not in message
+            or clarification.origin_evidence not in clarification.original_question
+            or set(clarification.candidate_source_refs) - refs
+        ):
+            raise ValueError("query clarification must preserve this question and issued sources")
+    resume = selection.resume
+    if resume is not None:
+        if (
+            not pending_query
+            or resume.pending_ref != pending_query.get("pending_ref")
+            or message.count(resume.resolution_evidence) != 1
+            or not resume.resolution_evidence.strip()
+        ):
+            raise ValueError("resume requires the issued pending reference and current evidence")
+        updates = resume.slot_updates
+        if updates.source_refs is not None and (
+            not updates.source_refs
+            or set(updates.source_refs) - set(pending_query.get("candidate_source_refs", []))
+        ):
+            raise ValueError("resume sources must be pending public candidates")
+        if updates.property_hint is not None:
+            allowed = set(pending_query.get("property_candidates", []))
+            allowed.add(pending_query.get("property_hint"))
+            if updates.property_hint not in allowed:
+                raise ValueError("resume property must be a pending public candidate")
 
 
 class IntakeSubjectProposal(BaseModel):
@@ -968,6 +1106,7 @@ def intake_message(
     registry: ToolRegistry | None = None,
     validation_feedback: str | None = None,
     pending_context: Mapping[str, Any] | None = None,
+    pending_query: Mapping[str, Any] | None = None,
     cancel: Any = None,
 ) -> IntakeOutput:
     if not message.strip():
@@ -997,6 +1136,7 @@ def intake_message(
         registry=registry,
         message=message,
         pending_context=pending_context,
+        pending_query=pending_query,
     )
     value = client.complete_json(
         [
@@ -1008,6 +1148,7 @@ def intake_message(
                         "message": model_message,
                         "recent_context": _bounded_context(context),
                         "pending_context": dict(pending_context or {}),
+                        "pending_query": dict(pending_query) if pending_query else None,
                         "result_catalog": catalog,
                         "geometry_catalog": [dict(item) for item in (geometry_catalog or [])],
                         "capability_catalog": capabilities,
@@ -2252,6 +2393,12 @@ def _request_output_preferences(message: str, value: Mapping[str, Any] | None) -
         preferences["file_content"] = "link_only"
     elif preferences.get("file_content") == "link_only" and not explicit_link_only:
         preferences["file_content"] = "auto"
+    if re.search(
+        r"(?:完整来源|完整原文|显示原文|给.*原文|全部来源|full\s+(?:source|detail)|raw\s+output)",
+        message,
+        re.I,
+    ):
+        preferences["detail"] = "full"
     return preferences
 
 
@@ -3254,6 +3401,7 @@ def _intake_schema(
     registry: ToolRegistry | None = None,
     message: str | None = None,
     pending_context: Mapping[str, Any] | None = None,
+    pending_query: Mapping[str, Any] | None = None,
 ) -> type[BaseModel]:
     """Build one strict canonical Intake schema from the registered Tool directory."""
 
@@ -3280,11 +3428,32 @@ def _intake_schema(
             )
             if invalid:
                 raise ValueError(
-                    f"query subject/property pairs are outside this catalog: {invalid}"
+                    f"query subject/property pairs are outside this catalog: {invalid}; "
+                    "raw targets must use property=orca_output, with the scientific goal in "
+                    "queries[].property_hint; readonly observations use their advertised property"
                 )
         return value
 
     def _request_contract(value: IntakeOutput) -> IntakeOutput:
+        if message is not None:
+            value.query_selection = normalize_query_goals(value.query_selection, value.intent_items)
+            validate_query_context(
+                value.query_selection, message, result_catalog or [], pending_query
+            )
+            if value.query_selection is not None:
+                validate_raw_query_targets(
+                    [target.model_dump(mode="json") for target in value.query_selection.targets],
+                    message,
+                    result_catalog or [],
+                )
+                validate_intent_items(
+                    value.intent_items,
+                    message,
+                    [],
+                    registry=registry,
+                    query_selection=value.query_selection,
+                    result_catalog=result_catalog or [],
+                )
         if value.intent != "chemistry_compute" or registry is None:
             return value
         reports = []
@@ -3532,7 +3701,13 @@ def _coerce_intake_output(
         # the dynamic schema first.  Keep the user-facing path safe and
         # actionable for an invalid subject/property binding while strict
         # clients still reject the payload at schema validation time.
-        if "subject/property pairs are outside this catalog" in str(error):
+        if any(
+            marker in str(error)
+            for marker in (
+                "subject/property pairs are outside this catalog",
+                "query intent requires a provided source",
+            )
+        ):
             output = IntakeOutput(
                 intent="context_query",
                 query_selection=QuerySelection(
@@ -3688,9 +3863,18 @@ def _validate_query_selection(
             if not target.evidence.strip() or message.count(target.evidence) != 1:
                 invalid_evidence = True
                 break
-            if target.reference_mode == "followup" and (
-                (target.subject_ref, target.property) not in recent_pairs
-                or len({ref for ref, _ in recent_pairs}) != 1
+            raw_target = any(
+                entry.get("subject_ref") == target.subject_ref
+                and entry.get("access") in {"raw_output", "readonly_observation"}
+                for entry in result_catalog or []
+            )
+            if (
+                not raw_target
+                and target.reference_mode == "followup"
+                and (
+                    (target.subject_ref, target.property) not in recent_pairs
+                    or len({ref for ref, _ in recent_pairs}) != 1
+                )
             ):
                 invalid_evidence = True
                 break

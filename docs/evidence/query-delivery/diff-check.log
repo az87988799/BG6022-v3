@@ -1,0 +1,16 @@
+warning: in the working copy of 'src/bg6022/agent.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'src/bg6022/answer.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'src/bg6022/canonicalize.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'src/bg6022/output_contracts.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'src/bg6022/output_query.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'src/bg6022/planner.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'src/bg6022/prompts/answer.md', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'src/bg6022/prompts/intake.md', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'src/bg6022/prompts/semantic.md', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'src/bg6022/semantic.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'src/bg6022/session.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'src/bg6022/tools/orca_output.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tests/live/test_root_fix_live.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tests/unit/test_history_directory.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tests/unit/test_llm.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tests/unit/test_root_contracts.py', CRLF will be replaced by LF the next time Git touches it

@@ -1,0 +1,317 @@
+Building source distribution...
+running egg_info
+writing src\bg6022.egg-info\PKG-INFO
+writing dependency_links to src\bg6022.egg-info\dependency_links.txt
+writing entry points to src\bg6022.egg-info\entry_points.txt
+writing requirements to src\bg6022.egg-info\requires.txt
+writing top-level names to src\bg6022.egg-info\top_level.txt
+reading manifest file 'src\bg6022.egg-info\SOURCES.txt'
+writing manifest file 'src\bg6022.egg-info\SOURCES.txt'
+running sdist
+running egg_info
+writing src\bg6022.egg-info\PKG-INFO
+writing dependency_links to src\bg6022.egg-info\dependency_links.txt
+writing entry points to src\bg6022.egg-info\entry_points.txt
+writing requirements to src\bg6022.egg-info\requires.txt
+writing top-level names to src\bg6022.egg-info\top_level.txt
+reading manifest file 'src\bg6022.egg-info\SOURCES.txt'
+writing manifest file 'src\bg6022.egg-info\SOURCES.txt'
+running check
+creating bg6022-0.1.0
+creating bg6022-0.1.0\src\bg6022
+creating bg6022-0.1.0\src\bg6022.egg-info
+creating bg6022-0.1.0\src\bg6022\benchmark
+creating bg6022-0.1.0\src\bg6022\orca
+creating bg6022-0.1.0\src\bg6022\prompts
+creating bg6022-0.1.0\src\bg6022\tools
+copying files to bg6022-0.1.0...
+copying README.md -> bg6022-0.1.0
+copying pyproject.toml -> bg6022-0.1.0
+copying src\bg6022\__init__.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\__main__.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\agent.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\answer.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\canonicalize.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\cli.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\config.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\diagnostics.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\intake_utils.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\llm.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\models.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\molecule_identity.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\output_contracts.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\output_query.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\plan_builder.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\planner.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\repair.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\semantic.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022\session.py -> bg6022-0.1.0\src\bg6022
+copying src\bg6022.egg-info\PKG-INFO -> bg6022-0.1.0\src\bg6022.egg-info
+copying src\bg6022.egg-info\SOURCES.txt -> bg6022-0.1.0\src\bg6022.egg-info
+copying src\bg6022.egg-info\dependency_links.txt -> bg6022-0.1.0\src\bg6022.egg-info
+copying src\bg6022.egg-info\entry_points.txt -> bg6022-0.1.0\src\bg6022.egg-info
+copying src\bg6022.egg-info\requires.txt -> bg6022-0.1.0\src\bg6022.egg-info
+copying src\bg6022.egg-info\top_level.txt -> bg6022-0.1.0\src\bg6022.egg-info
+copying src\bg6022\benchmark\__init__.py -> bg6022-0.1.0\src\bg6022\benchmark
+copying src\bg6022\benchmark\__main__.py -> bg6022-0.1.0\src\bg6022\benchmark
+copying src\bg6022\benchmark\compare.py -> bg6022-0.1.0\src\bg6022\benchmark
+copying src\bg6022\benchmark\dataset12.py -> bg6022-0.1.0\src\bg6022\benchmark
+copying src\bg6022\benchmark\e2e12.py -> bg6022-0.1.0\src\bg6022\benchmark
+copying src\bg6022\benchmark\grader.py -> bg6022-0.1.0\src\bg6022\benchmark
+copying src\bg6022\benchmark\grader12.py -> bg6022-0.1.0\src\bg6022\benchmark
+copying src\bg6022\benchmark\loader.py -> bg6022-0.1.0\src\bg6022\benchmark
+copying src\bg6022\benchmark\matrix.py -> bg6022-0.1.0\src\bg6022\benchmark
+copying src\bg6022\benchmark\models.py -> bg6022-0.1.0\src\bg6022\benchmark
+copying src\bg6022\benchmark\observers.py -> bg6022-0.1.0\src\bg6022\benchmark
+copying src\bg6022\benchmark\report.py -> bg6022-0.1.0\src\bg6022\benchmark
+copying src\bg6022\benchmark\report12.py -> bg6022-0.1.0\src\bg6022\benchmark
+copying src\bg6022\benchmark\runner.py -> bg6022-0.1.0\src\bg6022\benchmark
+copying src\bg6022\orca\__init__.py -> bg6022-0.1.0\src\bg6022\orca
+copying src\bg6022\orca\checks.py -> bg6022-0.1.0\src\bg6022\orca
+copying src\bg6022\orca\frequency_parser.py -> bg6022-0.1.0\src\bg6022\orca
+copying src\bg6022\orca\input.py -> bg6022-0.1.0\src\bg6022\orca
+copying src\bg6022\orca\parser.py -> bg6022-0.1.0\src\bg6022\orca
+copying src\bg6022\orca\profiles.py -> bg6022-0.1.0\src\bg6022\orca
+copying src\bg6022\orca\repair_rules.py -> bg6022-0.1.0\src\bg6022\orca
+copying src\bg6022\orca\runner.py -> bg6022-0.1.0\src\bg6022\orca
+copying src\bg6022\orca\windows_job.py -> bg6022-0.1.0\src\bg6022\orca
+copying src\bg6022\prompts\__init__.py -> bg6022-0.1.0\src\bg6022\prompts
+copying src\bg6022\prompts\answer.md -> bg6022-0.1.0\src\bg6022\prompts
+copying src\bg6022\prompts\intake.md -> bg6022-0.1.0\src\bg6022\prompts
+copying src\bg6022\prompts\planner.md -> bg6022-0.1.0\src\bg6022\prompts
+copying src\bg6022\prompts\repair.md -> bg6022-0.1.0\src\bg6022\prompts
+copying src\bg6022\prompts\semantic.md -> bg6022-0.1.0\src\bg6022\prompts
+copying src\bg6022\tools\__init__.py -> bg6022-0.1.0\src\bg6022\tools
+copying src\bg6022\tools\energy_difference.py -> bg6022-0.1.0\src\bg6022\tools
+copying src\bg6022\tools\geometry_angle.py -> bg6022-0.1.0\src\bg6022\tools
+copying src\bg6022\tools\geometry_distance.py -> bg6022-0.1.0\src\bg6022\tools
+copying src\bg6022\tools\molecule.py -> bg6022-0.1.0\src\bg6022\tools
+copying src\bg6022\tools\orca.py -> bg6022-0.1.0\src\bg6022\tools
+copying src\bg6022\tools\orca_output.py -> bg6022-0.1.0\src\bg6022\tools
+copying src\bg6022\tools\pubchem.py -> bg6022-0.1.0\src\bg6022\tools
+copying src\bg6022\tools\registry.py -> bg6022-0.1.0\src\bg6022\tools
+copying src\bg6022\tools\runtime.py -> bg6022-0.1.0\src\bg6022\tools
+Writing bg6022-0.1.0\setup.cfg
+Creating tar archive
+removing 'bg6022-0.1.0' (and everything under it)
+Building wheel from source distribution...
+running egg_info
+writing src\bg6022.egg-info\PKG-INFO
+writing dependency_links to src\bg6022.egg-info\dependency_links.txt
+writing entry points to src\bg6022.egg-info\entry_points.txt
+writing requirements to src\bg6022.egg-info\requires.txt
+writing top-level names to src\bg6022.egg-info\top_level.txt
+reading manifest file 'src\bg6022.egg-info\SOURCES.txt'
+writing manifest file 'src\bg6022.egg-info\SOURCES.txt'
+running bdist_wheel
+running build
+running build_py
+creating build\lib\bg6022
+copying src\bg6022\agent.py -> build\lib\bg6022
+copying src\bg6022\answer.py -> build\lib\bg6022
+copying src\bg6022\canonicalize.py -> build\lib\bg6022
+copying src\bg6022\cli.py -> build\lib\bg6022
+copying src\bg6022\config.py -> build\lib\bg6022
+copying src\bg6022\diagnostics.py -> build\lib\bg6022
+copying src\bg6022\intake_utils.py -> build\lib\bg6022
+copying src\bg6022\llm.py -> build\lib\bg6022
+copying src\bg6022\models.py -> build\lib\bg6022
+copying src\bg6022\molecule_identity.py -> build\lib\bg6022
+copying src\bg6022\output_contracts.py -> build\lib\bg6022
+copying src\bg6022\output_query.py -> build\lib\bg6022
+copying src\bg6022\planner.py -> build\lib\bg6022
+copying src\bg6022\plan_builder.py -> build\lib\bg6022
+copying src\bg6022\repair.py -> build\lib\bg6022
+copying src\bg6022\semantic.py -> build\lib\bg6022
+copying src\bg6022\session.py -> build\lib\bg6022
+copying src\bg6022\__init__.py -> build\lib\bg6022
+copying src\bg6022\__main__.py -> build\lib\bg6022
+creating build\lib\bg6022\benchmark
+copying src\bg6022\benchmark\compare.py -> build\lib\bg6022\benchmark
+copying src\bg6022\benchmark\dataset12.py -> build\lib\bg6022\benchmark
+copying src\bg6022\benchmark\e2e12.py -> build\lib\bg6022\benchmark
+copying src\bg6022\benchmark\grader.py -> build\lib\bg6022\benchmark
+copying src\bg6022\benchmark\grader12.py -> build\lib\bg6022\benchmark
+copying src\bg6022\benchmark\loader.py -> build\lib\bg6022\benchmark
+copying src\bg6022\benchmark\matrix.py -> build\lib\bg6022\benchmark
+copying src\bg6022\benchmark\models.py -> build\lib\bg6022\benchmark
+copying src\bg6022\benchmark\observers.py -> build\lib\bg6022\benchmark
+copying src\bg6022\benchmark\report.py -> build\lib\bg6022\benchmark
+copying src\bg6022\benchmark\report12.py -> build\lib\bg6022\benchmark
+copying src\bg6022\benchmark\runner.py -> build\lib\bg6022\benchmark
+copying src\bg6022\benchmark\__init__.py -> build\lib\bg6022\benchmark
+copying src\bg6022\benchmark\__main__.py -> build\lib\bg6022\benchmark
+creating build\lib\bg6022\orca
+copying src\bg6022\orca\checks.py -> build\lib\bg6022\orca
+copying src\bg6022\orca\frequency_parser.py -> build\lib\bg6022\orca
+copying src\bg6022\orca\input.py -> build\lib\bg6022\orca
+copying src\bg6022\orca\parser.py -> build\lib\bg6022\orca
+copying src\bg6022\orca\profiles.py -> build\lib\bg6022\orca
+copying src\bg6022\orca\repair_rules.py -> build\lib\bg6022\orca
+copying src\bg6022\orca\runner.py -> build\lib\bg6022\orca
+copying src\bg6022\orca\windows_job.py -> build\lib\bg6022\orca
+copying src\bg6022\orca\__init__.py -> build\lib\bg6022\orca
+creating build\lib\bg6022\prompts
+copying src\bg6022\prompts\__init__.py -> build\lib\bg6022\prompts
+creating build\lib\bg6022\tools
+copying src\bg6022\tools\energy_difference.py -> build\lib\bg6022\tools
+copying src\bg6022\tools\geometry_angle.py -> build\lib\bg6022\tools
+copying src\bg6022\tools\geometry_distance.py -> build\lib\bg6022\tools
+copying src\bg6022\tools\molecule.py -> build\lib\bg6022\tools
+copying src\bg6022\tools\orca.py -> build\lib\bg6022\tools
+copying src\bg6022\tools\orca_output.py -> build\lib\bg6022\tools
+copying src\bg6022\tools\pubchem.py -> build\lib\bg6022\tools
+copying src\bg6022\tools\registry.py -> build\lib\bg6022\tools
+copying src\bg6022\tools\runtime.py -> build\lib\bg6022\tools
+copying src\bg6022\tools\__init__.py -> build\lib\bg6022\tools
+running egg_info
+writing src\bg6022.egg-info\PKG-INFO
+writing dependency_links to src\bg6022.egg-info\dependency_links.txt
+writing entry points to src\bg6022.egg-info\entry_points.txt
+writing requirements to src\bg6022.egg-info\requires.txt
+writing top-level names to src\bg6022.egg-info\top_level.txt
+reading manifest file 'src\bg6022.egg-info\SOURCES.txt'
+writing manifest file 'src\bg6022.egg-info\SOURCES.txt'
+copying src\bg6022\prompts\answer.md -> build\lib\bg6022\prompts
+copying src\bg6022\prompts\intake.md -> build\lib\bg6022\prompts
+copying src\bg6022\prompts\planner.md -> build\lib\bg6022\prompts
+copying src\bg6022\prompts\repair.md -> build\lib\bg6022\prompts
+copying src\bg6022\prompts\semantic.md -> build\lib\bg6022\prompts
+installing to build\bdist.win-amd64\wheel
+running install
+running install_lib
+creating build\bdist.win-amd64\wheel
+creating build\bdist.win-amd64\wheel\bg6022
+copying build\lib\bg6022\agent.py -> build\bdist.win-amd64\wheel\.\bg6022
+copying build\lib\bg6022\answer.py -> build\bdist.win-amd64\wheel\.\bg6022
+creating build\bdist.win-amd64\wheel\bg6022\benchmark
+copying build\lib\bg6022\benchmark\compare.py -> build\bdist.win-amd64\wheel\.\bg6022\benchmark
+copying build\lib\bg6022\benchmark\dataset12.py -> build\bdist.win-amd64\wheel\.\bg6022\benchmark
+copying build\lib\bg6022\benchmark\e2e12.py -> build\bdist.win-amd64\wheel\.\bg6022\benchmark
+copying build\lib\bg6022\benchmark\grader.py -> build\bdist.win-amd64\wheel\.\bg6022\benchmark
+copying build\lib\bg6022\benchmark\grader12.py -> build\bdist.win-amd64\wheel\.\bg6022\benchmark
+copying build\lib\bg6022\benchmark\loader.py -> build\bdist.win-amd64\wheel\.\bg6022\benchmark
+copying build\lib\bg6022\benchmark\matrix.py -> build\bdist.win-amd64\wheel\.\bg6022\benchmark
+copying build\lib\bg6022\benchmark\models.py -> build\bdist.win-amd64\wheel\.\bg6022\benchmark
+copying build\lib\bg6022\benchmark\observers.py -> build\bdist.win-amd64\wheel\.\bg6022\benchmark
+copying build\lib\bg6022\benchmark\report.py -> build\bdist.win-amd64\wheel\.\bg6022\benchmark
+copying build\lib\bg6022\benchmark\report12.py -> build\bdist.win-amd64\wheel\.\bg6022\benchmark
+copying build\lib\bg6022\benchmark\runner.py -> build\bdist.win-amd64\wheel\.\bg6022\benchmark
+copying build\lib\bg6022\benchmark\__init__.py -> build\bdist.win-amd64\wheel\.\bg6022\benchmark
+copying build\lib\bg6022\benchmark\__main__.py -> build\bdist.win-amd64\wheel\.\bg6022\benchmark
+copying build\lib\bg6022\canonicalize.py -> build\bdist.win-amd64\wheel\.\bg6022
+copying build\lib\bg6022\cli.py -> build\bdist.win-amd64\wheel\.\bg6022
+copying build\lib\bg6022\config.py -> build\bdist.win-amd64\wheel\.\bg6022
+copying build\lib\bg6022\diagnostics.py -> build\bdist.win-amd64\wheel\.\bg6022
+copying build\lib\bg6022\intake_utils.py -> build\bdist.win-amd64\wheel\.\bg6022
+copying build\lib\bg6022\llm.py -> build\bdist.win-amd64\wheel\.\bg6022
+copying build\lib\bg6022\models.py -> build\bdist.win-amd64\wheel\.\bg6022
+copying build\lib\bg6022\molecule_identity.py -> build\bdist.win-amd64\wheel\.\bg6022
+creating build\bdist.win-amd64\wheel\bg6022\orca
+copying build\lib\bg6022\orca\checks.py -> build\bdist.win-amd64\wheel\.\bg6022\orca
+copying build\lib\bg6022\orca\frequency_parser.py -> build\bdist.win-amd64\wheel\.\bg6022\orca
+copying build\lib\bg6022\orca\input.py -> build\bdist.win-amd64\wheel\.\bg6022\orca
+copying build\lib\bg6022\orca\parser.py -> build\bdist.win-amd64\wheel\.\bg6022\orca
+copying build\lib\bg6022\orca\profiles.py -> build\bdist.win-amd64\wheel\.\bg6022\orca
+copying build\lib\bg6022\orca\repair_rules.py -> build\bdist.win-amd64\wheel\.\bg6022\orca
+copying build\lib\bg6022\orca\runner.py -> build\bdist.win-amd64\wheel\.\bg6022\orca
+copying build\lib\bg6022\orca\windows_job.py -> build\bdist.win-amd64\wheel\.\bg6022\orca
+copying build\lib\bg6022\orca\__init__.py -> build\bdist.win-amd64\wheel\.\bg6022\orca
+copying build\lib\bg6022\output_contracts.py -> build\bdist.win-amd64\wheel\.\bg6022
+copying build\lib\bg6022\output_query.py -> build\bdist.win-amd64\wheel\.\bg6022
+copying build\lib\bg6022\planner.py -> build\bdist.win-amd64\wheel\.\bg6022
+copying build\lib\bg6022\plan_builder.py -> build\bdist.win-amd64\wheel\.\bg6022
+creating build\bdist.win-amd64\wheel\bg6022\prompts
+copying build\lib\bg6022\prompts\answer.md -> build\bdist.win-amd64\wheel\.\bg6022\prompts
+copying build\lib\bg6022\prompts\intake.md -> build\bdist.win-amd64\wheel\.\bg6022\prompts
+copying build\lib\bg6022\prompts\planner.md -> build\bdist.win-amd64\wheel\.\bg6022\prompts
+copying build\lib\bg6022\prompts\repair.md -> build\bdist.win-amd64\wheel\.\bg6022\prompts
+copying build\lib\bg6022\prompts\semantic.md -> build\bdist.win-amd64\wheel\.\bg6022\prompts
+copying build\lib\bg6022\prompts\__init__.py -> build\bdist.win-amd64\wheel\.\bg6022\prompts
+copying build\lib\bg6022\repair.py -> build\bdist.win-amd64\wheel\.\bg6022
+copying build\lib\bg6022\semantic.py -> build\bdist.win-amd64\wheel\.\bg6022
+copying build\lib\bg6022\session.py -> build\bdist.win-amd64\wheel\.\bg6022
+creating build\bdist.win-amd64\wheel\bg6022\tools
+copying build\lib\bg6022\tools\energy_difference.py -> build\bdist.win-amd64\wheel\.\bg6022\tools
+copying build\lib\bg6022\tools\geometry_angle.py -> build\bdist.win-amd64\wheel\.\bg6022\tools
+copying build\lib\bg6022\tools\geometry_distance.py -> build\bdist.win-amd64\wheel\.\bg6022\tools
+copying build\lib\bg6022\tools\molecule.py -> build\bdist.win-amd64\wheel\.\bg6022\tools
+copying build\lib\bg6022\tools\orca.py -> build\bdist.win-amd64\wheel\.\bg6022\tools
+copying build\lib\bg6022\tools\orca_output.py -> build\bdist.win-amd64\wheel\.\bg6022\tools
+copying build\lib\bg6022\tools\pubchem.py -> build\bdist.win-amd64\wheel\.\bg6022\tools
+copying build\lib\bg6022\tools\registry.py -> build\bdist.win-amd64\wheel\.\bg6022\tools
+copying build\lib\bg6022\tools\runtime.py -> build\bdist.win-amd64\wheel\.\bg6022\tools
+copying build\lib\bg6022\tools\__init__.py -> build\bdist.win-amd64\wheel\.\bg6022\tools
+copying build\lib\bg6022\__init__.py -> build\bdist.win-amd64\wheel\.\bg6022
+copying build\lib\bg6022\__main__.py -> build\bdist.win-amd64\wheel\.\bg6022
+running install_egg_info
+Copying src\bg6022.egg-info to build\bdist.win-amd64\wheel\.\bg6022-0.1.0-py3.11.egg-info
+running install_scripts
+creating build\bdist.win-amd64\wheel\bg6022-0.1.0.dist-info\WHEEL
+creating 'E:\\BG6022-v3\\dist\\.tmp-egox07cm\\bg6022-0.1.0-py3-none-any.whl' and adding 'build\\bdist.win-amd64\\wheel' to it
+adding 'bg6022/__init__.py'
+adding 'bg6022/__main__.py'
+adding 'bg6022/agent.py'
+adding 'bg6022/answer.py'
+adding 'bg6022/canonicalize.py'
+adding 'bg6022/cli.py'
+adding 'bg6022/config.py'
+adding 'bg6022/diagnostics.py'
+adding 'bg6022/intake_utils.py'
+adding 'bg6022/llm.py'
+adding 'bg6022/models.py'
+adding 'bg6022/molecule_identity.py'
+adding 'bg6022/output_contracts.py'
+adding 'bg6022/output_query.py'
+adding 'bg6022/plan_builder.py'
+adding 'bg6022/planner.py'
+adding 'bg6022/repair.py'
+adding 'bg6022/semantic.py'
+adding 'bg6022/session.py'
+adding 'bg6022/benchmark/__init__.py'
+adding 'bg6022/benchmark/__main__.py'
+adding 'bg6022/benchmark/compare.py'
+adding 'bg6022/benchmark/dataset12.py'
+adding 'bg6022/benchmark/e2e12.py'
+adding 'bg6022/benchmark/grader.py'
+adding 'bg6022/benchmark/grader12.py'
+adding 'bg6022/benchmark/loader.py'
+adding 'bg6022/benchmark/matrix.py'
+adding 'bg6022/benchmark/models.py'
+adding 'bg6022/benchmark/observers.py'
+adding 'bg6022/benchmark/report.py'
+adding 'bg6022/benchmark/report12.py'
+adding 'bg6022/benchmark/runner.py'
+adding 'bg6022/orca/__init__.py'
+adding 'bg6022/orca/checks.py'
+adding 'bg6022/orca/frequency_parser.py'
+adding 'bg6022/orca/input.py'
+adding 'bg6022/orca/parser.py'
+adding 'bg6022/orca/profiles.py'
+adding 'bg6022/orca/repair_rules.py'
+adding 'bg6022/orca/runner.py'
+adding 'bg6022/orca/windows_job.py'
+adding 'bg6022/prompts/__init__.py'
+adding 'bg6022/prompts/answer.md'
+adding 'bg6022/prompts/intake.md'
+adding 'bg6022/prompts/planner.md'
+adding 'bg6022/prompts/repair.md'
+adding 'bg6022/prompts/semantic.md'
+adding 'bg6022/tools/__init__.py'
+adding 'bg6022/tools/energy_difference.py'
+adding 'bg6022/tools/geometry_angle.py'
+adding 'bg6022/tools/geometry_distance.py'
+adding 'bg6022/tools/molecule.py'
+adding 'bg6022/tools/orca.py'
+adding 'bg6022/tools/orca_output.py'
+adding 'bg6022/tools/pubchem.py'
+adding 'bg6022/tools/registry.py'
+adding 'bg6022/tools/runtime.py'
+adding 'bg6022-0.1.0.dist-info/METADATA'
+adding 'bg6022-0.1.0.dist-info/WHEEL'
+adding 'bg6022-0.1.0.dist-info/entry_points.txt'
+adding 'bg6022-0.1.0.dist-info/top_level.txt'
+adding 'bg6022-0.1.0.dist-info/RECORD'
+removing build\bdist.win-amd64\wheel
+Successfully built dist\bg6022-0.1.0.tar.gz
+Successfully built dist\bg6022-0.1.0-py3-none-any.whl

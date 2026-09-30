@@ -19,6 +19,78 @@ def test_output_selector_rejects_name_property_collision():
         resolve_output_selector(tool, "b")
 
 
+@pytest.mark.parametrize("named_checks", [True, False])
+def test_history_copy_always_applies_scientific_validator_before_creating_run(
+    tmp_path, monkeypatch, named_checks
+):
+    """F-R07: a readable, hash-valid geometry is insufficient in both Tool shapes."""
+    from test_m2_runtime import _config, _source_opt_run
+
+    from bg6022.agent import Agent
+    from bg6022.models import InputReference, Plan, Request, ResultTarget, Step
+
+    config = _config(tmp_path)
+    source, _ = _source_opt_run(config, "session_science_gate")
+    agent = Agent(config, build_registry(config), session_id=source.session_id)
+    agent._session["active_run_id"] = source.id
+    _, bindings = agent._build_geometry_catalog()
+    tool = agent.registry.get("optimize_geometry")
+    if not named_checks:
+        tool.scientific_checks = {}
+    calls = []
+    tool.result_validation_function = lambda *args: calls.append(True) or False
+    step = Step(
+        id="sp", tool="single_point", inputs={"geometry": InputReference(artifact_id="geometry_1")}
+    )
+    target = ResultTarget(step_id="sp", field="sp_electronic_energy")
+    request = Request(
+        id="copy_request",
+        description="reuse",
+        requested_results=[target],
+        operations=["SP"],
+        structure_input={"history_geometry_alias": "geometry_1"},
+        source="chat",
+    )
+    plan = Plan(id="copy_plan", request_id=request.id, steps=[step], requested_results=[target])
+    with pytest.raises(ValueError, match="Tool-local validation"):
+        agent._create_chat_run(request, plan, history_geometry_binding=bindings["geometry_1"])
+    assert calls == [True]
+    assert [p.name for p in (tmp_path / "data/runs").iterdir()] == [source.id]
+
+
+def test_metadata_catalog_never_hashes_large_input_and_selection_obeys_budget(
+    tmp_path, monkeypatch
+):
+    """F-R09: content reads belong to selection, not metadata discovery."""
+    import hashlib
+
+    from test_m2_runtime import _config, _source_opt_run
+
+    from bg6022.agent import Agent
+    from bg6022.session import ArtifactReadError, save_run
+
+    config = _config(tmp_path)
+    run, _ = _source_opt_run(config, "session_large_input")
+    seed = next(a for a in run.artifact_index if a.role == "input_geometry")
+    payload = b"x" * (8 * 1024 * 1024)
+    path = tmp_path / "data/runs" / run.id / seed.relative_path
+    path.write_bytes(payload)
+    seed.size_bytes, seed.sha256 = len(payload), hashlib.sha256(payload).hexdigest()
+    save_run(config.data_root_path, run)
+    agent = Agent(config, build_registry(config), session_id=run.session_id)
+    agent._session["active_run_id"] = run.id
+    monkeypatch.setattr("bg6022.agent.artifact_path", lambda *a: pytest.fail("unbounded hash"))
+    reads = []
+    original = agent._read_query_artifact
+    monkeypatch.setattr(agent, "_read_query_artifact", lambda *a: reads.append(a) or original(*a))
+    assert agent._build_geometry_catalog()[0] and agent._build_query_catalog()
+    assert not reads
+    agent.config.runtime.output_limit_mb = 1
+    with pytest.raises(ArtifactReadError, match="byte_limit"):
+        agent._read_query_artifact(run, seed)
+    assert len(reads) == 1
+
+
 def test_dynamic_semantic_property_and_injected_registry_projection():
     from bg6022.canonicalize import canonicalize_semantic_request
     from bg6022.semantic import semantic_schema

@@ -1,0 +1,84 @@
+{
+  "ruff-check": {
+    "command": [
+      "E:\\BG6022-v3\\.venv\\Scripts\\uv.exe",
+      "run",
+      "--frozen",
+      "ruff",
+      "check",
+      "."
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 0.235,
+    "log": "ruff-check.log"
+  },
+  "ruff-format": {
+    "command": [
+      "E:\\BG6022-v3\\.venv\\Scripts\\uv.exe",
+      "run",
+      "--frozen",
+      "ruff",
+      "format",
+      "--check",
+      "."
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 0.203,
+    "log": "ruff-format.log"
+  },
+  "compileall": {
+    "command": [
+      "E:\\BG6022-v3\\.venv\\Scripts\\uv.exe",
+      "run",
+      "--frozen",
+      "python",
+      "-m",
+      "compileall",
+      "-q",
+      "src"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 0.281,
+    "log": "compileall.log"
+  },
+  "build": {
+    "command": [
+      "E:\\BG6022-v3\\.venv\\Scripts\\uv.exe",
+      "build"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 6.734,
+    "log": "build.log"
+  },
+  "diff-check": {
+    "command": [
+      "git",
+      "-c",
+      "core.autocrlf=false",
+      "diff",
+      "--check"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 0.093,
+    "log": "diff-check.log"
+  },
+  "offline": {
+    "command": [
+      "E:\\BG6022-v3\\.venv\\Scripts\\uv.exe",
+      "run",
+      "--frozen",
+      "python",
+      "-m",
+      "pytest",
+      "-m",
+      "not live_orca",
+      "--disable-socket",
+      "-q",
+      "--junitxml",
+      "E:\\BG6022-v3\\docs\\evidence\\query-delivery\\offline.xml"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 51.172,
+    "log": "offline.log"
+  }
+}

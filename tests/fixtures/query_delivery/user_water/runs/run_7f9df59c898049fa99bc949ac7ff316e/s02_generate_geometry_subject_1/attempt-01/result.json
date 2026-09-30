@@ -1,0 +1,30 @@
+{
+  "artifact_ids": [
+    "artifact_f1c635bc0b01428ab1b525c9f960b456"
+  ],
+  "attempt": 1,
+  "attempt_relative_path": "s02_generate_geometry_subject_1/attempt-01",
+  "checks": {},
+  "clarification": {},
+  "diagnostics": {},
+  "input_artifact_ids": [
+    "artifact_d84463af25e84957a174789d9314e7b2"
+  ],
+  "input_bindings": {
+    "molecule": "artifact_d84463af25e84957a174789d9314e7b2"
+  },
+  "output_ports": {
+    "geometry": "artifact_f1c635bc0b01428ab1b525c9f960b456"
+  },
+  "parameter_sources": {
+    "geometry": "rdkit:ETKDGv3:61453"
+  },
+  "run_id": "run_7f9df59c898049fa99bc949ac7ff316e",
+  "scientific_checks": {},
+  "status": "succeeded",
+  "step_fingerprint": "47564b303fc9f1d9e15bc38a1408ac4d23dae5a629ceed8dc14473c92080b858",
+  "step_id": "s02_generate_geometry_subject_1",
+  "values": {
+    "geometry_atom_count": 3
+  }
+}

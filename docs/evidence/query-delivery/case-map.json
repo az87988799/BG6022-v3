@@ -1,0 +1,531 @@
+[
+  {
+    "id": "N01",
+    "level": "L1",
+    "node": "tests/unit/test_readonly_observations.py::test_user_dipole_source_hash_and_exact_token",
+    "result": "passed",
+    "parameterized_cases": 1,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "user_run_copy"
+    ]
+  },
+  {
+    "id": "N02",
+    "level": "L2",
+    "node": "tests/unit/test_root_contracts.py::test_natural_attached_report_needs_no_output_keywords",
+    "result": "passed",
+    "parameterized_cases": 8,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N03",
+    "level": "L1",
+    "node": "tests/unit/test_readonly_observations.py::test_candidate_capacity_is_not_the_old_five_hit_cutoff",
+    "result": "passed",
+    "parameterized_cases": 3,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N04",
+    "level": "L1",
+    "node": "tests/unit/test_readonly_observations.py::test_candidate_capacity_is_not_the_old_five_hit_cutoff",
+    "result": "passed",
+    "parameterized_cases": 3,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N05",
+    "level": "L1",
+    "node": "tests/unit/test_readonly_observations.py::test_long_unrelated_line_does_not_truncate_a_complete_numeric_block",
+    "result": "passed",
+    "parameterized_cases": 1,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N06",
+    "level": "L1",
+    "node": "tests/unit/test_readonly_observations.py::test_title_total_and_magnitude_are_one_numeric_candidate",
+    "result": "passed",
+    "parameterized_cases": 1,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N07",
+    "level": "L1",
+    "node": "tests/unit/test_readonly_observations.py::test_titles_stages_and_densities_are_not_unique_final_values",
+    "result": "passed",
+    "parameterized_cases": 3,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N08",
+    "level": "L1",
+    "node": "tests/unit/test_readonly_observations.py::test_user_dipole_source_hash_and_exact_token",
+    "result": "passed",
+    "parameterized_cases": 1,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "user_run_copy"
+    ]
+  },
+  {
+    "id": "N09",
+    "level": "L1",
+    "node": "tests/unit/test_readonly_observations.py::test_titles_stages_and_densities_are_not_unique_final_values",
+    "result": "passed",
+    "parameterized_cases": 3,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N10",
+    "level": "L1",
+    "node": "tests/unit/test_readonly_observations.py::test_titles_stages_and_densities_are_not_unique_final_values",
+    "result": "passed",
+    "parameterized_cases": 3,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N11",
+    "level": "L2",
+    "node": "tests/unit/test_orca_output_query.py::test_unknown_title_and_three_questions_share_one_read_and_no_writes",
+    "result": "passed",
+    "parameterized_cases": 1,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N12",
+    "level": "L2",
+    "node": "tests/unit/test_readonly_observations.py::test_three_questions_receive_fair_excerpts_from_one_verified_read",
+    "result": "passed",
+    "parameterized_cases": 1,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N13",
+    "level": "L2",
+    "node": "tests/unit/test_query_continuation.py::test_short_reply_restores_original_goal_source_and_only_fills_mode",
+    "result": "passed",
+    "parameterized_cases": 6,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "user_run_copy"
+    ]
+  },
+  {
+    "id": "N14",
+    "level": "L2",
+    "node": "tests/unit/test_query_continuation.py::test_mode_reply_keeps_property_ambiguity_then_property_reply_selects_gap",
+    "result": "passed",
+    "parameterized_cases": 2,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "user_run_copy"
+    ]
+  },
+  {
+    "id": "N15",
+    "level": "L2",
+    "node": "tests/unit/test_query_continuation.py::test_short_reply_restores_original_goal_source_and_only_fills_mode",
+    "result": "passed",
+    "parameterized_cases": 6,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "user_run_copy"
+    ]
+  },
+  {
+    "id": "N16",
+    "level": "L2",
+    "node": "tests/unit/test_query_continuation.py::test_repeat_then_new_property_preserves_source_but_changes_goal",
+    "result": "passed",
+    "parameterized_cases": 2,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "user_run_copy"
+    ]
+  },
+  {
+    "id": "N17",
+    "level": "L2",
+    "node": "tests/unit/test_query_continuation.py::test_pending_survives_restart_and_unrelated_question_but_not_new_session",
+    "result": "passed",
+    "parameterized_cases": 2,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "user_run_copy"
+    ]
+  },
+  {
+    "id": "N18",
+    "level": "L2",
+    "node": "tests/unit/test_query_continuation.py::test_pending_survives_restart_and_unrelated_question_but_not_new_session",
+    "result": "passed",
+    "parameterized_cases": 2,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "user_run_copy"
+    ]
+  },
+  {
+    "id": "N19",
+    "level": "L2",
+    "node": "tests/unit/test_query_continuation.py::test_pending_changed_source_never_falls_back_to_latest",
+    "result": "passed",
+    "parameterized_cases": 6,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "user_run_copy"
+    ]
+  },
+  {
+    "id": "N20",
+    "level": "L2",
+    "node": "tests/unit/test_query_continuation.py::test_repeat_then_new_property_preserves_source_but_changes_goal",
+    "result": "passed",
+    "parameterized_cases": 2,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "user_run_copy"
+    ]
+  },
+  {
+    "id": "N21",
+    "level": "L2",
+    "node": "tests/unit/test_query_continuation.py::test_forged_pending_reference_rejected_before_content_reads",
+    "result": "passed",
+    "parameterized_cases": 2,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "user_run_copy"
+    ]
+  },
+  {
+    "id": "N22",
+    "level": "L2",
+    "node": "tests/unit/test_readonly_observations.py::test_explicit_method_query_then_ambiguous_source_preserves_candidates",
+    "result": "passed",
+    "parameterized_cases": 2,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "user_run_copy",
+      "repository_fixture"
+    ]
+  },
+  {
+    "id": "N23",
+    "level": "L1",
+    "node": "tests/unit/test_readonly_observations.py::test_synthetic_frontier_gap_and_long_table",
+    "result": "passed",
+    "parameterized_cases": 1,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N24",
+    "level": "L1",
+    "node": "tests/unit/test_readonly_observations.py::test_synthetic_frontier_gap_and_long_table",
+    "result": "passed",
+    "parameterized_cases": 1,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N25",
+    "level": "L1",
+    "node": "tests/unit/test_readonly_observations.py::test_unsupported_orbital_tables_do_not_produce_a_gap",
+    "result": "passed",
+    "parameterized_cases": 5,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N26",
+    "level": "L1",
+    "node": "tests/unit/test_readonly_observations.py::test_two_methods_or_tables_never_supply_mixed_operands",
+    "result": "passed",
+    "parameterized_cases": 1,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N27",
+    "level": "L2",
+    "node": "tests/unit/test_readonly_observations.py::test_agent_delivers_each_readonly_adapter_with_zero_new_steps",
+    "result": "passed",
+    "parameterized_cases": 6,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "user_run_copy"
+    ]
+  },
+  {
+    "id": "N28",
+    "level": "L2",
+    "node": "tests/unit/test_readonly_observations.py::test_electron_count_uses_executed_charge_without_default_neutral",
+    "result": "passed",
+    "parameterized_cases": 3,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N29",
+    "level": "L1",
+    "node": "tests/unit/test_readonly_observations.py::test_printed_electron_definitions_are_not_interchanged",
+    "result": "passed",
+    "parameterized_cases": 4,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N30",
+    "level": "L2",
+    "node": "tests/unit/test_query_continuation.py::test_knowledge_query_kind_is_valid_without_saved_results",
+    "result": "passed",
+    "parameterized_cases": 2,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N31",
+    "level": "L2",
+    "node": "tests/unit/test_query_continuation.py::test_electron_schema_failure_keeps_delivered_focus_and_run",
+    "result": "passed",
+    "parameterized_cases": 2,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "user_run_copy"
+    ]
+  },
+  {
+    "id": "N32",
+    "level": "L1 (HTTP mock)",
+    "node": "tests/unit/test_llm.py::test_electron_schema_diagnostics_are_redacted_bounded_and_keep_both_calls",
+    "result": "passed",
+    "parameterized_cases": 2,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N33",
+    "level": "L1",
+    "node": "tests/unit/test_readonly_observations.py::test_user_dipole_source_hash_and_exact_token",
+    "result": "passed",
+    "parameterized_cases": 1,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "user_run_copy"
+    ]
+  },
+  {
+    "id": "N34",
+    "level": "L2",
+    "node": "tests/unit/test_orca_output_query.py::test_markdown_and_controls_are_data_not_instructions",
+    "result": "passed",
+    "parameterized_cases": 1,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N35",
+    "level": "L2",
+    "node": "tests/unit/test_output_reports.py::test_verified_energy_focus_survives_raw_partial_delivery",
+    "result": "passed",
+    "parameterized_cases": 1,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "N36",
+    "level": "L2",
+    "node": "tests/unit/test_query_continuation.py::test_query_cancellation_does_not_commit_pending_or_delivery_focus",
+    "result": "passed",
+    "parameterized_cases": 6,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "F-R01",
+    "level": "L1",
+    "node": "tests/unit/test_query_continuation.py::test_shared_quote_preserves_unpromoted_goal_and_is_atomic",
+    "result": "passed",
+    "parameterized_cases": 2,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "F-R02",
+    "level": "L1",
+    "node": "tests/unit/test_query_continuation.py::test_shared_quote_preserves_unpromoted_goal_and_is_atomic",
+    "result": "passed",
+    "parameterized_cases": 2,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "F-R03",
+    "level": "L1",
+    "node": "tests/unit/test_query_continuation.py::test_shared_quote_preserves_unpromoted_goal_and_is_atomic",
+    "result": "passed",
+    "parameterized_cases": 2,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "F-R04",
+    "level": "L1",
+    "node": "tests/unit/test_query_continuation.py::test_catalog_query_intent_needs_no_result_target",
+    "result": "passed",
+    "parameterized_cases": 2,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "F-R05",
+    "level": "L2",
+    "node": "tests/unit/test_history_directory.py::test_directory_properties_reaches_field_30_without_execution",
+    "result": "passed",
+    "parameterized_cases": 1,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "F-R06",
+    "level": "L1",
+    "node": "tests/unit/test_query_continuation.py::test_business_query_states_need_no_fake_targets",
+    "result": "passed",
+    "parameterized_cases": 2,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "F-R07",
+    "level": "L2",
+    "node": "tests/unit/test_root_contracts.py::test_history_copy_always_applies_scientific_validator_before_creating_run",
+    "result": "passed",
+    "parameterized_cases": 2,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "F-R08",
+    "level": "L2",
+    "node": "tests/unit/test_m2_runtime.py::test_invalid_historical_geometry_bindings_stop_before_a_new_run",
+    "result": "passed",
+    "parameterized_cases": 5,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "F-R09",
+    "level": "L2",
+    "node": "tests/unit/test_root_contracts.py::test_metadata_catalog_never_hashes_large_input_and_selection_obeys_budget",
+    "result": "passed",
+    "parameterized_cases": 1,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "F-R10",
+    "level": "L2",
+    "node": "tests/unit/test_history_directory.py::test_directory_lists_more_than_six_raw_attempts_and_marks_default_limit",
+    "result": "passed",
+    "parameterized_cases": 1,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "F-R11",
+    "level": "L1",
+    "node": "tests/unit/test_generic_output_contracts.py::test_empty_container_preview_counts_actual_json_bytes",
+    "result": "passed",
+    "parameterized_cases": 3,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  },
+  {
+    "id": "F-R12",
+    "level": "L1",
+    "node": "tests/unit/test_generic_output_contracts.py::test_deep_preview_and_shared_turn_budget_are_bounded",
+    "result": "passed",
+    "parameterized_cases": 1,
+    "evidence": "offline.xml",
+    "source_kinds": [
+      "synthetic"
+    ]
+  }
+]

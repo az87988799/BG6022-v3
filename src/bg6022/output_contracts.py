@@ -60,23 +60,33 @@ def bounded_verified_value(
             break
     if columns and any(key not in declared for key in columns):
         raise ValueError("column is not in the bounded declared/sample view")
-    remaining = [min(MAX_VALUE_BYTES, max(0, budget_bytes)) - 32]
+    if budget_bytes < 4:
+        raise ValueError("value byte budget is exhausted")
+    byte_limit = min(MAX_VALUE_BYTES, budget_bytes)
+    remaining = [byte_limit]
     clipped = [False]
+    nodes = [0]
+
+    def encoded(item):
+        return json.dumps(item, ensure_ascii=False).encode("utf-8")
 
     def take(item, depth=0):
-        if remaining[0] < 32 or depth > 6:
+        nodes[0] += 1
+        if remaining[0] < 4 or depth > 6 or nodes[0] > 1024:
             clipped[0] = True
+            remaining[0] -= min(4, remaining[0])
             return None
         if isinstance(item, Mapping):
             result = {}
+            remaining[0] -= 2
             for index, (key, child) in enumerate(item.items()):
-                if index >= MAX_VIEW_COLUMNS or remaining[0] < 32:
+                if index >= MAX_VIEW_COLUMNS or nodes[0] >= 1024:
                     clipped[0] = True
                     break
                 original_key = str(key)
                 key = original_key[:160]
                 clipped[0] |= len(key) < len(original_key)
-                cost = len(json.dumps(key, ensure_ascii=False).encode()) + 4
+                cost = len(encoded(key)) + 2 + (2 if result else 0)
                 if cost + 4 > remaining[0]:
                     clipped[0] = True
                     break
@@ -85,32 +95,40 @@ def bounded_verified_value(
             return result
         if isinstance(item, list):
             result = []
+            remaining[0] -= 2
             for child in item[:MAX_VIEW_ROWS]:
-                if remaining[0] < 32:
+                cost = 2 if result else 0
+                if remaining[0] < cost + 4 or nodes[0] >= 1024:
                     break
+                remaining[0] -= cost
                 result.append(take(child, depth + 1))
             clipped[0] |= len(result) < len(item)
             return result
         if isinstance(item, str):
             # Bound the input to the encoder too: a single cell may be enormous.
-            prefix = item[: max(0, remaining[0] // 6)]
+            prefix = item[: max(0, (remaining[0] - 2) // 6)]
             clipped[0] |= len(prefix) < len(item)
             item = prefix
-        size = len(json.dumps(item, ensure_ascii=False).encode()) + 2
+        size = len(encoded(item))
         if size > remaining[0]:
             clipped[0] = True
+            remaining[0] -= 4
             return None
         remaining[0] -= size
         return item
 
     chosen = value[offset : offset + limit] if table else [value]
     preview = []
+    if table:
+        remaining[0] -= 2
     for row in chosen:
-        if remaining[0] < 32:
+        cost = 2 if table and preview else 0
+        if remaining[0] < cost + 4 or nodes[0] >= 1024:
             clipped[0] = True
             break
         if columns and isinstance(row, Mapping):
             row = {key: row.get(key) for key in columns}
+        remaining[0] -= cost
         preview.append(take(row))
     shown = len(preview)
     full = (
@@ -129,7 +147,13 @@ def bounded_verified_value(
         if view.get("scope", "page") == "all"
         else shown == len(chosen) and not clipped[0],
     }
-    return (preview if table else preview[0] if preview else None), meta
+    result = preview if table else preview[0] if preview else None
+    # Encode only the bounded preview, including every empty container and
+    # delimiter. No caller is allowed to expand the original value again.
+    assert len(encoded(result)) <= byte_limit
+    meta["encoded_bytes"] = len(encoded(result))
+    meta["nodes"] = nodes[0]
+    return result, meta
 
 
 def resolve_output_selector(tool: Any, selector: str, *, kind: str | None = None) -> dict[str, Any]:

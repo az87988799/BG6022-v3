@@ -1,0 +1,1195 @@
+{
+  "schema": "bg6022.query_delivery_validation.v1",
+  "baseline_commit": "4d558556173285fe082bd0c029cae3a7d23b36c4",
+  "logical_cases": 48,
+  "logical_cases_passed": 48,
+  "offline": {
+    "passed": 701,
+    "skipped": 38,
+    "deselected": 6,
+    "receipt": "offline.log"
+  },
+  "final_live": {
+    "samples": 18,
+    "passed": 18,
+    "scope": "3 chains x 2 entrypoints x 3 repeats; bounded sample, not overall reliability",
+    "files": [
+      {
+        "file": "live/L-A-semantic-1-sample_3b20ff5bf2a64ceba4944f254d3e9679.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "32e406b104c5708c688b5c803f6651577f77ad08e4005810e981cb4053eaef93"
+      },
+      {
+        "file": "live/L-A-intake-1-sample_99649592b37d477fb081e5a96a70ea8f.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "d6cbbb968bcc0679d240b1d3005498c725b7a872fb4da9ec516c99fc90f45fb7"
+      },
+      {
+        "file": "live/L-B-semantic-1-sample_6375a81e36e24f0ab3232673eb3f30f6.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "30de44bb32967887c8f360c0b398b240be08a34f2fb32cbf57f922bd2d79b93b"
+      },
+      {
+        "file": "live/L-B-intake-1-sample_6cefc61e08df4ea9aabcd7cd3ec45509.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "2add0da5f3e1e2dacfb5b2600a73357ff8eef21113b55ea9b1d1b4fb189c2b2d"
+      },
+      {
+        "file": "live/L-C-semantic-1-sample_29719b4f33c44dffb938c8f4c18fce8a.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "373db3b18ccca540a76729821d32b6235cd38c119ec69e7f33751b65bee4fb6e"
+      },
+      {
+        "file": "live/L-C-intake-1-sample_c1a72727e19440b59f3a40d22e7548b3.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "337f98bbdcbf240f6da71b549dc9ecffb5c6a16bd217604dd067276172ac6e95"
+      },
+      {
+        "file": "live/L-A-semantic-2-sample_5328970f3f8c49d4a1f57f4cd05336ff.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "8182d6c9c8a7dc19aaf745d2555fc6c7ee9499806237b4d4c89a520d8636b6d1"
+      },
+      {
+        "file": "live/L-A-intake-2-sample_f751cebeb53d49718c4be45dc7ce781c.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "9e5957e3972eae9ae5951c7428643a2e5cba476c83a67a058c2be7a2e80f4ad6"
+      },
+      {
+        "file": "live/L-B-semantic-2-sample_4e2ef5906ce0422f94ed057331a4b548.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "eafa13b5d7ca1efddc582b23bf3d05d4ee2fef1bde463029f2e4e936d475e4c6"
+      },
+      {
+        "file": "live/L-B-intake-2-sample_0798280cb19b438d98cf5cbf1e63393a.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "e87b82a18e8cbb6a4c5995cc28e1fdafe8507bea69a14d567008569552e4a261"
+      },
+      {
+        "file": "live/L-C-semantic-2-sample_03cd091d1dab44fb954d177c90f7c0b0.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "076c25d865a8f0f0ef55d7d0649f3a5da077585ce1922a0b5060317b35b86a63"
+      },
+      {
+        "file": "live/L-C-intake-2-sample_f5a4b658e1d7458cb94f4dac5e264699.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "b2d718bf5484cf65ed8b957ee9b03d8f1182e47ef3f658df9c38bad55cb8e477"
+      },
+      {
+        "file": "live/L-A-semantic-3-sample_e475e9d02f0642918c0f8c5526688dc7.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "132ad2430c7e3504bd23512801b5ba2f80245f7d7ab4b7c14dbd15070a980afd"
+      },
+      {
+        "file": "live/L-A-intake-3-sample_ddc492d514114ee59df1625817358fca.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "66d3ff207e7aed6757512cba4fada80ab0e9743adeafbd6833d7fe0028f87b68"
+      },
+      {
+        "file": "live/L-B-semantic-3-sample_e7768e742657445eb0d08dc5e96a4647.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "a0956435020b210d35a11a7edbb9b8855a2ba2cdc801d6596e33598720c743ab"
+      },
+      {
+        "file": "live/L-B-intake-3-sample_462a12850a094a7e871596ae17904328.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "d1515a54712270b01c809acd2e3291a373757db4270e596a92d42ad0c1857bd3"
+      },
+      {
+        "file": "live/L-C-semantic-3-sample_16b942192b2f4ea7a76029a3a568e3ec.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "d20c71b436069ba2a973551e4d86fcc0ed3781e588bae09324aebec56a36a475"
+      },
+      {
+        "file": "live/L-C-intake-3-sample_2f1d3e9459844070b0cf8c6295483336.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "cfd7c7be96384c9b33af2f604228dba1f2958adfef000107fc9cb74b6f8d2c0e"
+      }
+    ]
+  },
+  "all_live_receipts": {
+    "total": 128,
+    "failed": 23,
+    "receipts": [
+      {
+        "file": "live/L-A-semantic-1-sample_cb58e6fcf4764f38994582b2ac230c51.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "failed",
+        "sha256": "44c7b7dd4b82dd7d1eaf9513118291bf1dede15da086025039518fce64e65785"
+      },
+      {
+        "file": "live/L-A-intake-1-sample_568236c1fe39453d866c00f7f00d2d48.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "85ed5a9fa1accac67a6e30056414678750632b931e76f2f8fbc05f868f9dd049"
+      },
+      {
+        "file": "live/L-A-semantic-1-sample_1fbdfdb27dd44e26be79a1911b8a133a.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "9011e97a191742653b874bce01409a0eccbdcbfc6f4ec17b8c773ecc2368179c"
+      },
+      {
+        "file": "live/L-A-intake-1-sample_898366f6ac5f4116b8c997c4ffa6e44a.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "failed",
+        "sha256": "488a9294ee83f02c4f546ac1118606dd38baf769ce7805c00c450baf539101d0"
+      },
+      {
+        "file": "live/L-B-semantic-1-sample_dd8eb2f5cee04dc39f4be7bee338ef69.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "failed",
+        "sha256": "abef9ae7fe79b7843791db83b6ca0fb4a83da3d2c0892681a66014385cd566d3"
+      },
+      {
+        "file": "live/L-B-intake-1-sample_f3abb9e263634697a1f5b74a1fd9bd8d.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "failed",
+        "sha256": "a67817652dac4f4871273f027b27a604ef1e5d699f11a1907ac322d2e00be107"
+      },
+      {
+        "file": "live/L-C-semantic-1-sample_85cb3b96ca6a441ebbf784dedd9413a6.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "8dccf74a5aef844b4b406a7c6a2ca492474efe4de8cefd52d6f04afa7b41af70"
+      },
+      {
+        "file": "live/L-C-intake-1-sample_b14fe8e9dea24980ae1bbcc415012bc2.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "failed",
+        "sha256": "5e5518abd438cb341f7bab05f471a1fd9f663cc8c50c6aba482de198ec879d4b"
+      },
+      {
+        "file": "live/L-A-semantic-2-sample_9cd56c1dc7f9460c980e304306440d01.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "af053bbf8e6356bc9b3311babc9829af60f2b711258ea48a30f7f1fe77dcff28"
+      },
+      {
+        "file": "live/L-A-intake-2-sample_2349eed993bf4613867350f57e95f2ec.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "failed",
+        "sha256": "4be6b6f0476a2414e2847484d375d2c821aabd980e63e117eb3c87ff73711688"
+      },
+      {
+        "file": "live/L-B-semantic-2-sample_52287e0b3f4b438c9605b92e1d881ab2.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "failed",
+        "sha256": "49537a0a8b11a305f0c8109f149ca852e0461eb118f972c4fdff39c2f1d25d9b"
+      },
+      {
+        "file": "live/L-B-intake-2-sample_60dc1bc89ce54d809d2e04bfedf16c68.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "failed",
+        "sha256": "a069f1eeee400a43a055935ba807f850c818f2bd4ed232d9e57b3e3efc5ef6a1"
+      },
+      {
+        "file": "live/L-C-semantic-2-sample_513f35fec55944f69a0d1d24b4a77a7c.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "624761d8db307c5ca8392de830a01eef3cc6eff0593217f67aeae53f3458e876"
+      },
+      {
+        "file": "live/L-C-intake-2-sample_b0dc518399f54f93a47b812b83cc5739.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "e995cae8dc8c5fc85aca276ef88f144fea9bb8cb97130efd6198f1d827bef6c9"
+      },
+      {
+        "file": "live/L-A-semantic-3-sample_ff7141d1b10945cea9ab2a7b5ee46a6d.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "09036b6a78cbb365184ae5feaec6878a06468da760ced76e57a36e0f23474dec"
+      },
+      {
+        "file": "live/L-A-intake-3-sample_cc6b7a01325d4c8a9c980538d8cb5f3b.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "a860541a24283eb5fd046678f4098bd964ee8c7176ebd5c81a0a7f42a34f1827"
+      },
+      {
+        "file": "live/L-B-semantic-3-sample_d078b2279bd94186b0ff805f2844ba18.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "failed",
+        "sha256": "06fbf85bcdf32944f70775829d167cae65b4195e626bb5edbed000ad891b0bde"
+      },
+      {
+        "file": "live/L-B-intake-3-sample_5bb318c5097b4d07a43678b944d2e50d.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "failed",
+        "sha256": "4c1037d967bae62c2f974026cb21c3b80a35eff0f564dd2427d0452f5e8e6ef3"
+      },
+      {
+        "file": "live/L-C-semantic-3-sample_21c6ae3bebda4b1d9a91872a619c7662.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "f99f295aae8fa698cf66f1c04ac561cae31aff22ba62038d28776dac47dc4f63"
+      },
+      {
+        "file": "live/L-C-intake-3-sample_c994d9a0f087417cbb90f94223d85624.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "failed",
+        "sha256": "3a46494bf4296deea4d5c012567d45116bbe69c4276b99b824be79c320c654eb"
+      },
+      {
+        "file": "live/L-A-semantic-1-sample_d3c29af8f5474625b36bd4b8efdcc637.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "8460fd2d4f89e9faca25bfc333515473f7dcdb97d96b2b3ca6def68c4315b8c2"
+      },
+      {
+        "file": "live/L-A-intake-1-sample_4c643c01c3414535b8ab1643d0637f6a.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "1b61e9d09673bf94bdfbb1a15c7b199b5c88eedd9832305608a73883aae2c1e7"
+      },
+      {
+        "file": "live/L-B-semantic-1-sample_cef4d340ce4248c6b89febe569f4a4b5.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "7dbb7b237270b9c19c3c256ac37303f78fc6b075815a1e80148a64a83364336d"
+      },
+      {
+        "file": "live/L-B-intake-1-sample_e9925e826e584b9cae930b3c02e2cf4b.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "13ffcc7ff64d394588181c7d03263bf61521f0e1279ea1984c0234f55046f5a9"
+      },
+      {
+        "file": "live/L-C-semantic-1-sample_79dd269f89394efd9c6730c296f215fb.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "failed",
+        "sha256": "94d8a85d80f3869036dc7950173665e4d60b7aed621bda80afc4d1c73b6d6e2f"
+      },
+      {
+        "file": "live/L-C-intake-1-sample_5bce5c818693439b99f2cc8da71ce80c.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "6c2cbc38bb463c2b640b2dd59d0389b02a5f0e6edb2f38a5e4170165cfd34bfb"
+      },
+      {
+        "file": "live/L-A-semantic-2-sample_cb17b73a78f648868469798777779a1e.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "fe33708b55e2b2d64b4d2d38f532b3c67c3e679518b91a95fbfeb4a3a8a71927"
+      },
+      {
+        "file": "live/L-A-intake-2-sample_ed0d1c83f6d24574860a8d666fe4a17f.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "failed",
+        "sha256": "d5d3d7ef0c51722e73038033d451959e71ddc54aebf1b209704ab38102ad8e54"
+      },
+      {
+        "file": "live/L-B-semantic-2-sample_c4072bfeda2c418a9b21aa4953a210ec.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "660386ef3543dce04f32d2543a3456be691ef5a5adf66a71a2851215116b2b7c"
+      },
+      {
+        "file": "live/L-B-intake-2-sample_eb907078f6314db98a869ca2eb32e8c3.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "18f9bfaccd6004ff004da6e06978cbd3c0526e70b921267dcc76c3ceef82e3c7"
+      },
+      {
+        "file": "live/L-C-semantic-2-sample_e979ecfe16b44f7d80e7f94fb2802bce.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "769a2804c767e4da45de194a368a2155563da2cace712fe53b8ed356766e58d9"
+      },
+      {
+        "file": "live/L-C-intake-2-sample_b64e8afd37b642adaf18c5ad9f107a6d.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "failed",
+        "sha256": "b7c96a52ec13e4aebd06bb8b93f0de6c1c21186083af4cbcca14539fd0e3bfdd"
+      },
+      {
+        "file": "live/L-A-semantic-3-sample_540cdd227c584381977aaa23fba842c8.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "e1692ea5beaccd7273d455877df19182d64beba7bd52c310813ef3c9541b23d3"
+      },
+      {
+        "file": "live/L-A-intake-3-sample_4146d763c212492fbd972620688932e2.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "b8b668d909055b40f6d07fe16e02818f889a0f1127769ec17481f6782f3d3cd3"
+      },
+      {
+        "file": "live/L-B-semantic-3-sample_926a85a193ae472b9dd21d8b1462b553.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "3ea0af9269edc3ffd1faa042e6e842e63443a8362ae235d837c2f998f6d562f1"
+      },
+      {
+        "file": "live/L-B-intake-3-sample_ea1e8a58b9c54901a34d2fb3512a926c.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "7eef8237bc066aaaaa94f0a746bbaee3885525699c890f3a97b36100982dbad1"
+      },
+      {
+        "file": "live/L-C-semantic-3-sample_769f1431032f40298a50fa042163fdaf.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "failed",
+        "sha256": "f379566ade429a35adb3d2256923d297d67a4078b007a13bd6d6a68d47060ae7"
+      },
+      {
+        "file": "live/L-C-intake-3-sample_5dca905bb6374cef805578e7f0071149.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "5f74ad653b7aba35139b46401332b0dfb19dbb4b5c720d6ec444b54814575916"
+      },
+      {
+        "file": "live/L-A-semantic-1-sample_8fdd7c7bba02468f84ac833bf9a99514.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "5eca5ec7be0e0942fead6b9f7c9e62c2b9aaeb8e69ad0b5f3965c935592a51bb"
+      },
+      {
+        "file": "live/L-A-intake-1-sample_f3944e5237704be1a592b2ebfb5fbcc7.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "528253b36bc8fee2966f9f1cac52273081fd083c6f45775ef973db70089e6c9e"
+      },
+      {
+        "file": "live/L-B-semantic-1-sample_fecad81559f04b859ca06327c3c0367d.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "15b02d1773ae4965c249d8c4bee5c45564c4f64e43a612a11e05bfc3fb71ed06"
+      },
+      {
+        "file": "live/L-B-intake-1-sample_b6a7bca7d854455bb34289675e271691.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "0d5082dd15c2e29ee94c011e6db621cd4a4bc8cc5512628e769020fa82f034cc"
+      },
+      {
+        "file": "live/L-C-semantic-1-sample_473eb09d035f430c9e3d82d6ae0516c1.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "5e92800da143e48e2f33a7e7c65c6b337f3c01f617693dadda5dc08a6dc89623"
+      },
+      {
+        "file": "live/L-C-intake-1-sample_a9e560a5d857400585290b21875ddb65.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "ae7c75ff358458e62ea2e6ac7b022aca0e085732d3cec1f36fc4d58e8500e197"
+      },
+      {
+        "file": "live/L-A-semantic-2-sample_2cf09bdefef248ef9e389ebb35779478.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "8c1d091719dc246c45e7a1ea23a6b39d705cc53e33c04239325dfaf76223b7f2"
+      },
+      {
+        "file": "live/L-A-intake-2-sample_1c8454b7b0e54f71908a01e6ad0c8942.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "6372b141dbcba84bcbf9b5be6f1661087a6e335240ca085f7ddcf535bd861af2"
+      },
+      {
+        "file": "live/L-B-semantic-2-sample_750babf513604d48a23807e60d14b1d4.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "failed",
+        "sha256": "209ee74bb9e4c4d7763d9ed9353f124fdb2602fbd50302869c399664b313c802"
+      },
+      {
+        "file": "live/L-B-intake-2-sample_4818c9b1c08747acb75071e3692bcc36.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "failed",
+        "sha256": "b161185183d1000cd0baad091a7639e7a8b454f6c8cf62b5aabb9249e815033f"
+      },
+      {
+        "file": "live/L-C-semantic-2-sample_69bee026e8ac47d4a083d71c1bfaff8b.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "4f8b6596e752d0ac77c6ddafef7df7dad751b28c00338ec08d34aa789871031d"
+      },
+      {
+        "file": "live/L-C-intake-2-sample_0b65a4580ed4463b8496395d1989783c.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "592b941db2635ba4b947cac680fbd65629584849d1ac07152dc7a68ae4b1c8d0"
+      },
+      {
+        "file": "live/L-A-semantic-3-sample_a1118835b0ce43109f523a7db2316497.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "016c4f721fd10be397eb04291665aa9cb7bd7be5b2913689945df93a4a8264c8"
+      },
+      {
+        "file": "live/L-A-intake-3-sample_bfd7ce4056ff4be882baf4dd2181f3b4.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "b083ce22c62fbde9916726210a5770ce8370522e20806c6a488a96f3ae5a3fa2"
+      },
+      {
+        "file": "live/L-B-semantic-3-sample_b3b6c54e8abf4ebe91a677a7013ba86e.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "45e5d5c4e57e695b41eedfdd1e0f940a6c21d31875dcf617e3d14da9c5d20b22"
+      },
+      {
+        "file": "live/L-B-intake-3-sample_18add3e104a34ffbba4e0f782224768c.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "4e59d56acb9e56cb3323d3b879eb0fc82d93c5b365c35c52252dce1ce32ea19b"
+      },
+      {
+        "file": "live/L-C-semantic-3-sample_a0794a2818c648e2b5e94141c02e95b4.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "11d2a1c3966b80508e4ba09baeaeacd4a4011dba521f3425279acc3e094f8564"
+      },
+      {
+        "file": "live/L-C-intake-3-sample_310ff54145bd445cb9a35acbee670512.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "6d810a2264bdc705db9fcaba5c00cbacc42b27e6b6f0f9081ac66b3e93a73435"
+      },
+      {
+        "file": "live/L-A-semantic-1-sample_8f47830c82504c65a1977e332c3f2068.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "ea852caed540d85e9fcbd4d360db6d6adc4a1eb944e0233e37660f06543e9b88"
+      },
+      {
+        "file": "live/L-A-intake-1-sample_f46d4ce19adf485bb10582d3d9db9969.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "failed",
+        "sha256": "2eb1fc88a6cc49c833c5561a6262c9ea13fb79b0f6a458138f0bb81414597c56"
+      },
+      {
+        "file": "live/L-B-semantic-1-sample_0750ebbd58a24d7ea22eecc9f3965126.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "failed",
+        "sha256": "dddfc75ce12040aa278080061018278f55cef62b4149c0b04fd4ac445b6597cb"
+      },
+      {
+        "file": "live/L-B-intake-1-sample_da770bdb77024af1a401fe50288e6d14.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "590448303635783c238bf184ef5693fd6c3c720339349ba4b9b8daf5285124e7"
+      },
+      {
+        "file": "live/L-C-semantic-1-sample_ca9f0b7914f243c9969436e374fba568.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "e64da96f1b06885e0f268e1e4e4c46722ea1440fe01a46c34513e2f66be55c79"
+      },
+      {
+        "file": "live/L-C-intake-1-sample_4278ff43b93d4cd0aa16a9be8a31fe55.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "0e6ab274a68a22e03c9ec1da79284f1680d9263ef4744c104ed4ab63c5db678d"
+      },
+      {
+        "file": "live/L-A-semantic-2-sample_5ab21c85795947caa0f0cb11752f0c85.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "2da68065d47f6648c81ac55373d8cc706dd0438cd5fca0a71106a8e54b6c1550"
+      },
+      {
+        "file": "live/L-A-intake-2-sample_f90ff1ec6b63493ea047aad5f181a3cf.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "837d4b6e4cd913440bf9f65513ef2a63a241cb57dd15d36ddb510ff06d1ed3a1"
+      },
+      {
+        "file": "live/L-B-semantic-2-sample_4e45f75af96d4c1c95c213718a5c935b.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "c678063a4e4474adcf14a5e8b63f8ebfec34a1e4fc73d3191f73398bbe00f9e9"
+      },
+      {
+        "file": "live/L-B-intake-2-sample_7394500fbac44b5dac12dfbe72cd584b.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "ec27ca90b00e455b221ef3497b7cd56f20f207a495e95b0ad18d630bd7d376e2"
+      },
+      {
+        "file": "live/L-C-semantic-2-sample_a24a940cbdf64be9a05f721dfeb16740.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "3e2b533d859f61d81d45bcc6e306b86461817f4d25a51c12eb7deb26d18b8a01"
+      },
+      {
+        "file": "live/L-C-intake-2-sample_955c553ef1f14a65b28264edd1f9a138.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "00d79d8fd1252ee95e2492b7230894d9f25c383bc69096384fbf5302466e8fd5"
+      },
+      {
+        "file": "live/L-A-semantic-3-sample_8a3357962a5d40f3bd4214aa67343f09.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "862b98ed5638deefbf5f6975f0c63ec7ad0fdd3ba4b02a9cab18c1a64bf91014"
+      },
+      {
+        "file": "live/L-A-intake-3-sample_ee9f3359060c47ea9105d6fe00f68a12.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "a5e01d97feefe2e7642a23def4f59d5b43bef6ca41624e8ee7bda94c679bd94d"
+      },
+      {
+        "file": "live/L-B-semantic-3-sample_6ca4b6196437408281480a1fc07cbc5b.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "c6a248b9fef54b2d5eb60f167618febd4362e6f909545e527aecc4b3e549f14d"
+      },
+      {
+        "file": "live/L-B-intake-3-sample_87464f6d215745aaada9428f263cfbdb.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "failed",
+        "sha256": "512194d64e00ddceae0fd11c07bf8fb9ee18dd612942901d2eb4615e8c8e7008"
+      },
+      {
+        "file": "live/L-C-semantic-3-sample_df81c1c794c24314952b28667616b0c8.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "b63b54cb09c40d610782363d1f79cf7a6fb51827b8995a2045986659a0c04cfa"
+      },
+      {
+        "file": "live/L-C-intake-3-sample_f53fb91094c34bd78ad2779d36d16105.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "ee2bf4d106fc7a36548d8bf06777dec53bf2f411de57bfe03b02f2282ae85d69"
+      },
+      {
+        "file": "live/L-A-semantic-1-sample_e5f7176a154b408fa678c939d696d78b.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "9ecc3742e5d72b68c196a4c0738139010531a63ae512349a562599190d09e6ee"
+      },
+      {
+        "file": "live/L-A-intake-1-sample_2c6455bdc9564246aa9bc8b0a5e4ee2e.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "ff7e18e83f91f2061b7631aea0ee8171dd28951b32855d4e46ef739754108499"
+      },
+      {
+        "file": "live/L-B-semantic-1-sample_acf88a43dbd0456d88c802a219f83ba5.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "c873f64d7a605ec4e110f81440e58c6f4f96f0297ad3e2cbaa9ad18b216a1c96"
+      },
+      {
+        "file": "live/L-B-intake-1-sample_8354f05729e8427893df47cdcca67c4c.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "f86fdeb2d420c554ab59625cdb362ba451bc33ede7a7cc89e9e7f5a37d8e94e4"
+      },
+      {
+        "file": "live/L-C-semantic-1-sample_e10d2c5367a847ed8a35a02b1f06086a.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "f8339de37d6ee5fd55c3d3f8ccb01b7228234ca6067aa3e05ff19a00917c7e56"
+      },
+      {
+        "file": "live/L-C-intake-1-sample_c368bf508ee342328b5beed73c201841.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "10adc43ac216bb8a6acb5cfe58c33b94b0c5fc913669bfacc2314f576e2f4fb9"
+      },
+      {
+        "file": "live/L-A-semantic-2-sample_0c0a33f8b05945be9573b49f016f1bcd.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "5e6a5ec489f71673eb7b0344727582ddded05e07e9b044c2cc2ba963bfc594fe"
+      },
+      {
+        "file": "live/L-A-intake-2-sample_3ca814b3816042a6ad6d715b42ed551e.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "245d06aa65bb7ff4732861f830fc367ad473f497880e7ad970bbd2933bc74482"
+      },
+      {
+        "file": "live/L-B-semantic-2-sample_73b26cda5c52484d94f441cb276eb175.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "db6dcb0eb7b238f8d28e1ca997be4cefff0532b44900c0c27222a2c6c4966fec"
+      },
+      {
+        "file": "live/L-B-intake-2-sample_a5f05cb2174a464092c9c0abbd43a6b1.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "failed",
+        "sha256": "04072cfe6cac289b9d56c114dda04fa03d467c6744c40b1927537b3bd985c05d"
+      },
+      {
+        "file": "live/L-C-semantic-2-sample_16a26ffb74824d8cb63a08b0dee03c4d.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "7c978940c2cb733627f6dae59c850b280e1b74ed6332d551756702dfe46f74f5"
+      },
+      {
+        "file": "live/L-C-intake-2-sample_3cbf3a3f69a04be2816f8e69297b2607.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "905c01a38c557759d9794cfdbdaacb76dd9e8d5566ea233d2b1322d0cbbce3db"
+      },
+      {
+        "file": "live/L-A-semantic-3-sample_b22c11facaf446fab89e719878d7d81d.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "1f540907ca54fcbc5bff5e83b803265bb23feade0439c23d36cd3e3e5bc96ffa"
+      },
+      {
+        "file": "live/L-A-intake-3-sample_cf28b77516d34117a3b5ab80b2ffd556.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "failed",
+        "sha256": "fd7a59f6a0c772145aa961aed755825f2f41b839039aa634a33026a4973762ae"
+      },
+      {
+        "file": "live/L-B-semantic-3-sample_19979622ca4a46c7804f3fc0df12f7d9.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "failed",
+        "sha256": "8b975d243b72a1e83c75432d32ef4057e62f9c781604b6944aaf93df0dea86c9"
+      },
+      {
+        "file": "live/L-B-intake-3-sample_9194dc5c92864ecd8fd68228aa34e74e.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "cdb1069ffb5f98766c7c4cc0b0cf1d4f82381dbb9737bf4a911f5db9c9527f9c"
+      },
+      {
+        "file": "live/L-C-semantic-3-sample_f796db59795b43d9b4e29ce94c32986a.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "a58d0aa25e51517d262fb044d415c1d2c01a1e432990c1d041dde6cdb45ff687"
+      },
+      {
+        "file": "live/L-C-intake-3-sample_04e6921270e64720b7343e7a2d71e4ae.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "27a4d6a9995f43722a372a3a84e02e1373cdd76340f1e0f8bd8412220654146b"
+      },
+      {
+        "file": "live/L-A-semantic-1-sample_00abe7bcf12048fdab1878c45362a6b8.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "e138dda9831b7d02b8ccd39b975b9ee8908cfa82ae558f45fa92006291483ab4"
+      },
+      {
+        "file": "live/L-A-intake-1-sample_521ec309f30845948d0a8ddb6d3c5008.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "a1ca2c83c3536b111a60c3f65f40cbcad777769bc91e3e07188db2b84a466ba5"
+      },
+      {
+        "file": "live/L-B-semantic-1-sample_22665b55319e48c9a9dbc1e4c431fd38.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "7868cd9d6d17febd8ff9ea49451b68c2aa29006b5914bc7915ce9c7fe5db69dc"
+      },
+      {
+        "file": "live/L-B-intake-1-sample_18b98ca4fadd42bb9feffd3a12dc2a78.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "c8b1e5f3b7dc558e2e955448da94dc6df7fd29b220541257bbe67860d7ea1e04"
+      },
+      {
+        "file": "live/L-C-semantic-1-sample_a5aa4b8ab384459db27caa64b0a84a06.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "721b22dbbed0c37411fb39f64762b174a3c6552fdce66bee124379e82ac9d70d"
+      },
+      {
+        "file": "live/L-C-intake-1-sample_021f50eb0fc44332bb2536164a99c219.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "ed42c0625e27f07b1a4085c2536006c1e03cf736928e5ff8a3b9b9507880023f"
+      },
+      {
+        "file": "live/L-A-semantic-2-sample_ac99ba9fb033412d995de9fb87c5fdb3.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "db952089318d43be7dc8fbe86021f22e3fc6595ebabe4b707d4baf8bce5d225c"
+      },
+      {
+        "file": "live/L-A-intake-2-sample_346ae23aebd34c8c90e4df6bae93ba86.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "0e300c95f9652d2f46160f82b5112acaa84c9665a23d987657d70ae1a542ed0a"
+      },
+      {
+        "file": "live/L-B-semantic-2-sample_f40793fe31ce49f4ae1f316bc8068494.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "f800ae4c7313956b917c0b6fe017b5752cb89b0e7ebfbcc52458a4f280e703c3"
+      },
+      {
+        "file": "live/L-B-intake-2-sample_b3a0a4cf842d4d2f817901f2801fa06e.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "6da9be3eaa3d1609469218db64031a4cb25eaad2b3b93db5a766d5a05e749882"
+      },
+      {
+        "file": "live/L-C-semantic-2-sample_9ed986d0fd824d608b4e0d489dc95cfc.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "d903d96199c5eae837db4cd78370da6e731f7c6bbe3e0a122bee54c1318ff955"
+      },
+      {
+        "file": "live/L-C-intake-2-sample_86dfe27d25df4ac89bee1f64727ca88e.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "d73d0dc6ec1000d6e2883e2bde678c6cf52f74a1d35f40c8f23c0e812a1ceeec"
+      },
+      {
+        "file": "live/L-A-semantic-3-sample_56413766c70a4e6fa000153e9dda49ef.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "95afb5b37202f0b0baf3b3ef4d4b310945507a86a88e980bda3775925eeabb7b"
+      },
+      {
+        "file": "live/L-A-intake-3-sample_f657b1aee99146adbeadcf7bb9a85355.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "098aa26ed65e8e6bd005c6bbaa0b595f7907ce83ec7deb388edd0a9257832b49"
+      },
+      {
+        "file": "live/L-B-semantic-3-sample_c6b36ce369b44854b453b93f6e5fa71d.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "c5c640b7a6dc9e45ca5ecc178060dcc9cb41a319c8259eca9a9a55a5054ad23a"
+      },
+      {
+        "file": "live/L-B-intake-3-sample_6f75488408e0468099541abeb1982e4c.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "c8f3537189ac7552249eacb8326aa8a36cb44eb5219ae2ce01f0defc6cb497f9"
+      },
+      {
+        "file": "live/L-C-semantic-3-sample_21dd237abe784657aa76fafdcf0f1bba.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "232fbc899589bef572f81427b9f79596b69618c8e2462061ff6a2e2a43741312"
+      },
+      {
+        "file": "live/L-C-intake-3-sample_9198c31e29564890a99de19cee683479.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "127163de03d4d3f7f449cfca92252a2f994a8b54685724858138a0cff13b2fea"
+      },
+      {
+        "file": "live/L-A-semantic-1-sample_3b20ff5bf2a64ceba4944f254d3e9679.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "32e406b104c5708c688b5c803f6651577f77ad08e4005810e981cb4053eaef93"
+      },
+      {
+        "file": "live/L-A-intake-1-sample_99649592b37d477fb081e5a96a70ea8f.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "d6cbbb968bcc0679d240b1d3005498c725b7a872fb4da9ec516c99fc90f45fb7"
+      },
+      {
+        "file": "live/L-B-semantic-1-sample_6375a81e36e24f0ab3232673eb3f30f6.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "30de44bb32967887c8f360c0b398b240be08a34f2fb32cbf57f922bd2d79b93b"
+      },
+      {
+        "file": "live/L-B-intake-1-sample_6cefc61e08df4ea9aabcd7cd3ec45509.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "2add0da5f3e1e2dacfb5b2600a73357ff8eef21113b55ea9b1d1b4fb189c2b2d"
+      },
+      {
+        "file": "live/L-C-semantic-1-sample_29719b4f33c44dffb938c8f4c18fce8a.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "373db3b18ccca540a76729821d32b6235cd38c119ec69e7f33751b65bee4fb6e"
+      },
+      {
+        "file": "live/L-C-intake-1-sample_c1a72727e19440b59f3a40d22e7548b3.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 1,
+        "outcome": "passed",
+        "sha256": "337f98bbdcbf240f6da71b549dc9ecffb5c6a16bd217604dd067276172ac6e95"
+      },
+      {
+        "file": "live/L-A-semantic-2-sample_5328970f3f8c49d4a1f57f4cd05336ff.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "8182d6c9c8a7dc19aaf745d2555fc6c7ee9499806237b4d4c89a520d8636b6d1"
+      },
+      {
+        "file": "live/L-A-intake-2-sample_f751cebeb53d49718c4be45dc7ce781c.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "9e5957e3972eae9ae5951c7428643a2e5cba476c83a67a058c2be7a2e80f4ad6"
+      },
+      {
+        "file": "live/L-B-semantic-2-sample_4e2ef5906ce0422f94ed057331a4b548.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "eafa13b5d7ca1efddc582b23bf3d05d4ee2fef1bde463029f2e4e936d475e4c6"
+      },
+      {
+        "file": "live/L-B-intake-2-sample_0798280cb19b438d98cf5cbf1e63393a.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "e87b82a18e8cbb6a4c5995cc28e1fdafe8507bea69a14d567008569552e4a261"
+      },
+      {
+        "file": "live/L-C-semantic-2-sample_03cd091d1dab44fb954d177c90f7c0b0.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "076c25d865a8f0f0ef55d7d0649f3a5da077585ce1922a0b5060317b35b86a63"
+      },
+      {
+        "file": "live/L-C-intake-2-sample_f5a4b658e1d7458cb94f4dac5e264699.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 2,
+        "outcome": "passed",
+        "sha256": "b2d718bf5484cf65ed8b957ee9b03d8f1182e47ef3f658df9c38bad55cb8e477"
+      },
+      {
+        "file": "live/L-A-semantic-3-sample_e475e9d02f0642918c0f8c5526688dc7.json",
+        "chain": "L-A",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "132ad2430c7e3504bd23512801b5ba2f80245f7d7ab4b7c14dbd15070a980afd"
+      },
+      {
+        "file": "live/L-A-intake-3-sample_ddc492d514114ee59df1625817358fca.json",
+        "chain": "L-A",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "66d3ff207e7aed6757512cba4fada80ab0e9743adeafbd6833d7fe0028f87b68"
+      },
+      {
+        "file": "live/L-B-semantic-3-sample_e7768e742657445eb0d08dc5e96a4647.json",
+        "chain": "L-B",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "a0956435020b210d35a11a7edbb9b8855a2ba2cdc801d6596e33598720c743ab"
+      },
+      {
+        "file": "live/L-B-intake-3-sample_462a12850a094a7e871596ae17904328.json",
+        "chain": "L-B",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "d1515a54712270b01c809acd2e3291a373757db4270e596a92d42ad0c1857bd3"
+      },
+      {
+        "file": "live/L-C-semantic-3-sample_16b942192b2f4ea7a76029a3a568e3ec.json",
+        "chain": "L-C",
+        "entrypoint": "semantic",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "d20c71b436069ba2a973551e4d86fcc0ed3781e588bae09324aebec56a36a475"
+      },
+      {
+        "file": "live/L-C-intake-3-sample_2f1d3e9459844070b0cf8c6295483336.json",
+        "chain": "L-C",
+        "entrypoint": "intake",
+        "repeat": 3,
+        "outcome": "passed",
+        "sha256": "cfd7c7be96384c9b33af2f604228dba1f2958adfef000107fc9cb74b6f8d2c0e"
+      }
+    ]
+  },
+  "new_orca_executions": 0,
+  "all_saved_run_bytes_unchanged": true
+}

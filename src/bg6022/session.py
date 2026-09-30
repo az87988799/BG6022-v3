@@ -267,6 +267,50 @@ def session_path(data_root: str | Path, session_id: str) -> Path:
 MAX_METADATA_FILE_BYTES = 4 * 1024 * 1024
 MAX_METADATA_TURN_BYTES = 16 * 1024 * 1024
 MAX_HISTORY_INDEX_BYTES = 8 * 1024 * 1024
+MAX_PENDING_QUERY_BYTES = 8192
+
+
+def _valid_pending_query(value, session_id):
+    if value is None:
+        return True
+    if not isinstance(value, dict):
+        return False
+    question, evidence = value.get("origin_question"), value.get("origin_evidence")
+    sources = value.get("source_bindings")
+    return (
+        value.get("schema") == "bg6022.pending_query.v1"
+        and value.get("session_id") == session_id
+        and isinstance(value.get("pending_id"), str)
+        and 1 <= len(value["pending_id"]) <= 80
+        and isinstance(question, str)
+        and 1 <= len(question) <= 240
+        and isinstance(evidence, str)
+        and evidence.strip()
+        and question.count(evidence) == 1
+        and isinstance(sources, list)
+        and len(sources) <= 3
+        and all(isinstance(s, dict) and s.get("session_id") == session_id for s in sources)
+        and isinstance(value.get("missing_slots"), list)
+        and len(value["missing_slots"]) <= 3
+        and all(
+            isinstance(s, str) and s in {"source", "property", "mode"}
+            for s in value["missing_slots"]
+        )
+        and isinstance(value.get("resolved_slots", {}), dict)
+        and set(value.get("resolved_slots", {})) <= {"mode"}
+        and value.get("resolved_slots", {}).get("mode", "read_existing") == "read_existing"
+        and all(
+            isinstance(value.get(key, []), list)
+            and len(value.get(key, [])) <= bound
+            and all(isinstance(v, str) and 1 <= len(v) <= 80 for v in value.get(key, []))
+            for key, bound in (("property_candidates", 6), ("search_terms", 4))
+        )
+        and (
+            value.get("property_hint") is None
+            or (isinstance(value["property_hint"], str) and 1 <= len(value["property_hint"]) <= 80)
+        )
+        and len(json.dumps(value, ensure_ascii=False).encode()) <= MAX_PENDING_QUERY_BYTES
+    )
 
 
 def new_metadata_budget(cancel=None):
@@ -280,6 +324,14 @@ def new_metadata_budget(cancel=None):
 
 
 def read_metadata_json(path, budget, *, max_file_bytes=MAX_METADATA_FILE_BYTES):
+    try:
+        return _read_metadata_json(path, budget, max_file_bytes=max_file_bytes)
+    except ArtifactReadError as error:
+        budget["diagnostic"] = error.category
+        raise
+
+
+def _read_metadata_json(path, budget, *, max_file_bytes):
     """Bound every metadata read before decoding, with a shared turn allowance."""
     check_read_deadline(budget["cancel"], budget["deadline"])
     path = Path(path)
@@ -422,6 +474,8 @@ def save_session(data_root: str | Path, session_id: str, payload: dict[str, Any]
     """Persist only bounded conversational context, never full ORCA output."""
 
     bounded = dict(payload)
+    if not _valid_pending_query(bounded.get("pending_query"), session_id):
+        raise ArtifactReadError("pending_query_invalid")
     messages = bounded.get("recent_messages")
     if isinstance(messages, list):
         bounded["recent_messages"] = messages[-12:]
@@ -468,6 +522,9 @@ def load_session(data_root: str | Path, session_id: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"session file is not a JSON object: {path}")
     payload.setdefault("run_history", [])
+    if not _valid_pending_query(payload.get("pending_query"), session_id):
+        payload.pop("pending_query", None)
+        payload["history_diagnostic"] = "pending_query_invalid"
     return payload
 
 

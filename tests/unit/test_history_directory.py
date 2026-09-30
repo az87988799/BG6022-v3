@@ -5,6 +5,30 @@ from threading import Event
 import pytest
 
 
+def test_directory_lists_more_than_six_raw_attempts_and_marks_default_limit(tmp_path):
+    """F-R10: directory expansion cannot silently discard the seventh source."""
+    import json
+
+    from test_orca_output_query import saved_output
+    from test_output_reports import agent_with_output
+
+    from bg6022.planner import CatalogRequest
+
+    agent, run, root = agent_with_output(tmp_path)
+    for attempt in range(2, 9):
+        saved_output(root, run=run, attempt=attempt)
+    catalog = agent._build_query_catalog()
+    assert len([e for e in catalog if e.get("access") == "raw_output"]) == 6
+    assert agent._query_catalog_limited
+    agent._answer_catalog(CatalogRequest(view="sources"))
+    source_ref = next(iter(agent._catalog_sources))
+    response = agent._answer_catalog(CatalogRequest(view="properties", source_ref=source_ref))
+    payload = json.loads(response.text.split("\n", 1)[1])
+    assert payload["complete"] and payload["status"] == "ok"
+    raw = [e for e in payload["items"] if e.get("access") == "raw_output"]
+    assert {e["step"]["attempt"] for e in raw} == set(range(1, 9))
+
+
 def test_history_index_keeps_runs_outside_recent_window(tmp_path):
     from test_orca_output_query import saved_output
 

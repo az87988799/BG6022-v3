@@ -1,0 +1,25 @@
+{
+  "checked_reference": "Git staging index before commit",
+  "baseline_commit": "4d558556173285fe082bd0c029cae3a7d23b36c4",
+  "fixture_groups": [
+    {
+      "source_kind": "repository_fixture",
+      "run_id": "run_ccf36fa371ab475f86464c160f53f18b",
+      "files_checked": 15
+    },
+    {
+      "source_kind": "user_run_copy",
+      "run_id": "run_7f9df59c898049fa99bc949ac7ff316e",
+      "files_checked": 13
+    }
+  ],
+  "fixture_blobs_checked": 28,
+  "live_receipts_checked": 128,
+  "staged_sha256_matches_manifests": true,
+  "staged_bytes_match_working_copy": true,
+  "production_python_files": 10,
+  "production_prompts": 3,
+  "scientific_implementation_files_unchanged": true,
+  "unrelated_files_not_staged": true,
+  "staged_diff_check_exit_code": 0
+}

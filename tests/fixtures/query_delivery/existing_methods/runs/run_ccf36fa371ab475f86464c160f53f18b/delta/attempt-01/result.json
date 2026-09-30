@@ -1,0 +1,47 @@
+{
+  "artifact_ids": [],
+  "attempt": 1,
+  "attempt_relative_path": "delta/attempt-01",
+  "checks": {},
+  "clarification": {},
+  "diagnostics": {
+    "category": null,
+    "charge": 0,
+    "direction": "B - A",
+    "geometry_sha256": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2",
+    "method_a": "r2scan3c",
+    "method_b": "pbe0_d3bj_def2svp",
+    "multiplicity": 1
+  },
+  "input_artifact_ids": [
+    "artifact_ddca26d2f9794632a97c1acd8708e894",
+    "artifact_3d19107dfabd40fcafcb05f3158471ba"
+  ],
+  "input_bindings": {
+    "energy_a": "artifact_ddca26d2f9794632a97c1acd8708e894",
+    "energy_b": "artifact_3d19107dfabd40fcafcb05f3158471ba"
+  },
+  "output_ports": {},
+  "parameter_sources": {},
+  "run_id": "run_ccf36fa371ab475f86464c160f53f18b",
+  "scientific_checks": {},
+  "status": "succeeded",
+  "step_fingerprint": "17d3c16b0c9a26322bd5d3a054e414ef8d36239cd4e5255912f5b3e5cab9046f",
+  "step_id": "delta",
+  "values": {
+    "method_energy_difference": {
+      "charge": 0,
+      "direction": "B - A",
+      "geometry_sha256": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2",
+      "input_energy_artifact_ids": [
+        "artifact_ddca26d2f9794632a97c1acd8708e894",
+        "artifact_3d19107dfabd40fcafcb05f3158471ba"
+      ],
+      "method_a": "r2scan3c",
+      "method_b": "pbe0_d3bj_def2svp",
+      "multiplicity": 1,
+      "unit": "Eh",
+      "value": 0.14245175194299975
+    }
+  }
+}

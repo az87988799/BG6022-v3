@@ -22,11 +22,14 @@ from bg6022.output_contracts import public_source_context, resolve_output_select
 from bg6022.output_query import normalize_report_queries, validate_raw_query_targets
 from bg6022.planner import (
     IntentItem,
+    QueryClarification,
     QuerySelection,
     QueryTarget,
     _bounded_context,
     load_prompt,
+    normalize_query_goals,
     validate_intent_items,
+    validate_query_context,
 )
 from bg6022.tools.orca_output import OutputQuerySpec
 from bg6022.tools.registry import ToolRegistry
@@ -205,10 +208,13 @@ class SemanticProposal(SemanticModel):
     modification: TaskModification | None = None
     query_selection: QuerySelection | None = None
     clarification: StrictStr | None = None
+    query_clarification: QueryClarification | None = None
     unsupported_requirements: list[StrictStr] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _mode_contract(self) -> SemanticProposal:
+        if self.query_clarification is not None and self.mode != "clarify":
+            raise ValueError("query_clarification is only valid for clarify mode")
         if self.mode == "compute" and not self.tasks:
             raise ValueError("compute requires at least one task")
         if self.mode == "modify" and self.modification is None:
@@ -330,6 +336,7 @@ def compact_result_catalog(catalog: list[Mapping[str, Any]]) -> list[dict[str, A
                         "recent_queries",
                         "source_ref",
                         "catalog_next_cursor",
+                        "catalog_limit",
                     )
                     if key in item
                 },
@@ -361,6 +368,7 @@ def semantic_schema(
     pending_tasks: list[Mapping[str, Any]] | None = None,
     message: str | None = None,
     geometry_catalog: list[Mapping[str, Any]] | None = None,
+    pending_query: Mapping[str, Any] | None = None,
 ) -> type[BaseModel]:
     """Create a strict response type whose task names match current Tools."""
 
@@ -405,7 +413,11 @@ def semantic_schema(
             }
         )
         if invalid:
-            raise ValueError(f"query subject/property pairs are outside this catalog: {invalid}")
+            raise ValueError(
+                f"query subject/property pairs are outside this catalog: {invalid}; "
+                "raw targets must use property=orca_output, with the scientific goal in "
+                "queries[].property_hint; readonly observations use their advertised property"
+            )
         return value
 
     selection_type = create_model(
@@ -417,6 +429,14 @@ def semantic_schema(
     )
 
     def _catalog_contract(value: SemanticProposal) -> SemanticProposal:
+        if message is not None:
+            value.query_selection = normalize_query_goals(value.query_selection, value.intent_items)
+            selection = value.query_selection
+            if value.query_clarification is not None:
+                selection = QuerySelection(
+                    status="clarify", clarification_context=value.query_clarification
+                )
+            validate_query_context(selection, message, result_catalog or [], pending_query)
         if geometry_catalog is not None:
             aliases = {item.get("alias") for item in geometry_catalog}
             for subject in value.subjects:
@@ -453,8 +473,9 @@ def semantic_schema(
                 message,
                 value.tasks,
                 registry=registry,
-                query_selection=value.query_selection,
+                query_selection=selection,
                 result_catalog=result_catalog or [],
+                knowledge_only=value.mode == "qa",
             )
         if value.modification is not None:
             pending = pending_by_ref.get(value.modification.target_task_ref)
@@ -480,6 +501,12 @@ def semantic_schema(
                 if "method_profile" not in target_tool.request_parameters:
                     raise ValueError("selected Tool does not accept methods")
         if value.query_selection is not None:
+            if message is not None:
+                validate_raw_query_targets(
+                    [t.model_dump(mode="json") for t in value.query_selection.targets],
+                    message,
+                    result_catalog or [],
+                )
             if (
                 value.query_selection.status == "selected"
                 and not candidate_refs
@@ -511,6 +538,7 @@ def semantic_message(
     geometry_catalog: list[Mapping[str, Any]] | None = None,
     validation_feedback: str | None = None,
     cancel: Any = None,
+    pending_query: Mapping[str, Any] | None = None,
 ) -> SemanticProposal:
     if not message.strip():
         raise ValueError("message must not be empty")
@@ -546,6 +574,7 @@ def semantic_message(
         pending_tasks=tasks,
         message=message,
         geometry_catalog=geometry_catalog or [],
+        pending_query=pending_query,
     )
     example = {
         "mode": "compute",
@@ -591,6 +620,7 @@ def semantic_message(
                         "message": model_message,
                         "recent_context": context,
                         "pending_tasks": tasks,
+                        "pending_query": dict(pending_query) if pending_query else None,
                         "result_catalog": results,
                         "geometry_catalog": geometry_catalog or [],
                         "tool_catalog": compact_tool_catalog(registry),

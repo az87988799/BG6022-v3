@@ -7,12 +7,64 @@ from typing import Any
 
 import httpx
 import pytest
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from bg6022.config import LlmSettings
 from bg6022.llm import LlmClient, LlmError
 from bg6022.planner import intake_message
 from bg6022.tools.registry import build_registry
+
+
+@pytest.mark.parametrize("correction_succeeds", [True, False])
+def test_electron_schema_diagnostics_are_redacted_bounded_and_keep_both_calls(
+    monkeypatch, correction_succeeds
+):
+    """N31/N32: actual HTTP mock, first and correction call, no credential echo."""
+    import hashlib
+
+    secret = "synthetic-private-token-123456"
+    monkeypatch.setenv("DIAGNOSTIC_TEST_TOKEN", secret)
+
+    class ElectronAnswer(BaseModel):
+        count: int
+
+        @field_validator("count")
+        @classmethod
+        def valid_count(cls, value):
+            if value < 0:
+                raise ValueError(
+                    f"bad electron count {secret}; Bearer synthetic-bearer; " + "x" * 900
+                )
+            return value
+
+    bad = json.dumps({"count": -1, "private": secret})
+    good = '{"count": 10}' if correction_succeeds else bad
+    llm, requests, http_client = _offline_client(
+        [_response(body, finish_reason="stop", usage={}) for body in (bad, good)],
+        structured_output_corrections=1,
+    )
+    captured = []
+    llm._response_recorder = captured.append
+    try:
+        if correction_succeeds:
+            assert llm.complete_json([], ElectronAnswer, purpose="electron-query").count == 10
+        else:
+            with pytest.raises(LlmError) as raised:
+                llm.complete_json([], ElectronAnswer, purpose="electron-query")
+            assert raised.value.category == "schema_error" and raised.value.diagnostics
+        assert len(requests) == len(llm.calls) == len(captured) == 2
+        assert [call.structured_correction_count for call in llm.calls] == [0, 1]
+        assert llm.calls[0].response_sha256 == hashlib.sha256(bad.encode()).hexdigest()
+        assert llm.calls[0].schema_errors[0]["path"] == "count"
+        assert llm.calls[0].schema_errors[0]["error_type"] == "value_error"
+        assert all(len(error["message"]) <= 512 for c in llm.calls for error in c.schema_errors)
+        diagnostics = json.dumps([c.schema_errors for c in llm.calls])
+        feedback = requests[1]["messages"][-1]["content"]
+        for value in (diagnostics, feedback, json.dumps(captured)):
+            assert secret not in value and "synthetic-bearer" not in value
+        assert "[REDACTED]" in diagnostics and "count" in feedback
+    finally:
+        http_client.close()
 
 
 class _Answer(BaseModel):

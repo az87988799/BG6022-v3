@@ -24,8 +24,8 @@ def _raw_label(value: Any) -> str:
     return re.sub(r"([\\`*_{}\[\]()<>#!|])", r"\\\1", visible_text(str(value)))
 
 
-def render_output_evidence(reports: Sequence[Mapping[str, Any]]) -> str:
-    lines = ["ORCA 原文证据（文本命中不代表已通过性质或最终科学状态校验）："]
+def render_output_evidence(reports: Sequence[Mapping[str, Any]], *, detail="normal") -> str:
+    lines = []
     reasons = {
         "invalid_source": "所选来源无法核验",
         "missing_file": "来源文件缺失",
@@ -38,33 +38,73 @@ def render_output_evidence(reports: Sequence[Mapping[str, Any]]) -> str:
         "cancelled": "原文查询已取消",
     }
     for report in reports:
-        lines.append(
-            f"任务：{_raw_label(report.get('task_description', '指定任务'))}；"
-            f"来源状态：{_raw_label(report.get('source_status', '未知'))}；"
-            f"Step：{_raw_label(report.get('source_step_id', '未知'))} / "
-            f"attempt {report.get('attempt', '?')}。"
-        )
         if report.get("is_current_attempt") is False:
             lines.append("这是历史 attempt 的原文，不能代替当前科学结果。")
         if report.get("source_status") not in {None, "succeeded"}:
             lines.append("来源计算未成功；以下仅为失败或取消来源的原文。")
-        if "artifact_id" in report:
+        if detail == "full" and "artifact_id" in report:
             lines.append(
                 f"Run：{_raw_label(report['run_id'])}；"
                 f"Artifact：{_raw_label(report['artifact_id'])}；"
                 f"SHA-256：{_raw_label(report['artifact_sha256'])}。"
             )
-        if report.get("file_path"):
-            lines.append(f"文件：{_raw_label(report['file_path'])}")
+        if detail == "full" and report.get("file_path"):
+            lines.append(f"文件：{visible_text(report['file_path'])}")
         for index, query in enumerate(report["queries"]):
-            lines.append(f"问题：{_raw_label(query['evidence'])}")
             item = next((e for e in report.get("evidence", []) if e["query_index"] == index), {})
             if report.get("error"):
                 lines.append(reasons.get(report["error"], "所选来源无法核验") + "；该报告未交付。")
                 continue
             if item.get("lookup_status") != "found":
                 lines.append("本次受限搜索未找到相关片段或片段预算已耗尽；该报告未交付。")
-            for snippet in item.get("snippets", []):
+            observations = item.get("observations", [])
+            labels = {
+                "dipole_moment": "偶极矩大小",
+                "homo_energy": "HOMO 轨道能量",
+                "lumo_energy": "LUMO 轨道能量",
+                "homo_lumo_gap": "HOMO–LUMO 轨道能隙",
+            }
+            for observation in observations:
+                hint, token, unit = (observation.get(k) for k in ("property_hint", "token", "unit"))
+                if hint == "chemical_total_electrons":
+                    operands = observation["operands"]
+                    lines.append(f"由当前体系组成和总电荷计算得到总电子数 {token}。")
+                    lines.append(
+                        f"计数：ΣZ − q = {sum(operands['atomic_numbers'])} "
+                        f"− ({operands['charge']}) = {token}。"
+                    )
+                else:
+                    label = labels.get(hint, observation.get("definition") or hint)
+                    lines.append(f"该次 ORCA 输出报告：{label}为 {token} {unit}。")
+                    if observation.get("formula"):
+                        lines.append("由同一轨道表的 LUMO − HOMO 得到；这不是激发能。")
+            if observations and item.get("binding_status") != "selected_stage":
+                lines.append(
+                    "目前没有足够证据把该段落独立绑定到最终优化结构；仅交付输出中的数值记录。"
+                )
+            if (
+                query.get("property_hint")
+                and not observations
+                and item.get("lookup_status") == "found"
+            ):
+                lines.append("找到了相关原文，但没有可可靠交付的所问数值；未新增计算。")
+            if item.get("search_status") == "limited":
+                lines.append("搜索范围受到限制：" + "、".join(item.get("limitations", [])) + "。")
+            context = report.get("source_context", {})
+            source = " / ".join(
+                str(context.get(k, "未知"))
+                for k in ("subject_label", "method_label", "operation_label")
+            )
+            sections = list(dict.fromkeys(o.get("section", "组成与电荷") for o in observations))
+            lines.append(
+                f"来源：{_raw_label(source)} / attempt {report.get('attempt', '?')}"
+                + ("，" + "、".join(sections) if sections else "，原文证据")
+                + "。"
+            )
+            if observations and query.get("property_hint") != "chemical_total_electrons":
+                lines.append("这是只读观察，尚未作为独立的正式科学性质发布。")
+            snippets = item.get("snippets", []) if detail == "full" or not observations else []
+            for snippet in snippets:
                 lines.append(f"原文第 {snippet['start_line']}–{snippet['end_line']} 行：")
                 fence = "`" * max(
                     3,
@@ -82,7 +122,7 @@ def render_output_evidence(reports: Sequence[Mapping[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def combine_output_reports(text, delivery, reports):
+def combine_output_reports(text, delivery, reports, *, detail="normal"):
     if not reports:
         return text, delivery
     merged = dict(delivery)
@@ -91,7 +131,10 @@ def combine_output_reports(text, delivery, reports):
         not r.get("error")
         and len(r.get("evidence", [])) == len(r["queries"])
         and all(
-            e["lookup_status"] == "found" and not e.get("truncated") and not e.get("ambiguous")
+            e.get(
+                "required_scope_complete",
+                e["lookup_status"] == "found" and not e.get("truncated") and not e.get("ambiguous"),
+            )
             for e in r["evidence"]
         )
         for r in reports
@@ -110,7 +153,28 @@ def combine_output_reports(text, delivery, reports):
         }
     )
     merged.setdefault("outputs", [])
-    return "\n".join(part for part in [text, render_output_evidence(reports)] if part), merged
+    merged["report_goals"] = [
+        {
+            "question": q["evidence"],
+            "property_hint": q.get("property_hint"),
+            "status": "complete"
+            if next(
+                (
+                    e.get("required_scope_complete", False)
+                    for e in r.get("evidence", [])
+                    if e["query_index"] == i
+                ),
+                False,
+            )
+            and not r.get("error")
+            else "partial",
+        }
+        for r in reports
+        for i, q in enumerate(r["queries"])
+    ]
+    return "\n".join(
+        part for part in [text, render_output_evidence(reports, detail=detail)] if part
+    ), merged
 
 
 _SUBSCRIPT_DIGITS = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
@@ -368,7 +432,7 @@ def _render_public_output(
     else:
         value = fact.get("value")
         if view == "json" or (view == "code" and isinstance(value, (dict, list))):
-            body = f"{label}：\n```json\n{json.dumps(value, ensure_ascii=False, indent=2)}\n```"
+            body = f"{label}：\n```json\n{json.dumps(value, ensure_ascii=False)}\n```"
         elif view == "table":
             body = (
                 _render_record_value(

@@ -1,0 +1,169 @@
+{
+  "artifact_ids": [
+    "artifact_58fa43304c244bf49ac03b1dda045973",
+    "artifact_ea3c2481689149db82d4f67918181032",
+    "artifact_851d00cb77c345cdbe4c8fd1f541356c",
+    "artifact_dfd8dd480b944c158357e14d3f792c30",
+    "artifact_ddca26d2f9794632a97c1acd8708e894"
+  ],
+  "attempt": 1,
+  "attempt_relative_path": "sp_a/attempt-01",
+  "checks": {
+    "exit_code_zero": true,
+    "final_energy_selected": true,
+    "finite_final_energy": true,
+    "input_hashes_match": true,
+    "normal_termination": true,
+    "process_tree_empty": true,
+    "runner_succeeded": true,
+    "scf_converged": true,
+    "stderr_within_size_limit": true,
+    "stdout_valid_utf8": true,
+    "stdout_within_size_limit": true
+  },
+  "clarification": {},
+  "diagnostics": {
+    "category": null,
+    "facts": {
+      "diagnostics": [],
+      "effective_geom_maxiter": null,
+      "effective_geom_maxiter_error": null,
+      "effective_geom_maxiter_source": null,
+      "effective_scf_maxiter": null,
+      "energies": [
+        {
+          "error": null,
+          "label": "FINAL SINGLE POINT ENERGY",
+          "line": 788,
+          "offset": 41087,
+          "token": "-76.417246084177",
+          "valid": true,
+          "value": -76.417246084177
+        }
+      ],
+      "error_category": null,
+      "exit_code": 0,
+      "final_energy": {
+        "error": null,
+        "label": "FINAL SINGLE POINT ENERGY",
+        "line": 788,
+        "offset": 41087,
+        "token": "-76.417246084177",
+        "valid": true,
+        "value": -76.417246084177
+      },
+      "final_energy_error": null,
+      "frequency_section": null,
+      "geometry_consistent": null,
+      "geometry_mismatch_reason": null,
+      "hessian_dimension": null,
+      "hessian_error": null,
+      "hessian_present": false,
+      "hessian_valid": null,
+      "input_hash_error": null,
+      "input_hashes_match": true,
+      "last_opt_cycle": null,
+      "normal_marker_count": 1,
+      "normal_termination": true,
+      "operation": "SP",
+      "opt_iteration_limit_reached": null,
+      "optimization_converged": null,
+      "orca_version": "6.1.1",
+      "output_geometry": null,
+      "output_geometry_error": null,
+      "output_xyz_exists": false,
+      "process_tree_empty": true,
+      "runner_status": "succeeded",
+      "scf_converged": true,
+      "scf_iteration_limit_reached": false,
+      "scf_near_converged": null,
+      "source_locations": {
+        "effective_geom_maxiter": null,
+        "effective_geom_maxiter_source": null,
+        "energy": [
+          788
+        ],
+        "final_energy": 788,
+        "final_energy_section": 1,
+        "final_scf": 582,
+        "normal_termination": 989,
+        "opt_iteration_limit": null,
+        "optimization_converged": null,
+        "scf_iteration_limit": null,
+        "unbound_scf": null
+      },
+      "stderr_preview": "",
+      "stderr_size_exceeded": false,
+      "stdout_geometry": null,
+      "stdout_geometry_error": null,
+      "stdout_preview": "that in some instances\r\nORCA just re-implements algorithms worked out by others. We are fully aware of that and we are also\r\nfully appreciative of our colleagues work. Hence this citation list should not be read as indicating\r\nthat the listed papers, which are focused on our own work, are the only ones worth citing. It simply\r\nmeant to make it easier for users to cite ORCA specific papers. It is not a substitute for doing your\r\nown literature research and citing the relevant literature in a scientifically appropriate manner.\r\n\r\nList of essential papers. We consider these as the minimum necessary citations\r\n\r\n  1. Grimme, S.; Hansen, A.; Ehlert, S.; Mewes, J.\r\n     r2SCAN-3c: A 'Swiss army knife' composite electronic-structure method\r\n     J. Chem. Phys. 2021 154 , 064103\r\n     doi.org/10.1063/5.0040021\r\n  2. Neese, F.\r\n     Software update: the ORCA program system, version 6.0\r\n     WIRES Comput. Molec. Sci. 2025 15(1), e70019\r\n     doi.org/10.1002/wcms.70019\r\n\r\nList of papers to cite with high priority. The work reported in these papers was absolutely\r\nnecessary for this run to complete.\r\nOur perspective: the developers of density functionals and basis sets usually get cited in chemistry papers\r\nGood! But without the algorithms to do something with them, the functionals or basis sets would not do anything.\r\nHence, in our opinion, the algorithm design and method developments papers are equally worthy of getting cited\r\n\r\n  1. Neese, F.\r\n     An improvement of the resolution of the identity approximation for the formation of the Coulomb matrix\r\n     J. Comp. Chem. 2003 24(14), 1740-1747\r\n     doi.org/10.1002/jcc.10318\r\n  2. Caldeweyher, E.; Bannwarth, C.; Grimme, S.\r\n     Extension of the D3 dispersion coefficient model\r\n     J. Chem. Phys. 2017 147 , 034112\r\n     doi.org/10.1063/1.4993215\r\n  3. Lehtola, S.; Steigemann, C.; Oliveira, M.; Marques, M.\r\n     Recent developments in Libxc - A comprehensive library of functionals for density functional theory\r\n     Software X 2018 7 , \r\n     doi.org/10.1016/j.softx.2017.11.002\r\n  4. Caldeweyher, E.; Ehlert, S.; Hansen, A.; Neugebauer, H.; Spicher, S.; Bannwarth, C.; Grimme, S.\r\n     A generally applicable atomic-charge dependent London dispersion correction\r\n     J. Chem. Phys. 2019 150 , 154122\r\n     doi.org/10.1063/1.5090222\r\n  5. Neese, F.\r\n     The SHARK Integral Generation and Digestion System\r\n     J. Comp. Chem. 2022 44(3), 381\r\n     doi.org/10.1002/jcc.26942\r\n\r\nList of suggested additional citations. These are papers that are important in the 'surrounding' of \r\nof this run, or papers that preceded the highly important papers. If you like your results we are grateful for a citation.\r\n\r\n  1. Neese, F.\r\n     The ORCA program system\r\n     WIRES Comput. Molec. Sci. 2012 2(1), 73-78\r\n     doi.org/10.1002/wcms.81\r\n  2. Neese, F.\r\n     Software update: the ORCA program system, version 4.0\r\n     WIRES Comput. Molec. Sci. 2018 8(1), 1-6\r\n     doi.org/10.1002/wcms.1327\r\n  3. Neese, F.; Wennmohs, F.; Becker, U.; Riplinger, C.\r\n     The ORCA quantum chemistry program package\r\n     J. Chem. Phys. 2020 152(22), 224108\r\n     doi.org/10.1063/5.0004608\r\n  4. Neese, F.\r\n     Software update: The ORCA program system—Version 5.0\r\n     WIRES Comput. Molec. Sci. 2022 12(1), e1606\r\n     doi.org/10.1002/wcms.1606\r\n\r\nList of optional additional citations\r\n\r\n  1. Neese, F.\r\n     Approximate second-order SCF convergence for spin unrestricted wavefunctions\r\n     Chem. Phys. Lett. 2000 325(1-3), 93-98\r\n     doi.org/10.1016/s0009-2614(00)00662-x\r\n\r\nTimings for individual modules:\r\n\r\nSum of individual times          ...        3.094 sec (=   0.052 min)\r\nStartup calculation              ...        0.387 sec (=   0.006 min)  12.5 %\r\nSCF iterations                   ...        2.511 sec (=   0.042 min)  81.2 %\r\nProperty calculations            ...        0.196 sec (=   0.003 min)   6.3 %\r\n                             ****ORCA TERMINATED NORMALLY****\r\nTOTAL RUN TIME: 0 days 0 hours 0 minutes 3 seconds 910 msec\r\n",
+      "stdout_size_exceeded": false,
+      "stdout_valid_utf8": true,
+      "stop_reason": "normal_exit"
+    },
+    "input_hashes": {
+      "actual_geometry": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2",
+      "actual_input": "57ba5323cb7e48a2812178ce53803fc1e09a48eccb2c8f5e3aa6b23a11dab299",
+      "expected_geometry": "c4dd083de426421a719338bd0f0e17dc1057a88982e8cf245fb115556525ffd2",
+      "expected_input": "57ba5323cb7e48a2812178ce53803fc1e09a48eccb2c8f5e3aa6b23a11dab299",
+      "match": true
+    },
+    "observed_energy": {
+      "error": null,
+      "label": "FINAL SINGLE POINT ENERGY",
+      "line": 788,
+      "offset": 41087,
+      "token": "-76.417246084177",
+      "valid": true,
+      "value": -76.417246084177
+    },
+    "process": {
+      "cleanup_error": null,
+      "cleanup_unconfirmed": false,
+      "exception": null,
+      "exit_code": 0,
+      "pid": 57560,
+      "platform_supported": true,
+      "process_created_at": 13434630948.352594,
+      "process_tree_empty": true,
+      "status": "succeeded",
+      "stderr_path": "E:\\BG6022-v3-data\\runs\\run_ccf36fa371ab475f86464c160f53f18b\\sp_a\\attempt-01\\stderr.txt",
+      "stdout_path": "E:\\BG6022-v3-data\\runs\\run_ccf36fa371ab475f86464c160f53f18b\\sp_a\\attempt-01\\stdout.out",
+      "stop_confirmed": true,
+      "stop_reason": "normal_exit",
+      "stop_request_sent": false
+    },
+    "raw_paths": {
+      "attempt": "E:\\BG6022-v3-data\\runs\\run_ccf36fa371ab475f86464c160f53f18b\\sp_a\\attempt-01",
+      "geometry": "E:\\BG6022-v3-data\\runs\\run_ccf36fa371ab475f86464c160f53f18b\\sp_a\\attempt-01\\geometry.xyz",
+      "hessian": "E:\\BG6022-v3-data\\runs\\run_ccf36fa371ab475f86464c160f53f18b\\sp_a\\attempt-01\\input.hess",
+      "input": "E:\\BG6022-v3-data\\runs\\run_ccf36fa371ab475f86464c160f53f18b\\sp_a\\attempt-01\\input.inp",
+      "stderr": "E:\\BG6022-v3-data\\runs\\run_ccf36fa371ab475f86464c160f53f18b\\sp_a\\attempt-01\\stderr.txt",
+      "stdout": "E:\\BG6022-v3-data\\runs\\run_ccf36fa371ab475f86464c160f53f18b\\sp_a\\attempt-01\\stdout.out"
+    },
+    "reason": null
+  },
+  "input_artifact_ids": [
+    "artifact_1539c5775f2147318b5460cdfd66b9bc"
+  ],
+  "input_bindings": {
+    "geometry": "artifact_1539c5775f2147318b5460cdfd66b9bc"
+  },
+  "output_ports": {
+    "energy_data": "artifact_ddca26d2f9794632a97c1acd8708e894"
+  },
+  "parameter_sources": {},
+  "run_id": "run_ccf36fa371ab475f86464c160f53f18b",
+  "scientific_checks": {},
+  "status": "succeeded",
+  "step_fingerprint": "7a62c71c560f1d9ea1f8d604a5d5f098ee9536fe40f44359716b22cc296563df",
+  "step_id": "sp_a",
+  "values": {
+    "sp_electronic_energy": {
+      "source_line": 788,
+      "token": "-76.417246084177",
+      "unit": "Eh",
+      "value": -76.417246084177
+    }
+  }
+}
